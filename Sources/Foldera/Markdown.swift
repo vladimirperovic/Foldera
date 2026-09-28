@@ -128,7 +128,9 @@ enum Markdown {
             }
             // Paragraph, or a setext heading when underlined.
             var text: [String] = []
-            while let next = lines.first, !isBlank(next), text.isEmpty || !startsBlock(next) {
+            while let next = lines.first, !isBlank(next) {
+                // An underline is looked for before anything else: "---" under
+                // a line of text makes it a heading, not a rule.
                 if !text.isEmpty, let underline = match(#"^ {0,3}(=+|-+) *$"#, next) {
                     lines.removeFirst()
                     let level = underline[1].hasPrefix("=") ? 1 : 2
@@ -136,6 +138,7 @@ enum Markdown {
                     text = []
                     break
                 }
+                if !text.isEmpty && startsBlock(next) { break }
                 text.append(next)
                 lines.removeFirst()
             }
@@ -250,12 +253,15 @@ enum Markdown {
 
     static func inline(_ source: String) -> String {
         // Code spans first, kept aside so nothing inside them is formatted.
+        // Each is marked by a number between two NULs; a NUL in the file
+        // itself becomes U+FFFD first (as a browser would show it), so the
+        // text can never pass for a mark.
         var kept: [String] = []
         func keep(_ html: String) -> String {
             kept.append(html)
-            return "\u{E000}\(kept.count - 1)\u{E001}"
+            return "\u{0}\(kept.count - 1)\u{0}"
         }
-        var text = replace(source, #"(`+)(.+?)\1"#) { keep("<code>\(escape($0[2].trimmingCharacters(in: .whitespaces)))</code>") }
+        var text = replace(source.replacingOccurrences(of: "\u{0}", with: "\u{FFFD}"), #"(`+)(.+?)\1"#) { keep("<code>\(escape($0[2].trimmingCharacters(in: .whitespaces)))</code>") }
         text = replace(text, #"\\([\\`*_{}\[\]()#+\-.!|~<>])"#) { keep(escape($0[1])) }
         text = escape(text)
         text = replace(text, #"!\[([^\]]*)\]\(([^)\s]+)(?: &quot;([^&]*)&quot;)?\)"#) {
@@ -269,7 +275,7 @@ enum Markdown {
         text = replace(text, #"(?<![\w*])\*(?=\S)(.+?)(?<=\S)\*(?!\*)"#) { "<em>\($0[1])</em>" }
         text = replace(text, #"(?<![\w_])_(?=\S)(.+?)(?<=\S)_(?![\w_])"#) { "<em>\($0[1])</em>" }
         text = replace(text, #"~~(?=\S)(.+?)(?<=\S)~~"#) { "<del>\($0[1])</del>" }
-        return replace(text, "\u{E000}(\\d+)\u{E001}") { kept[Int($0[1]) ?? 0] }
+        return replace(text, #"\x00(\d+)\x00"#) { Int($0[1]).flatMap { kept.indices.contains($0) ? kept[$0] : nil } ?? "" }
     }
 
     // MARK: Page
@@ -458,6 +464,45 @@ final class MarkdownTextView: NSScrollView {
     required init?(coder: NSCoder) { fatalError("not used") }
 }
 
+/// Reading and saving a Markdown file without losing anyone's changes:
+/// what another app wrote since the file was read is not overwritten unasked.
+enum TextFile {
+    enum Conflict { case overwrite, reload, cancel }
+
+    static func read(_ url: URL) -> String? {
+        (try? String(contentsOf: url, encoding: .utf8)) ?? (try? String(contentsOf: url, encoding: .isoLatin1))
+    }
+
+    /// When the file last changed on disk (a fresh URL, since a URL keeps what it has read).
+    static func version(of url: URL) -> Date? {
+        try? URL(fileURLWithPath: url.path).resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate
+    }
+
+    /// Compare contents too: an external writer can preserve the modification date.
+    static func hasChanged(_ url: URL, since saved: String?) -> Bool { read(url) != saved }
+
+    static func write(_ text: String, to url: URL) throws {
+        try FileOps.refuseInArchive([url])
+        try text.write(to: url, atomically: true, encoding: .utf8)
+    }
+
+    static func checkBeforeSaving(_ url: URL, saved: String?) -> Conflict {
+        guard hasChanged(url, since: saved) else { return .overwrite }
+        let alert = NSAlert()
+        alert.alertStyle = .warning
+        alert.messageText = "“\(url.lastPathComponent)” has changed or can no longer be read."
+        alert.informativeText = "Saving now replaces those changes with yours."
+        alert.addButton(withTitle: "Save Anyway")
+        alert.addButton(withTitle: "Discard My Changes")
+        alert.addButton(withTitle: "Cancel")
+        switch alert.runModal() {
+        case .alertFirstButtonReturn: return .overwrite
+        case .alertSecondButtonReturn: return .reload
+        default: return .cancel
+        }
+    }
+}
+
 /// A Markdown editor window: the text on the left, the page on the right,
 /// updated as you type. ⌘S saves; closing asks when there are changes.
 final class MarkdownEditor: NSWindowController, NSWindowDelegate, NSTextViewDelegate {
@@ -466,23 +511,47 @@ final class MarkdownEditor: NSWindowController, NSWindowDelegate, NSTextViewDele
     private let editor = MarkdownTextView()
     private let preview = MarkdownView()
     private var pending: DispatchWorkItem?
-    private var saved = ""
+    private(set) var saved: String?
+    /// The file's date when it was read or last saved here.
+    private var version: Date?
 
-    static func show(_ file: URL) {
-        if let existing = open.first(where: { $0.file.key == file.key }) {
-            existing.window?.makeKeyAndOrderFront(nil)
-            return
+    /// `unsaved`: text typed elsewhere (the details pane) that couldn't be saved; it carries on here.
+    @discardableResult static func show(_ file: URL, unsaved: String? = nil, previouslySaved: String? = nil) -> MarkdownEditor? {
+        guard unsaved != nil || !ArchiveFolders.isInside(file) else {
+            FileOps.report(["An opened archive is read-only. Extract it to edit “\(file.lastPathComponent)”."])
+            return nil
         }
-        guard let text = try? String(contentsOf: file, encoding: .utf8) else {
+        if let existing = open.first(where: {
+            $0.file.key == file.key && (unsaved == nil || !$0.dirty || $0.draftText == unsaved)
+        }) {
+            if let unsaved { existing.takeOver(unsaved, saved: previouslySaved) }
+            existing.window?.makeKeyAndOrderFront(nil)
+            return existing
+        }
+        let text = TextFile.read(file)
+        guard text != nil || unsaved != nil else {
             FileOps.report(["Foldera can't read “\(file.lastPathComponent)” as text."])
-            return
+            return nil
         }
         let controller = MarkdownEditor(file: file, text: text)
+        if let unsaved { controller.takeOver(unsaved, saved: previouslySaved) }
         open.append(controller)
         controller.showWindow(nil)
+        return controller
     }
 
-    private init(file: URL, text: String) {
+    /// Conflicting drafts have separate windows, including when the file disappeared.
+    private func takeOver(_ unsaved: String, saved baseline: String?) {
+        guard unsaved != editor.text.string else { return }
+        // Moving the draft to another window must not accept external changes
+        // that its author has not yet agreed to overwrite.
+        saved = baseline
+        editor.text.string = unsaved
+        updateTitle()
+        preview.show(unsaved, file: file)
+    }
+
+    private init(file: URL, text: String?) {
         self.file = file
         let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1100, height: 720),
                               styleMask: [.titled, .closable, .miniaturizable, .resizable], backing: .buffered, defer: false)
@@ -492,7 +561,8 @@ final class MarkdownEditor: NSWindowController, NSWindowDelegate, NSTextViewDele
         window.delegate = self
         window.representedURL = file
         saved = text
-        editor.text.string = text
+        version = TextFile.version(of: file)
+        editor.text.string = text ?? ""
         editor.text.delegate = self
         let split = NSSplitView()
         split.isVertical = true
@@ -501,7 +571,7 @@ final class MarkdownEditor: NSWindowController, NSWindowDelegate, NSTextViewDele
         split.addArrangedSubview(preview)
         window.contentView = split
         split.setPosition(550, ofDividerAt: 0)
-        preview.show(text, file: file)
+        preview.show(text ?? "", file: file)
         updateTitle()
         if window.frame.origin == .zero { window.center() }
     }
@@ -509,6 +579,11 @@ final class MarkdownEditor: NSWindowController, NSWindowDelegate, NSTextViewDele
     required init?(coder: NSCoder) { fatalError("not used") }
 
     private var dirty: Bool { editor.text.string != saved }
+    var draftText: String { editor.text.string }
+
+    static func canCloseAll() -> Bool {
+        open.allSatisfy { editor in editor.window.map { editor.windowShouldClose($0) } ?? true }
+    }
 
     private func updateTitle() {
         window?.title = file.lastPathComponent + (dirty ? " — Edited" : "")
@@ -528,13 +603,36 @@ final class MarkdownEditor: NSWindowController, NSWindowDelegate, NSTextViewDele
 
     /// ⌘S (File › Save, found through the responder chain).
     @objc func saveDocument(_ sender: Any?) {
+        guard dirty else { return }
+        switch TextFile.checkBeforeSaving(file, saved: saved) {
+        case .cancel: return
+        case .reload: return reload()
+        case .overwrite: break
+        }
         do {
-            try editor.text.string.write(to: file, atomically: true, encoding: .utf8)
+            try TextFile.write(editor.text.string, to: file)
             saved = editor.text.string
+            version = TextFile.version(of: file)
             updateTitle()
         } catch {
             NSAlert(error: error).runModal()
         }
+    }
+
+    /// The file as it is on disk now.
+    private func reload() {
+        guard let text = TextFile.read(file) else { return }
+        saved = text
+        version = TextFile.version(of: file)
+        editor.text.string = text
+        updateTitle()
+        preview.show(text, file: file)
+    }
+
+    /// Coming back to the window: a file changed by another app, and not
+    /// edited here, is shown as it is now.
+    func windowDidBecomeKey(_ notification: Notification) {
+        if !dirty, TextFile.version(of: file) != version { reload() }
     }
 
     func windowShouldClose(_ sender: NSWindow) -> Bool {

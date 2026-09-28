@@ -19,12 +19,13 @@ enum FileOps {
     }
 
     /// `base`, then `base (2)`, `base (3)`… — the first name nobody has taken.
-    static func freeURL(in folder: URL, base: String, ext: String, from start: Int = 1) -> URL {
+    /// The first name not on disk and not in `taken` (names already given out by a plan being made).
+    static func freeURL(in folder: URL, base: String, ext: String, from start: Int = 1, taken: Set<String> = []) -> URL {
         var n = start
         while true {
             let stem = n == 1 ? base : "\(base) (\(n))"
             let url = folder.appendingPathComponent(ext.isEmpty ? stem : "\(stem).\(ext)")
-            if !exists(url) { return url }
+            if !exists(url) && !taken.contains(url.key) { return url }
             n += 1
         }
     }
@@ -34,14 +35,14 @@ enum FileOps {
         return (url.deletingPathExtension().lastPathComponent, url.pathExtension)
     }
 
-    static func copyName(for source: URL, in folder: URL) -> URL {
+    static func copyName(for source: URL, in folder: URL, taken: Set<String> = []) -> URL {
         let (stem, ext) = split(source)
-        return freeURL(in: folder, base: "\(stem) - Copy", ext: ext)
+        return freeURL(in: folder, base: "\(stem) - Copy", ext: ext, taken: taken)
     }
 
-    static func keepBothName(for source: URL, in folder: URL) -> URL {
+    static func keepBothName(for source: URL, in folder: URL, taken: Set<String> = []) -> URL {
         let (stem, ext) = split(source)
-        return freeURL(in: folder, base: stem, ext: ext, from: 2)
+        return freeURL(in: folder, base: stem, ext: ext, from: 2, taken: taken)
     }
 
     /// True when `folder` is `source` itself or somewhere inside it.
@@ -52,12 +53,14 @@ enum FileOps {
     }
 
     static func makeFolder(in folder: URL) throws -> URL {
+        try refuseInArchive([folder])
         let url = freeURL(in: folder, base: "New folder", ext: "")
         try FileManager.default.createDirectory(at: url, withIntermediateDirectories: false)
         return url
     }
 
     static func makeTextFile(in folder: URL) throws -> URL {
+        try refuseInArchive([folder])
         let url = freeURL(in: folder, base: "New Text Document", ext: "txt")
         guard FileManager.default.createFile(atPath: url.path, contents: Data()) else {
             throw OpError("Foldera couldn't create a file in “\(folder.lastPathComponent)”.")
@@ -66,36 +69,44 @@ enum FileOps {
     }
 
     static func rename(_ url: URL, to proposed: String) throws -> URL {
+        try refuseInArchive([url])
         let name = proposed.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !name.isEmpty, name != ".", name != "..", !name.contains("/"), !name.contains(":") else {
             throw OpError("A file name can't be empty or contain / or :.")
         }
         let target = url.deletingLastPathComponent().appendingPathComponent(name)
         if name == url.lastPathComponent { return url }
-        // Changing only the case is fine on a case-insensitive disk.
-        let caseOnly = name.lowercased() == url.lastPathComponent.lowercased()
-        if !caseOnly && exists(target) {
-            throw OpError("There is already a file with the name “\(name)” in this location.")
-        }
-        if Darwin.rename(url.path, target.path) != 0 {
+        // RENAME_EXCL permits changing this entry's case on APFS while
+        // atomically refusing to replace any other directory entry.
+        if renamex_np(url.path, target.path, UInt32(RENAME_EXCL)) != 0 {
+            if errno == EEXIST { throw OpError("There is already a file with the name “\(name)” in this location.") }
             throw NSError(domain: NSPOSIXErrorDomain, code: Int(errno))
         }
         return target
     }
 
-    /// To the Trash, recorded so ⌘Z brings it back.
-    static func trash(_ urls: [URL], done: @escaping () -> Void) {
+    /// What is inside an opened archive is a read-only view of it: nothing there is renamed, moved or deleted.
+    static func refuseInArchive(_ urls: [URL]) throws {
+        if urls.contains(where: ArchiveFolders.isInside) {
+            throw OpError("An opened archive is read-only. Extract it to change what is inside.")
+        }
+    }
+
+    /// To the Trash, recorded so ⌘Z brings it back. `done` gets what actually went.
+    static func trash(_ urls: [URL], done: @escaping (_ removed: [URL]) -> Void) {
+        do { try refuseInArchive(urls) } catch { return report([error.localizedDescription]) }
         NSWorkspace.shared.recycle(urls) { trashed, error in
             DispatchQueue.main.async {
                 FileUndo.record(trashed.map { Change.moved(from: $0.key, to: $0.value) }, name: "Move to Trash")
                 if let error { NSAlert(error: error).runModal() }
-                done()
+                done(Array(trashed.keys))
             }
         }
     }
 
     /// Shift+Delete: gone for good, after one clear question.
-    static func deletePermanently(_ urls: [URL], done: @escaping () -> Void) {
+    static func deletePermanently(_ urls: [URL], done: @escaping (_ removed: [URL]) -> Void) {
+        do { try refuseInArchive(urls) } catch { return report([error.localizedDescription]) }
         let alert = NSAlert()
         alert.alertStyle = .warning
         alert.messageText = urls.count == 1
@@ -108,12 +119,18 @@ enum FileOps {
         guard alert.runModal() == .alertFirstButtonReturn else { return }
         DispatchQueue.global(qos: .userInitiated).async {
             var failures: [String] = []
+            var removed: [URL] = []
             for url in urls {
-                do { try FileManager.default.removeItem(at: url) } catch { failures.append(error.localizedDescription) }
+                do {
+                    try FileManager.default.removeItem(at: url)
+                    removed.append(url)
+                } catch {
+                    failures.append(error.localizedDescription)
+                }
             }
             DispatchQueue.main.async {
                 report(failures)
-                done()
+                done(removed)
             }
         }
     }

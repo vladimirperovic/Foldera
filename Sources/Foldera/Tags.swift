@@ -31,6 +31,7 @@ enum Tags {
     static func names(of url: URL) -> [String] { FileItem.tagNames(of: url) }
 
     static func set(_ tags: [String], on url: URL) throws {
+        try FileOps.refuseInArchive([url])
         try (url as NSURL).setResourceValue(tags, forKey: .tagNamesKey)
     }
 

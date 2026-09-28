@@ -138,9 +138,9 @@ private final class Answers {
     }
 }
 
-@Suite struct Undoing {
-    private func manager() -> UndoManager {
-        let manager = UndoManager()
+@Suite @MainActor struct Undoing {
+    private func manager() -> FileUndo.Manager {
+        let manager = FileUndo.Manager()
         manager.groupsByEvent = false
         return manager
     }

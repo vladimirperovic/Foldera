@@ -54,6 +54,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         if !CommandLine.arguments.contains("--snapshot") && !Self.anotherFolderaRunning { ArchiveFolders.clear() }
     }
 
+    func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        // Failed pane saves move to retained editor windows before the quit check.
+        windows.flatMap(\.tabs).forEach { $0.previewPane.clear() }
+        return MarkdownEditor.canCloseAll() ? .terminateNow : .terminateCancel
+    }
+
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
         if !flag { openWindow(.folder(FileManager.default.homeDirectoryForCurrentUser)) }
         return true
@@ -239,7 +245,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
     // MARK: Screenshots for development
 
     /// `Foldera --snapshot <folder|thismac|image> <out.png> [--icons|--columns] [--pane] [--dark|--light] [--search text]
-    /// [--select name] [--act newfolder|cut|properties] [--press token,token…] [--capture properties|viewer]`
+    /// [--select name] [--tabs count] [--act newfolder|cut|properties] [--press token,token…] [--capture properties|viewer]`
     /// renders one window to a PNG and quits. `--press` sends real key events
     /// through the event queue, the way typing would: a number is a key code,
     /// anything else is typed as characters. An image as the target opens the viewer.
@@ -300,6 +306,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
             }
         }
         DispatchQueue.main.asyncAfter(deadline: .now() + 1) {
+            if let count = value("--tabs").flatMap(Int.init), count > 1, let controller {
+                for _ in 1..<min(count, 100) {
+                    self.openWindow(controller.location, tabbedWith: controller.window, activate: false)
+                }
+            }
             switch value("--act") {
             case "newfolder": controller?.newFolder(nil)
             case "cut": controller?.cut(nil)

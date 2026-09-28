@@ -41,34 +41,49 @@ enum Archive {
         let output: URL
         private let cancelled = CancelFlag()
         private let errors = Pipe()
+        static let diagnosticLimit = 64 * 1024
 
         fileprivate init(output: URL) { self.output = output }
 
         func cancel() {
             cancelled.set()
-            process.terminate()
+            if process.isRunning { process.terminate() }
         }
 
         /// `done` gets the archive, or nil when it failed or was cancelled.
         func run(done: @escaping (URL?, String?) -> Void) {
-            prepare()
-            process.terminationHandler = { [self] _ in
-                let (result, problem) = finish()
+            DispatchQueue.global(qos: .userInitiated).async { [self] in
+                let (result, problem) = runAndWait()
                 DispatchQueue.main.async { done(result, problem) }
-            }
-            do {
-                try process.run()
-            } catch {
-                DispatchQueue.main.async { done(nil, error.localizedDescription) }
             }
         }
 
         /// The same, waiting for the result on the calling thread.
         func runAndWait() -> (URL?, String?) {
+            guard !cancelled.isSet else { return (nil, nil) }
+            do { try FileOps.refuseInArchive([output]) } catch { return (nil, error.localizedDescription) }
             prepare()
+            defer {
+                try? errors.fileHandleForReading.close()
+                try? errors.fileHandleForWriting.close()
+            }
             do { try process.run() } catch { return (nil, error.localizedDescription) }
+            // Close our copy of the write end so EOF arrives when the child exits.
+            try? errors.fileHandleForWriting.close()
+            if cancelled.isSet, process.isRunning { process.terminate() }
+            // Drain while the child runs. Waiting for exit first can deadlock
+            // when tar/zip fills the pipe; retaining all diagnostics can exhaust memory.
+            var diagnostics = Data()
+            var truncated = false
+            while let chunk = try? errors.fileHandleForReading.read(upToCount: 16 * 1024), !chunk.isEmpty {
+                let remaining = max(Self.diagnosticLimit - diagnostics.count, 0)
+                diagnostics.append(chunk.prefix(remaining))
+                if chunk.count > remaining { truncated = true }
+            }
             process.waitUntilExit()
-            return finish()
+            var message = String(decoding: diagnostics, as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines)
+            if truncated { message += "\n… Further diagnostics omitted." }
+            return finish(message: message)
         }
 
         private func prepare() {
@@ -78,16 +93,14 @@ enum Archive {
             process.environment = ProcessInfo.processInfo.environment.merging(["LC_ALL": "en_US.UTF-8"]) { $1 }
         }
 
-        private func finish() -> (URL?, String?) {
-            let message = String(data: errors.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8)?
-                .trimmingCharacters(in: .whitespacesAndNewlines)
+        private func finish(message: String) -> (URL?, String?) {
             if cancelled.isSet {
                 try? FileManager.default.removeItem(at: output)
                 return (nil, nil)
             }
             if process.terminationStatus != 0 {
                 try? FileManager.default.removeItem(at: output)
-                return (nil, message?.isEmpty == false ? message : "The archive tool stopped with code \(process.terminationStatus).")
+                return (nil, !message.isEmpty ? message : "The archive tool stopped with code \(process.terminationStatus).")
             }
             return (output, nil)
         }
@@ -119,6 +132,7 @@ enum Archive {
                            password: String? = nil, progress: ((Double) -> Void)? = nil) throws -> (URL, [String]) {
         let unpacker = unpacker ?? Unpacker(archive)
         let parent = parent ?? archive.deletingLastPathComponent()
+        try FileOps.refuseInArchive([parent])
         let staging = parent.appendingPathComponent(".explorer-extract-\(UUID().uuidString)", isDirectory: true)
         do {
             let skipped = try unpacker.unpack(into: staging, password: password, progress: progress)

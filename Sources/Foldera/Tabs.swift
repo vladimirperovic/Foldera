@@ -208,12 +208,14 @@ final class TabStrip: NSView {
     weak var host: ExplorerWindow?
     /// About 4–5 cm on a MacBook screen; tabs shrink below it only when many are open.
     static let tabWidth: CGFloat = 220
-    static let minimumTabWidth: CGFloat = 100
+    static let minimumTabWidth: CGFloat = 32
     static let tabHeight: CGFloat = 30
 
     var leadingInset: CGFloat = 80 { didSet { needsLayout = true } }
     private var buttons: [TabButton] = []
     private weak var dragged: TabButton?
+    private let scroll = NSScrollView()
+    private let tabCanvas = NSView()
     private let plus = ToolButton(symbol: "plus", tip: "New tab (⌘T)", iconSize: 13, height: 28, padding: 8)
 
     /// A shade darker than the window, so the selected tab reads as part of what is below it.
@@ -225,6 +227,12 @@ final class TabStrip: NSView {
         super.init(frame: frame)
         plus.target = self
         plus.action = #selector(newTab(_:))
+        scroll.drawsBackground = false
+        scroll.hasHorizontalScroller = true
+        scroll.autohidesScrollers = true
+        scroll.scrollerStyle = .overlay
+        scroll.documentView = tabCanvas
+        addSubview(scroll)
         addSubview(plus)
     }
 
@@ -234,7 +242,7 @@ final class TabStrip: NSView {
         while buttons.count < tabs.count {
             let button = TabButton()
             button.strip = self
-            addSubview(button, positioned: .below, relativeTo: plus)
+            tabCanvas.addSubview(button)
             buttons.append(button)
         }
         while buttons.count > tabs.count { buttons.removeLast().removeFromSuperview() }
@@ -249,22 +257,31 @@ final class TabStrip: NSView {
         needsLayout = true
     }
 
-    private var tabWidth: CGFloat {
-        let room = bounds.width - leadingInset - 44
-        return max(Self.minimumTabWidth, min(Self.tabWidth, floor(room / CGFloat(max(buttons.count, 1)))))
+    /// Shrink to icons before scrolling. The add button always has its own space.
+    static func widthForTabs(count: Int, room: CGFloat) -> CGFloat {
+        max(minimumTabWidth, min(tabWidth, floor(max(room, 0) / CGFloat(max(count, 1)))))
     }
+
+    private var tabWidth: CGFloat { Self.widthForTabs(count: buttons.count, room: bounds.width - leadingInset - 44) }
 
     override func layout() {
         super.layout()
         let width = tabWidth
-        var x = leadingInset
+        let contentWidth = width * CGFloat(buttons.count)
+        let viewport = min(contentWidth, max(bounds.width - leadingInset - 44, 0))
+        scroll.frame = NSRect(x: leadingInset, y: 0, width: viewport, height: Self.tabHeight)
+        tabCanvas.frame = NSRect(x: 0, y: 0, width: contentWidth, height: Self.tabHeight)
+        var x: CGFloat = 0
         for button in buttons {
             if button !== dragged {
                 button.frame = NSRect(x: x, y: 0, width: width, height: Self.tabHeight)
             }
             x += width
         }
-        plus.frame = NSRect(x: x + 4, y: (Self.tabHeight - 28) / 2, width: 30, height: 28)
+        plus.frame = NSRect(x: leadingInset + viewport + 4, y: (Self.tabHeight - 28) / 2, width: 30, height: 28)
+        if dragged == nil, let selected = buttons.first(where: \.isSelected) {
+            tabCanvas.scrollToVisible(selected.frame)
+        }
     }
 
     override func draw(_ dirtyRect: NSRect) {
@@ -280,9 +297,10 @@ final class TabStrip: NSView {
     func drag(_ button: TabButton, to x: CGFloat) {
         dragged = button
         let width = tabWidth
-        button.frame.origin.x = min(max(x, leadingInset), leadingInset + width * CGFloat(buttons.count - 1))
-        addSubview(button, positioned: .below, relativeTo: plus)
-        let slot = min(max(Int((button.frame.midX - leadingInset) / width), 0), buttons.count - 1)
+        button.frame.origin.x = min(max(x, 0), width * CGFloat(buttons.count - 1))
+        tabCanvas.addSubview(button, positioned: .above, relativeTo: nil)
+        tabCanvas.scrollToVisible(button.frame)
+        let slot = min(max(Int(button.frame.midX / width), 0), buttons.count - 1)
         if let from = buttons.firstIndex(where: { $0 === button }), from != slot {
             buttons.insert(buttons.remove(at: from), at: slot)
             host?.moveTab(from: from, to: slot)
@@ -332,8 +350,14 @@ final class TabButton: NSView {
     private var hovering = false { didSet { needsDisplay = true } }
     private var overClose = false { didSet { needsDisplay = true } }
 
-    private var closeRect: NSRect { NSRect(x: bounds.maxX - 28, y: (bounds.height - 18) / 2, width: 18, height: 18) }
-    private var showsClose: Bool { isSelected || hovering }
+    private var closeRect: NSRect {
+        NSRect(x: compact ? (bounds.width - 18) / 2 : bounds.maxX - 28,
+               y: (bounds.height - 18) / 2, width: 18, height: 18)
+    }
+    private var compact: Bool { bounds.width < 76 }
+    // An icon must remain clickable to select a compact tab. Close it with
+    // the context menu, middle click or ⌘W when there is no room for a separate ×.
+    private var showsClose: Bool { !compact && (isSelected || hovering) }
 
     override func draw(_ dirtyRect: NSRect) {
         let shape = bounds.insetBy(dx: 1, dy: 0)
@@ -354,6 +378,15 @@ final class TabButton: NSView {
         } else {
             NSColor.separatorColor.setFill()
             NSRect(x: bounds.maxX - 1, y: 8, width: 1, height: bounds.height - 16).fill()
+        }
+        if compact {
+            let rect = NSRect(x: (bounds.width - 16) / 2, y: (bounds.height - 16) / 2, width: 16, height: 16)
+            if showsClose, let cross = NSImage(systemSymbolName: "xmark", accessibilityDescription: "Close tab") {
+                tinted(cross, .secondaryLabelColor).draw(in: rect)
+            } else {
+                icon?.draw(in: rect)
+            }
+            return
         }
         var x: CGFloat = 12
         if let icon {

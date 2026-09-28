@@ -249,10 +249,13 @@ extension ExplorerTab: NSMenuItemValidation {
 
     /// Copy or move with Windows' questions first, then a progress window
     /// that can be cancelled. Undo takes all of it back.
-    func transfer(_ urls: [URL], into folder: URL, move: Bool, then: (() -> Void)? = nil) {
+    func transfer(_ urls: [URL], into folder: URL, move requested: Bool, then: (() -> Void)? = nil) {
+        guard !ArchiveFolders.isInside(folder) else { return FileOps.report(["An opened archive is read-only. Extract it to add to it."]) }
+        // What comes out of an opened archive is always a copy; the archive stays as it is.
+        let move = requested && !urls.contains(where: ArchiveFolders.isInside)
         guard let plan = Transfer.plan(urls, into: folder, move: move, ask: Transfer.askWithAlert) else { return }
         FileOps.report(plan.problems)
-        guard !plan.steps.isEmpty else {
+        guard !plan.steps.isEmpty || (move && !plan.emptied.isEmpty) else {
             then?()
             return
         }
@@ -271,6 +274,9 @@ extension ExplorerTab: NSMenuItemValidation {
             }
         }, done: { [weak self] outcome in
             progress.finish()
+            // Folders measured before now hold more (or less).
+            UsageCache.changed(folder)
+            if move { urls.forEach { UsageCache.changed($0.deletingLastPathComponent()) } }
             FileUndo.record(outcome.changes, name: move ? "Move" : "Copy")
             FileOps.report(outcome.failures)
             then?()
@@ -296,13 +302,20 @@ extension ExplorerTab: NSMenuItemValidation {
         return items[..<last].last(where: { !keys.contains($0.key) })?.key
     }
 
-    private func removed(_ gone: [FileItem]) {
+    /// After a delete: what failed to go stays on screen.
+    private func removed(_ chosen: [FileItem], only removedURLs: [URL]) {
+        let keys = Set(removedURLs.map(\.key))
+        let gone = chosen.filter { keys.contains($0.key) }
+        guard !gone.isEmpty else { return }
         if shownMode == .usage {
-            for item in gone { UsageCache.node(for: item.url)?.remove() }
+            // The displayed tree is still alive even after its cache entry is invalidated.
+            for item in gone { treemap.root?.find(item.url)?.remove() }
+            for item in gone { UsageCache.changed(item.url.deletingLastPathComponent()) }
             treemap.select(nil)
             treemap.relayout()
             return
         }
+        for item in gone { UsageCache.changed(item.url.deletingLastPathComponent()) }
         let next = neighbour(of: gone)
         pendingSelection = next.map { [$0] } ?? []
         if isSearching {
@@ -317,18 +330,19 @@ extension ExplorerTab: NSMenuItemValidation {
     @objc func delete(_ sender: Any?) {
         let gone = deletableItems
         guard !gone.isEmpty else { return }
-        FileOps.trash(gone.map(\.url)) { [weak self] in self?.removed(gone) }
+        FileOps.trash(gone.map(\.url)) { [weak self] removed in self?.removed(gone, only: removed) }
     }
 
     @objc func deletePermanently(_ sender: Any?) {
         let gone = deletableItems
         guard !gone.isEmpty else { return }
-        FileOps.deletePermanently(gone.map(\.url)) { [weak self] in self?.removed(gone) }
+        FileOps.deletePermanently(gone.map(\.url)) { [weak self] removed in self?.removed(gone, only: removed) }
     }
 
     @objc func renameSelection(_ sender: Any?) {
         let chosen = selectedItems
-        guard chosen.count == 1, let item = chosen.first, item.volume == nil else { return }
+        // F2 comes here without asking the menu; an opened archive is read-only.
+        guard chosen.count == 1, let item = chosen.first, item.volume == nil, !isInArchive else { return }
         switch shownMode {
         case .details: renameInline(item)
         case .icons, .columns, .usage: renameInSheet(item)

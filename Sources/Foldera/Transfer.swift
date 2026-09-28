@@ -54,11 +54,19 @@ final class Transfer {
         var fileAnswer: Clash?
         var folderAnswer: Clash?
         let many = sources.count > 1
+        // Where earlier steps of this plan will put things. Two sources with
+        // one name (from different folders, or search results) must not be
+        // given the same place.
+        var planned = Set<String>()
+        func add(_ step: Step) {
+            plan.steps.append(step)
+            planned.insert(step.to.key)
+        }
 
         func visit(_ source: URL, into folder: URL, topLevel: Bool) -> Bool {
             if topLevel && source.deletingLastPathComponent().key == folder.key {
                 // Already here: moving does nothing, copying makes "name - Copy".
-                if !move { plan.steps.append(Step(from: source, to: FileOps.copyName(for: source, in: folder), replace: false)) }
+                if !move { add(Step(from: source, to: FileOps.copyName(for: source, in: folder, taken: planned), replace: false)) }
                 return true
             }
             if FileOps.isFolder(source) && FileOps.isInside(folder, source) {
@@ -66,8 +74,13 @@ final class Transfer {
                 return true
             }
             let target = folder.appendingPathComponent(source.lastPathComponent)
+            if planned.contains(target.key) {
+                // Another source of this very plan goes there: both are kept, without asking.
+                add(Step(from: source, to: FileOps.keepBothName(for: source, in: folder, taken: planned), replace: false))
+                return true
+            }
             guard FileOps.exists(target) else {
-                plan.steps.append(Step(from: source, to: target, replace: false))
+                add(Step(from: source, to: target, replace: false))
                 return true
             }
             let folders = FileOps.isFolder(source) && FileOps.isFolder(target)
@@ -87,16 +100,21 @@ final class Transfer {
             case .skip:
                 return true
             case .replace:
-                plan.steps.append(Step(from: source, to: target, replace: true))
+                add(Step(from: source, to: target, replace: true))
             case .keepBoth:
-                plan.steps.append(Step(from: source, to: FileOps.keepBothName(for: source, in: folder), replace: false))
+                add(Step(from: source, to: FileOps.keepBothName(for: source, in: folder, taken: planned), replace: false))
             case .merge:
                 guard folders else {
-                    plan.steps.append(Step(from: source, to: target, replace: true))
+                    add(Step(from: source, to: target, replace: true))
                     return true
                 }
-                let children = (try? FileManager.default.contentsOfDirectory(
-                    at: source, includingPropertiesForKeys: nil, options: [])) ?? []
+                let children: [URL]
+                do {
+                    children = try FileManager.default.contentsOfDirectory(at: source, includingPropertiesForKeys: nil)
+                } catch {
+                    plan.problems.append("“\(source.lastPathComponent)”: \(error.localizedDescription)")
+                    return true
+                }
                 for child in children where child.lastPathComponent != ".DS_Store" {
                     if !visit(child, into: target, topLevel: false) { return false }
                 }
@@ -177,6 +195,13 @@ final class Transfer {
     func perform() -> Outcome {
         let fm = FileManager.default
         var outcome = Outcome()
+        do {
+            try FileOps.refuseInArchive(plan.steps.map(\.to) + plan.emptied)
+            if move { try FileOps.refuseInArchive(plan.steps.map(\.from)) }
+        } catch {
+            outcome.failures = [error.localizedDescription]
+            return outcome
+        }
 
         // How much there is to copy. A move on one drive is a rename: nothing to count.
         let sizes = plan.steps.map { step -> Int64 in
@@ -229,8 +254,14 @@ final class Transfer {
         }
 
         if move && !outcome.cancelled {
-            for folder in plan.emptied.reversed() where Self.isEffectivelyEmpty(folder) {
-                try? fm.removeItem(at: folder)
+            // Deepest first (the plan lists a folder after the ones inside it),
+            // so a parent is looked at once its emptied children are gone.
+            // Undo puts each one back, even if no file inside would bring it.
+            for folder in plan.emptied where Self.isEffectivelyEmpty(folder) {
+                // rmdir refuses if another app added a file since the check.
+                let metadata = folder.appendingPathComponent(".DS_Store")
+                if FileOps.exists(metadata) { _ = unlink(metadata.path) }
+                if rmdir(folder.path) == 0 { outcome.changes.append(.removedFolder(folder)) }
             }
         }
         progress.itemsDone = plan.steps.count

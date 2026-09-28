@@ -34,6 +34,7 @@ final class ExplorerTab: NSViewController, NSSplitViewDelegate {
     let search = FolderSearch()
     let watcher = DirectoryWatcher()
     var loadGeneration = 0
+    private var navigationGeneration = 0
     var sortGeneration = 0
     /// A column was clicked while this search runs: later results go in order too.
     var searchSorted = false
@@ -411,6 +412,7 @@ final class ExplorerTab: NSViewController, NSSplitViewDelegate {
     private func wire() {
         watcher.onChange = { [weak self] in
             guard let self, !self.isSearching else { return }
+            if let folder = self.location.url { UsageCache.changed(folder) }
             self.reload()
         }
         sidebar.onNavigate = { [weak self] location in self?.navigate(to: location) }
@@ -473,6 +475,7 @@ final class ExplorerTab: NSViewController, NSSplitViewDelegate {
     }
 
     func navigate(to target: Location, record: Bool = true, select: [URL] = []) {
+        navigationGeneration += 1
         if renamingKey != nil { focusList() }
         addressBar.endEditing()
         let previous = location
@@ -512,9 +515,27 @@ final class ExplorerTab: NSViewController, NSSplitViewDelegate {
     }
 
     func submitAddress(_ text: String) {
+        navigationGeneration += 1
         let typed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         focusList()
         guard !typed.isEmpty else { return }
+        if Servers.isNetworkAddress(typed) {
+            guard let address = Servers.address(typed) else {
+                return show(OpError("Foldera couldn't read that server address."))
+            }
+            let generation = navigationGeneration
+            Servers.mount(address) { [weak self] result in
+                guard let self, self.navigationGeneration == generation else { return }
+                switch result {
+                case .success(let folder):
+                    self.navigate(to: .folder(folder))
+                    self.focusList()
+                case .failure(let error):
+                    if !(error is CancellationError) { self.show(error) }
+                }
+            }
+            return
+        }
         if typed.caseInsensitiveCompare("This Mac") == .orderedSame {
             navigate(to: .thisMac)
             return
@@ -842,7 +863,8 @@ final class ExplorerTab: NSViewController, NSSplitViewDelegate {
             if let usageNote {
                 parts.append(usageNote)
             } else if let root = treemap.root {
-                parts.append("\(Format.bytes(root.size)) in \(Format.count(Int64(root.files))) files")
+                parts.append("\(Format.bytes(root.size)) in \(Format.count(Int64(root.files))) files"
+                             + (root.unreadable > 0 ? " (\(Format.count(Int64(root.unreadable))) items couldn't be read)" : ""))
             }
             if let node = usageHover ?? treemap.selected, let root = treemap.root, root.size > 0 {
                 let share = Double(node.size) / Double(root.size) * 100
@@ -1318,6 +1340,7 @@ final class ExplorerTab: NSViewController, NSSplitViewDelegate {
 
     /// The tab is closing (or its window is): stop watching and listening.
     func tearDown() {
+        navigationGeneration += 1
         search.cancel()
         watcher.stop()
         cloudRefresh?.cancel()

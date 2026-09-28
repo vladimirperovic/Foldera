@@ -8,9 +8,21 @@ Native Swift and AppKit, no dependencies, about 1.5 MB.
 </p>
 
 > [!WARNING]
-> **Beta (0.2).** Foldera is in daily use, but it is young. It moves, copies
-> and deletes real files, so keep backups (Time Machine) and report anything
-> odd in [Issues](https://github.com/vladimirperovic/Foldera/issues).
+> **Experimental beta (0.2) — not sufficiently tested. Download and use at your own risk.**
+>
+> Foldera works with real files: it copies, moves, renames, replaces and
+> deletes them, including permanent deletion. Bugs in these operations can
+> damage files or cause irreversible data loss. It has not been tested
+> enough to be considered safe for important or irreplaceable data.
+>
+> I use Foldera myself because I need its features together in one place.
+> My own use covers only a small part of the situations other people may
+> encounter. This is experimental software, and you are responsible for
+> deciding whether to download and use it.
+>
+> Keep verified backups (for example, Time Machine), try it on copies of
+> files first, and never rely on Undo as your only protection. Please
+> report problems in [Issues](https://github.com/vladimirperovic/Foldera/issues).
 
 ![Details view with the Markdown preview](docs/details.png)
 
@@ -82,7 +94,8 @@ yourself, see [Building](#building).
     matches.
 - **Tabs**, Windows 11 style, in the title bar:
   - each about 220 points (4–5 cm on a MacBook), with the + right after the
-    last one;
+    last one; as more tabs open they shrink to icons, then scroll horizontally,
+    keeping + visible. Compact tabs close with ⌘W, middle-click or their menu;
   - ⌘T opens one, ⌘W closes one (⇧⌘W closes the window), ⌃Tab switches;
   - middle-click a folder to open it in a background tab, and middle-click
     a tab to close it;
@@ -158,8 +171,10 @@ gets back the width you dragged it to once there is room again.
   formats.
   - Progress and Cancel, like copying.
   - An archive holding one folder does not unpack into `name/name`.
-  - Entries whose names would land outside the target folder (`../`,
-    absolute paths) are left out.
+  - Entries containing `..` path components are left out. Leading `/`
+    characters are removed from absolute paths, so those entries stay
+    inside the target folder too. Extraction cannot write through a
+    symbolic link to a location outside it.
 - **Compress to ▸ ZIP / 7z / TAR.GZ**. Zips are plain, without `__MACOSX`,
   so they open cleanly on Windows.
 - **Passwords**: a password-protected zip asks for its password. macOS's
@@ -244,12 +259,20 @@ are enough).
 ./test.sh             # the tests (swift test, with a workaround for the CLT)
 ```
 
+The regression tests use temporary files. Setting `FOLDERA_TEST_VOLUME`
+to a mounted, disposable, case-sensitive volume also exercises case-sensitive
+rename collisions and move/Undo/Redo across volumes. Passing these tests does
+not replace testing with real workloads, network shares and other macOS versions.
+
+If Finder automation is unavailable, `FOLDERA_DMG_LAYOUT=0 ./build.sh dmg`
+creates the same installer without arranging its Finder window.
+
 Protected folders (Desktop, Documents, Downloads) ask for permission the
 first time. Every new build gets a new ad-hoc signature, so macOS asks
 again after each rebuild. Full Disk Access for Foldera stops the prompts.
 
 `Foldera --snapshot <folder|image> out.png [--icons|--columns] [--pane]
-[--light|--dark] [--size WxH] [--search text] [--select name] [--press keys]`
+[--light|--dark] [--size WxH] [--tabs count] [--search text] [--select name] [--press keys]`
 renders a window to a PNG. It is used during development to check the
 interface without clicking (the screenshots above were made this way, of a
 made-up folder). It leaves your settings as they were.

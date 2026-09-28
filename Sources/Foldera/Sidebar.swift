@@ -557,7 +557,7 @@ final class Sidebar: NSObject, NSOutlineViewDataSource, NSOutlineViewDelegate {
             return true
         }
         if index == NSOutlineViewDropOnItemIndex, (item as? SidebarNode)?.kind == .trash {
-            FileOps.trash(DragOps.urls(from: info)) {}
+            FileOps.trash(DragOps.urls(from: info)) { _ in }
             return true
         }
         guard let folder = dropFolder(item, index) else { return false }

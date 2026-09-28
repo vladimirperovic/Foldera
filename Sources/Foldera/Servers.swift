@@ -6,6 +6,14 @@ import NetFS
 enum Servers {
     private static let key = "recentServers"
 
+    /// Explicit network locations in the address bar; ordinary names stay local paths.
+    static func isNetworkAddress(_ typed: String) -> Bool {
+        let text = typed.trimmingCharacters(in: .whitespacesAndNewlines)
+        if text.hasPrefix("\\\\") { return true }
+        guard let scheme = URLComponents(string: text)?.scheme?.lowercased() else { return false }
+        return ["smb", "afp", "nfs", "http", "https", "webdav"].contains(scheme)
+    }
+
     static var recent: [String] {
         get { UserDefaults.standard.stringArray(forKey: key) ?? [] }
         set { UserDefaults.standard.set(Array(newValue.prefix(10)), forKey: key) }

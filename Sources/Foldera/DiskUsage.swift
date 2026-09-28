@@ -9,6 +9,8 @@ final class UsageNode {
     let kind: SearchFilters.Kind?
     var size: Int64 = 0
     var files = 0
+    /// On the scan's top node: items that couldn't be read, so the sizes are a lower bound.
+    var unreadable = 0
     /// Files too small to keep one by one, summed per folder…
     var smallFiles: Int64 = 0
     var smallCount = 0
@@ -124,9 +126,14 @@ final class UsageScanner {
             folders[String(cString: real)] = top
             free(real)
         }
+        // Folders that can't be read are counted, so a partial measure doesn't pass for a whole one.
+        let unreadable = Tally()
         guard let walker = FileManager.default.enumerator(
             at: URL(fileURLWithPath: rootPath, isDirectory: true), includingPropertiesForKeys: keys, options: [],
-            errorHandler: { _, _ in true }) else { return top }
+            errorHandler: { _, _ in unreadable.count += 1; return true }) else {
+            top.unreadable = 1
+            return top
+        }
         var count = 0
         var bytes: Int64 = 0
         var reported = Date()
@@ -136,20 +143,24 @@ final class UsageScanner {
             if cancelled.isSet { return nil }
             let path = url.path
             guard let parent = folders[(path as NSString).deletingLastPathComponent] else { continue }
-            let values = try? url.resourceValues(forKeys: keySet)
-            if values?.isDirectory == true && values?.isSymbolicLink != true {
-                if values?.isVolume == true || path == "/System/Volumes" {
+            guard let values = try? url.resourceValues(forKeys: keySet) else {
+                unreadable.count += 1
+                walker.skipDescendants()
+                continue
+            }
+            if values.isDirectory == true && values.isSymbolicLink != true {
+                if values.isVolume == true || path == "/System/Volumes" {
                     walker.skipDescendants()
                     continue
                 }
-                let package = values?.isPackage == true
+                let package = values.isPackage == true
                 let node = UsageNode(url: url, name: url.lastPathComponent, isFolder: true, isPackage: package,
                                      kind: package ? SearchFilters.kind(ofFile: url) ?? .apps : .folders)
                 node.parent = parent
                 parent.children.append(node)
                 folders[path] = node
             } else {
-                let size = Int64(values?.totalFileAllocatedSize ?? values?.fileAllocatedSize ?? 0)
+                let size = Int64(values.totalFileAllocatedSize ?? values.fileAllocatedSize ?? 0)
                 count += 1
                 bytes += size
                 if size >= Self.ownBlockFrom {
@@ -174,8 +185,11 @@ final class UsageScanner {
             }
         }
         top.total()
+        top.unreadable = unreadable.count
         return top
     }
+
+    private final class Tally { var count = 0 }
 }
 
 /// Scans kept for the session, so walking into a folder already measured
@@ -194,9 +208,17 @@ enum UsageCache {
         if trees.count > 3 { trees.removeLast() }
     }
 
+    /// Drops every measure that `url` is part of, and every measure made inside it.
     static func forget(_ url: URL) {
-        trees.removeAll { $0.find(url) != nil || URL(fileURLWithPath: url.path).standardizedFileURL.path.hasPrefix($0.url.standardizedFileURL.path) }
+        let path = url.standardizedFileURL.path
+        trees.removeAll {
+            let root = $0.url.standardizedFileURL.path
+            return path == root || path.hasPrefix(root == "/" ? "/" : root + "/") || root.hasPrefix(path == "/" ? "/" : path + "/")
+        }
     }
+
+    /// Something was added to or taken from `folder`: its size, and its parents', are no longer known.
+    static func changed(_ folder: URL) { forget(folder) }
 }
 
 /// The squarified treemap layout (Bruls, Huizing and van Wijk): rectangles
@@ -383,7 +405,7 @@ final class TreemapView: NSView {
             return
         }
         if laidOut != bounds.size { layoutBlocks() }
-        drawHeader(root)
+        if dirtyRect.minY < Self.headerHeight { drawHeader(root) }
         let ink = dark ? NSColor(white: 0.95, alpha: 1) : NSColor(white: 0.12, alpha: 1)
         let frameFill = dark ? NSColor(white: 1, alpha: 0.05) : NSColor(white: 0, alpha: 0.035)
         for block in blocks where block.rect.intersects(dirtyRect) {
@@ -426,6 +448,7 @@ final class TreemapView: NSView {
         let folders = root.children.filter { $0.isFolder && !$0.isPackage }.count
         var facts = "\(Format.bytes(root.size))  ·  \(Format.count(Int64(root.files))) files"
         if folders > 0 { facts += "  ·  \(Format.count(Int64(folders))) folders" }
+        if root.unreadable > 0 { facts += "  ·  \(Format.count(Int64(root.unreadable))) couldn't be read" }
         if let volume = try? root.url.resourceValues(forKeys: [.volumeAvailableCapacityForImportantUsageKey]).volumeAvailableCapacityForImportantUsage {
             facts += "  ·  \(Format.bytes(volume)) free on the disk"
         }

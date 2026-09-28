@@ -2,8 +2,8 @@ import AppKit
 import CArchive
 
 /// Unpacks anything the system's libarchive reads: zip, RAR (4 and 5), 7z,
-/// tar with gzip, bzip2 or xz, cab and lzh. Entries whose names would land
-/// outside the destination (`../`, absolute paths) are left out.
+/// tar with gzip, bzip2 or xz, cab and lzh. Entries containing `..` are
+/// left out; leading slashes are stripped to keep absolute names inside.
 final class Unpacker {
     struct Failure: LocalizedError {
         let errorDescription: String?
@@ -137,7 +137,9 @@ enum ArchiveFolders {
         return ["zip", "rar", "7z", "tar", "tgz", "tbz", "tbz2", "txz", "cab", "lzh", "lha"].contains(ext)
     }
 
-    static func isInside(_ url: URL) -> Bool { url.key.hasPrefix(root.key + "/") }
+    static func isInside(_ url: URL) -> Bool {
+        url.key == root.key || url.key.hasPrefix(root.key + "/") || FileOps.isInside(url, root)
+    }
 
     /// The archive a cache folder belongs to, and the folder standing for the archive itself.
     static func context(of url: URL) -> (archive: URL, root: URL)? {

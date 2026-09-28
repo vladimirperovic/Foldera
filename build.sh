@@ -107,8 +107,11 @@ if [ "$STEP" = "dmg" ]; then
   MOUNT="$(hdiutil attach -readwrite -noverify -noautoopen build/rw.dmg | awk -F'\t' '/\/Volumes\//{print $NF}')"
   # Finder lays out the window and remembers it in the image. It needs
   # permission to be scripted; without it the image still works, unarranged.
+  # Set FOLDERA_DMG_LAYOUT=0 for headless builds or unavailable Finder automation.
+  if [ "${FOLDERA_DMG_LAYOUT:-1}" != "0" ]; then
   osascript - "$(basename "$MOUNT")" "$NAME.app" <<'APPLESCRIPT' || echo "(Finder layout skipped)"
 on run argv
+  with timeout of 15 seconds
   tell application "Finder"
     tell disk (item 1 of argv)
       open
@@ -128,8 +131,10 @@ on run argv
       close
     end tell
   end tell
+  end timeout
 end run
 APPLESCRIPT
+  fi
   # The disk shows Foldera's icon while it is open. (After the layout:
   # Finder drops the icon file when it arranges the window.)
   cp "$APP/Contents/Resources/AppIcon.icns" "$MOUNT/.VolumeIcon.icns"

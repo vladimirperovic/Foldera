@@ -34,7 +34,10 @@ final class PreviewPane: NSView {
     private let editButton = NSButton(title: "Edit", target: nil, action: nil)
     private var markdownFile: URL?
     private var markdownSaved = ""
+    /// The file's date when it was read or last saved here, to notice another app's changes.
+    private var markdownVersion: Date?
     private var editing = false
+    private var editorButton: NSButton?
 
     override init(frame: NSRect) {
         super.init(frame: frame)
@@ -58,6 +61,7 @@ final class PreviewPane: NSView {
         window.bezelStyle = .push
         window.controlSize = .small
         window.toolTip = "Open in the Markdown editor, with the text and the page side by side"
+        editorButton = window
         let header = NSStackView(views: [markdownName, NSView(), editButton, window])
         header.orientation = .horizontal
         header.distribution = .fill
@@ -156,7 +160,7 @@ final class PreviewPane: NSView {
     /// Stops a playing preview when the pane is put away, and keeps any Markdown edits.
     func clear() {
         pending?.cancel()
-        finishEditing()
+        finishEditing(movingOn: true)
         quickLook?.previewItem = nil
         previewed = nil
     }
@@ -235,19 +239,37 @@ final class PreviewPane: NSView {
             previewed = nil
         }
         if markdownFile?.key != url.key {
-            finishEditing()
+            finishEditing(movingOn: true)
             markdownFile = url
-            markdownSaved = (try? String(contentsOf: url, encoding: .utf8)) ?? (try? String(contentsOf: url, encoding: .isoLatin1)) ?? ""
             markdownName.stringValue = url.lastPathComponent
-            markdownView.show(markdownSaved, file: url)
+            if !loadMarkdown(url) {
+                markdownSaved = ""
+                markdownVersion = nil
+                markdownView.show("Foldera couldn't read this file.", file: url)
+            }
+        } else if !editing, TextFile.version(of: url) != markdownVersion {
+            // Changed by another app since it was shown.
+            loadMarkdown(url)
         }
+        // What is inside an opened archive is shown, not edited: the archive itself wouldn't change.
+        let readOnly = ArchiveFolders.isInside(url)
+        editButton.isEnabled = !readOnly
+        editorButton?.isEnabled = !readOnly
         scroll.isHidden = true
         markdownBox.isHidden = false
     }
 
+    @discardableResult private func loadMarkdown(_ url: URL) -> Bool {
+        guard let text = TextFile.read(url) else { return false }
+        markdownVersion = TextFile.version(of: url)
+        markdownSaved = text
+        markdownView.show(markdownSaved, file: url)
+        return true
+    }
+
     private func hideMarkdown() {
         guard markdownFile != nil else { return }
-        finishEditing()
+        finishEditing(movingOn: true)
         markdownFile = nil
         markdownBox.isHidden = true
         scroll.isHidden = false
@@ -262,36 +284,62 @@ final class PreviewPane: NSView {
 
     @objc private func toggleEditing(_ sender: Any?) {
         if editing {
-            finishEditing()
+            finishEditing(movingOn: false)
         } else {
+            guard let url = markdownFile, !ArchiveFolders.isInside(url) else { return }
+            guard loadMarkdown(url) else {
+                FileOps.report(["Foldera can't read “\(url.lastPathComponent)” as text."])
+                return
+            }
             markdownEditor.text.string = markdownSaved
             setEditing(true)
             window?.makeFirstResponder(markdownEditor.text)
         }
     }
 
-    /// Saves what was typed (moving on to another file saves too) and shows the page again.
-    private func finishEditing() {
+    /// Saves what was typed and shows the page again. Done keeps the editor
+    /// open when saving fails, to try again; moving on to another file hands
+    /// the text to an editor window instead, so it is never lost.
+    private func finishEditing(movingOn: Bool) {
         guard editing, let url = markdownFile else { return }
-        saveDocument(nil)
+        if !save() {
+            guard movingOn else { return }
+            MarkdownEditor.show(url, unsaved: markdownEditor.text.string, previouslySaved: markdownSaved)
+        }
         setEditing(false)
         markdownView.show(markdownSaved, file: url)
     }
 
     /// ⌘S while editing in the pane.
-    @objc func saveDocument(_ sender: Any?) {
-        guard editing, let url = markdownFile, markdownEditor.text.string != markdownSaved else { return }
+    @objc func saveDocument(_ sender: Any?) { save() }
+
+    /// True once what is in the editor is on disk, or was set aside on purpose.
+    @discardableResult private func save() -> Bool {
+        guard editing, let url = markdownFile, markdownEditor.text.string != markdownSaved else { return true }
+        switch TextFile.checkBeforeSaving(url, saved: markdownSaved) {
+        case .cancel:
+            return false
+        case .reload:
+            guard loadMarkdown(url) else { return false }
+            markdownEditor.text.string = markdownSaved
+            return true
+        case .overwrite:
+            break
+        }
         do {
-            try markdownEditor.text.string.write(to: url, atomically: true, encoding: .utf8)
+            try TextFile.write(markdownEditor.text.string, to: url)
             markdownSaved = markdownEditor.text.string
+            markdownVersion = TextFile.version(of: url)
+            return true
         } catch {
             NSAlert(error: error).runModal()
+            return false
         }
     }
 
     @objc private func openEditor(_ sender: Any?) {
-        guard let url = markdownFile else { return }
-        finishEditing()
+        guard let url = markdownFile, !ArchiveFolders.isInside(url) else { return }
+        finishEditing(movingOn: true)
         MarkdownEditor.show(url)
     }
 

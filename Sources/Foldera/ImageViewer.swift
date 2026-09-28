@@ -717,8 +717,8 @@ final class ImageViewer: NSWindowController, NSWindowDelegate {
     /// Delete: to the Trash, and on to the next picture.
     @objc func delete(_ sender: Any?) {
         guard let url = current else { return }
-        FileOps.trash([url]) { [weak self] in
-            guard let self else { return }
+        FileOps.trash([url]) { [weak self] removed in
+            guard let self, !removed.isEmpty else { return }
             self.urls.removeAll { $0.key == url.key }
             self.cache[url.key] = nil
             if self.urls.isEmpty {

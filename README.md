@@ -27,9 +27,9 @@ map, and Markdown files shown (and edited) in the details pane.
 
 ## Install
 
-1. Download `Foldera-0.2.0-beta.zip` from
-   [Releases](https://github.com/vladimirperovic/Foldera/releases), unzip it,
-   and drag **Foldera** to Applications.
+1. Download `Foldera-0.2.0-beta.dmg` from
+   [Releases](https://github.com/vladimirperovic/Foldera/releases), open it,
+   and drag **Foldera** onto **Applications**.
 2. Open it. The beta is not notarized by Apple yet, so macOS refuses the
    first time: go to **System Settings › Privacy & Security**, scroll down,
    and click **Open Anyway** next to Foldera. Or, in Terminal:
@@ -123,8 +123,10 @@ gets back the width you dragged it to once there is room again.
   measured in the background. Windows doesn't do this.
 - Measuring runs in the background and is remembered for the session, so
   walking into a folder already measured is instant.
-- **Picture size**: in Large icons, a slider in the status bar (48–256
-  points), or ⌘+ / ⌘−, or ⌘ (or ⌃) with the scroll wheel.
+- **Picture size**: the slider at the bottom left. All the way left is the
+  list (Details); move it right and the folder turns into pictures at once,
+  bigger the further you go (48–256 points), keeping what you were looking
+  at in sight. ⌘+ / ⌘− and ⌘ (or ⌃) with the scroll wheel do the same.
 
 ## Copying, moving, undo
 
@@ -238,6 +240,7 @@ are enough).
 ```bash
 ./build.sh            # build/Foldera.app, ad-hoc signed for this Mac
 ./build.sh install    # …and copy it to /Applications
+./build.sh dmg        # …and build/Foldera-0.2.0-beta.dmg, the disk image to hand out
 ./test.sh             # the tests (swift test, with a workaround for the CLT)
 ```
 

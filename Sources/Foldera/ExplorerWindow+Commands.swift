@@ -678,6 +678,7 @@ extension ExplorerTab: NSMenuItemValidation {
     func resort() {
         pendingSelection = Set(selectedItems.map(\.key))
         sortGeneration += 1
+        if searchRunning { searchSorted = true }
         // A big folder takes a moment to sort by name; do it off the main
         // thread, as loading does. Search results keep arriving, so they sort here.
         guard items.count > 2000, !isSearching else {
@@ -901,7 +902,9 @@ extension ExplorerTab: NSMenuItemValidation {
             return true
         case #selector(analyzeDiskUsage(_:)):
             return !isInArchive && (chosen.isEmpty ? location.url != nil : chosen.count == 1 && folderTarget(of: chosen[0]) != nil)
-        case #selector(biggerIcons(_:)), #selector(smallerIcons(_:)):
+        case #selector(biggerIcons(_:)):
+            return true
+        case #selector(smallerIcons(_:)):
             return shownMode == .icons
         case #selector(toggleFilters(_:)):
             menuItem.state = showsFilterBar || filters.isActive ? .on : .off

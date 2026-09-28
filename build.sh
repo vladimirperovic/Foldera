@@ -5,6 +5,7 @@
 #   ./build.sh            release build → build/Foldera.app
 #   ./build.sh debug      debug build, same place
 #   ./build.sh install    release build, then copied to /Applications
+#   ./build.sh dmg        release build, then build/Foldera-<version>.dmg to hand out
 set -euo pipefail
 
 cd "$(dirname "$0")"
@@ -90,4 +91,52 @@ if [ "$STEP" = "install" ]; then
   rm -rf "/Applications/$NAME.app"
   ditto "$APP" "/Applications/$NAME.app"
   echo "installed /Applications/$NAME.app"
+fi
+
+if [ "$STEP" = "dmg" ]; then
+  # The usual Mac disk image: Foldera beside a link to Applications, over a
+  # background with an arrow, so installing is one drag.
+  DMG="build/$NAME-$VERSION${STAGE:+-$STAGE}.dmg"
+  STAGING="build/dmg"
+  rm -rf "$STAGING" "$DMG" build/rw.dmg
+  mkdir -p "$STAGING/.background"
+  ditto "$APP" "$STAGING/$NAME.app"
+  ln -s /Applications "$STAGING/Applications"
+  swift Icon/dmg-background.swift "$STAGING/.background"
+  hdiutil create -quiet -ov -srcfolder "$STAGING" -volname "$NAME" -fs HFS+ -format UDRW build/rw.dmg
+  MOUNT="$(hdiutil attach -readwrite -noverify -noautoopen build/rw.dmg | awk -F'\t' '/\/Volumes\//{print $NF}')"
+  # Finder lays out the window and remembers it in the image. It needs
+  # permission to be scripted; without it the image still works, unarranged.
+  osascript - "$(basename "$MOUNT")" "$NAME.app" <<'APPLESCRIPT' || echo "(Finder layout skipped)"
+on run argv
+  tell application "Finder"
+    tell disk (item 1 of argv)
+      open
+      set current view of container window to icon view
+      set toolbar visible of container window to false
+      set statusbar visible of container window to false
+      set bounds of container window to {200, 120, 860, 520}
+      set options to the icon view options of container window
+      set arrangement of options to not arranged
+      set icon size of options to 128
+      set text size of options to 13
+      set background picture of options to file ".background:background.tiff"
+      set position of item (item 2 of argv) of container window to {165, 185}
+      set position of item "Applications" of container window to {495, 185}
+      update without registering applications
+      delay 1
+      close
+    end tell
+  end tell
+end run
+APPLESCRIPT
+  # The disk shows Foldera's icon while it is open. (After the layout:
+  # Finder drops the icon file when it arranges the window.)
+  cp "$APP/Contents/Resources/AppIcon.icns" "$MOUNT/.VolumeIcon.icns"
+  SetFile -a C "$MOUNT" 2>/dev/null || true
+  sync
+  hdiutil detach -quiet "$MOUNT"
+  hdiutil convert -quiet build/rw.dmg -format UDZO -imagekey zlib-level=9 -o "$DMG"
+  rm -rf build/rw.dmg "$STAGING"
+  echo "built $DMG ($(du -h "$DMG" | cut -f1))"
 fi

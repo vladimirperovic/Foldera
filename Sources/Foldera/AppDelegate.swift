@@ -283,7 +283,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
             let select = value("--select").map { [path.appendingPathComponent($0)] } ?? []
             let c = openWindow(target, select: select)
             c.setViewMode(args.contains("--icons") ? .icons : args.contains("--columns") ? .columns : args.contains("--usage") ? .usage : .details)
-            if let side = value("--iconsize").flatMap(Double.init) { c.setIconSize(CGFloat(side)) }
+            if let side = value("--iconsize").flatMap(Double.init) { c.setViewSize(CGFloat(side)) }
             let size = value("--size")?.split(separator: "x").compactMap { Double($0) } ?? []
             c.window?.setContentSize(size.count == 2 ? NSSize(width: size[0], height: size[1]) : NSSize(width: 1100, height: 660))
             if let query = value("--search") {

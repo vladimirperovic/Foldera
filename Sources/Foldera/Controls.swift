@@ -385,7 +385,7 @@ final class IconItem: NSCollectionViewItem {
         background.selected = isSelected
         guard !item.isFolder else { return }
         let scale = view.window?.backingScaleFactor ?? 2
-        Thumbnails.shared.image(for: item.url, side: side, scale: scale) { [weak self] image in
+        Thumbnails.shared.image(for: item.url, side: side, scale: scale, version: item.modified) { [weak self] image in
             guard self?.key == item.key else { return }
             self?.picture.image = image
         }
@@ -400,8 +400,9 @@ final class Thumbnails {
     /// Bounded by memory, not count: 2,000 thumbnails at 128×128 would be 128 MB.
     init() { cache.totalCostLimit = 48 * 1024 * 1024 }
 
-    func image(for url: URL, side: CGFloat, scale: CGFloat, done: @escaping (NSImage) -> Void) {
-        let cacheKey = "\(url.path)|\(side)" as NSString
+    /// `version` is the file's modification date, so an edited picture gets a new thumbnail.
+    func image(for url: URL, side: CGFloat, scale: CGFloat, version: Date?, done: @escaping (NSImage) -> Void) {
+        let cacheKey = "\(url.path)|\(side)@\(scale)|\(version?.timeIntervalSince1970 ?? 0)" as NSString
         if let image = cache.object(forKey: cacheKey) {
             done(image)
             return

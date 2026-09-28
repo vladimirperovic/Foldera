@@ -35,6 +35,8 @@ final class ExplorerTab: NSViewController, NSSplitViewDelegate {
     let watcher = DirectoryWatcher()
     var loadGeneration = 0
     var sortGeneration = 0
+    /// A column was clicked while this search runs: later results go in order too.
+    var searchSorted = false
     var pendingSelection: Set<String>?
     var scrollToTop = false
     var scrollToSelection = false
@@ -90,7 +92,7 @@ final class ExplorerTab: NSViewController, NSSplitViewDelegate {
     let iconsToggle = ToolButton(symbol: "square.grid.2x2", tip: "Large icons (⌘2)", iconSize: 12, height: 22)
     let columnsToggle = ToolButton(symbol: "rectangle.split.3x1", tip: "Columns (⌘3)", iconSize: 12, height: 22)
     let usageToggle = ToolButton(symbol: "square.split.2x2", tip: "Disk usage (⌘4)", iconSize: 12, height: 22)
-    let iconSlider = NSSlider(value: Double(Prefs.iconSize), minValue: 48, maxValue: 256, target: nil, action: nil)
+    let iconSlider = NSSlider(value: Double(Prefs.iconSize), minValue: Double(ExplorerTab.listNotch), maxValue: 256, target: nil, action: nil)
     let treemap = TreemapView()
 
     // Disk usage: the measuring under way, and who is waiting for it.
@@ -236,10 +238,10 @@ final class ExplorerTab: NSViewController, NSSplitViewDelegate {
         iconSlider.controlSize = .small
         iconSlider.target = self
         iconSlider.action = #selector(iconSizeChanged(_:))
-        iconSlider.toolTip = "Picture size (⌘+ / ⌘−, or ⌘ and the scroll wheel)"
+        iconSlider.toolTip = "Drag right for pictures, bigger the further you go; all the way left for the list (⌘+ / ⌘−)"
         iconSlider.widthAnchor.constraint(equalToConstant: 120).isActive = true
-        let status = NSStackView(views: [statusLabel, spacer, iconSlider, detailsToggle, iconsToggle, columnsToggle, usageToggle])
-        status.setCustomSpacing(10, after: iconSlider)
+        let status = NSStackView(views: [iconSlider, statusLabel, spacer, detailsToggle, iconsToggle, columnsToggle, usageToggle])
+        status.setCustomSpacing(14, after: iconSlider)
         status.orientation = .horizontal
         status.distribution = .fill
         status.alignment = .centerY
@@ -401,7 +403,7 @@ final class ExplorerTab: NSViewController, NSSplitViewDelegate {
 
     private func setupColumns() {
         columns.browser.host = self
-        columns.onSelect = { [weak self] in self?.selectionChanged() }
+        columns.onSelect = { [weak self] in self?.listSelectionDidChange() }
         columns.onOpen = { [weak self] in self?.openSelection(nil) }
         columns.onDrop = { [weak self] urls, folder, move in self?.transfer(urls, into: folder, move: move) }
     }
@@ -432,11 +434,12 @@ final class ExplorerTab: NSViewController, NSSplitViewDelegate {
         observers.append(center.addObserver(forName: .explorerClipboardChanged, object: nil, queue: .main) { [weak self] _ in
             self?.refreshMarks()
         })
-        for name in [Notification.Name.explorerShowHiddenChanged, .explorerFolderSizesChanged] {
-            observers.append(center.addObserver(forName: name, object: nil, queue: .main) { [weak self] _ in
-                self?.reload()
-            })
-        }
+        observers.append(center.addObserver(forName: .explorerShowHiddenChanged, object: nil, queue: .main) { [weak self] _ in
+            self?.reload()
+        })
+        observers.append(center.addObserver(forName: .explorerFolderSizesChanged, object: nil, queue: .main) { [weak self] _ in
+            self?.folderSizesChanged()
+        })
         observers.append(center.addObserver(forName: .explorerPreviewPaneChanged, object: nil, queue: .main) { [weak self] _ in
             self?.applyPreviewPane()
         })
@@ -560,13 +563,19 @@ final class ExplorerTab: NSViewController, NSSplitViewDelegate {
         case .folder(let url):
             let hidden = Prefs.showHidden
             let order = sort
+            // Folder sizes measured before go in here too, so sorting by size is right the first time.
+            let sizes = Prefs.folderSizes ? UsageCache.node(for: url).map(Self.folderSizes(in:)) : nil
             // Sorting a big folder takes a while; it happens here, off the main thread.
             DispatchQueue.global(qos: .userInitiated).async { [weak self] in
-                let result = Result { try FileItem.contents(of: url, showHidden: hidden).sorted(by: order) }
+                let result = Result { () -> [FileItem] in
+                    let found = try FileItem.contents(of: url, showHidden: hidden)
+                    if let sizes { for item in found where item.isFolder && item.volume == nil { item.folderSize = sizes[item.name] } }
+                    return found.sorted(by: order)
+                }
                 DispatchQueue.main.async {
                     guard let self, generation == self.loadGeneration else { return }
                     switch result {
-                    case .success(let loaded): self.apply(loaded, error: nil, sortedBy: order)
+                    case .success(let loaded): self.apply(loaded, error: nil, sortedBy: order, sized: sizes != nil)
                     case .failure(let error): self.apply([], error: error)
                     }
                 }
@@ -584,22 +593,23 @@ final class ExplorerTab: NSViewController, NSSplitViewDelegate {
         load()
     }
 
-    func apply(_ loaded: [FileItem], error: Error?, sortedBy order: SortSpec? = nil) {
+    func apply(_ loaded: [FileItem], error: Error?, sortedBy order: SortSpec? = nil, sized: Bool = false) {
         if renamingKey != nil {
             reloadDeferred = true
             return
         }
         loadError = error
         items = order == sort ? loaded : loaded.sorted(by: sort)
-        // Sizes measured before go in before the list is drawn, not in a second pass.
-        let measured = Prefs.folderSizes && !isSearching ? location.url.flatMap(UsageCache.node(for:)) : nil
+        // A scan that finished while the folder was being read: its sizes go
+        // in before the list is drawn, not in a second pass.
+        let measured = !sized && Prefs.folderSizes && !isSearching ? location.url.flatMap(UsageCache.node(for:)) : nil
         if let measured {
             assignFolderSizes(measured)
             if sort.key == .size { items = items.sorted(by: sort) }
         }
         showItems()
         watchCloud()
-        if measured == nil { fillFolderSizes() }
+        if !sized && measured == nil { fillFolderSizes() }
     }
 
     /// While iCloud items are downloading or uploading, look at those items
@@ -801,6 +811,8 @@ final class ExplorerTab: NSViewController, NSSplitViewDelegate {
     /// in the middle of a reload are left for the caller.
     func listSelectionDidChange() {
         guard !selectingQuietly else { return }
+        // A click while a listing or a sort is on its way is what it should select.
+        if pendingSelection != nil { pendingSelection = Set(selectedItems.map(\.key)) }
         selectionChanged()
     }
 
@@ -897,6 +909,7 @@ final class ExplorerTab: NSViewController, NSSplitViewDelegate {
         loadError = nil
         searchRunning = true
         searchTruncated = false
+        searchSorted = false
         pendingSelection = []
         scrollToTop = true
         showItems()
@@ -913,6 +926,17 @@ final class ExplorerTab: NSViewController, NSSplitViewDelegate {
 
     /// Results are added in the order they are found; a column click sorts them.
     private func appendResults(_ batch: [FileItem]) {
+        if searchSorted {
+            // Sorted by a column click: new results go where they belong.
+            // The list is already in order, so this sort is little more than a merge.
+            let keys = Set(selectedItems.map(\.key))
+            items = (items + batch).sorted(by: sort)
+            reloadVisibleList()
+            selectQuietly(keys)
+            updateEmptyState()
+            updateStatus()
+            return
+        }
         let start = items.count
         items += batch
         // Only the visible list gets a proper insert; the hidden one may not
@@ -997,7 +1021,7 @@ final class ExplorerTab: NSViewController, NSSplitViewDelegate {
         gridScroll.isHidden = mode != .icons
         columns.browser.isHidden = mode != .columns
         treemap.isHidden = mode != .usage
-        iconSlider.isHidden = mode != .icons
+        iconSlider.doubleValue = Double(viewMode == .icons ? Prefs.iconSize : Self.listNotch)
         detailsToggle.isOn = viewMode == .details
         iconsToggle.isOn = viewMode == .icons
         columnsToggle.isOn = viewMode == .columns
@@ -1011,8 +1035,29 @@ final class ExplorerTab: NSViewController, NSSplitViewDelegate {
         NSSize(width: max(side + 44, 108), height: side + 56)
     }
 
+    /// The left end of the size slider, which stands for the list (Details).
+    static let listNotch: CGFloat = 32
+
     @objc func iconSizeChanged(_ sender: Any?) {
-        setIconSize(CGFloat(iconSlider.doubleValue))
+        setViewSize(CGFloat(iconSlider.doubleValue))
+    }
+
+    /// The slider at the bottom left: all the way left is Details; anywhere
+    /// right of that is Large icons at that size, switched to at once.
+    func setViewSize(_ value: CGFloat) {
+        if value < 48 {
+            if viewMode == .icons { setViewMode(.details) }
+            return
+        }
+        guard viewMode != .icons else { return setIconSize(value) }
+        // What was at the top of the list stays in sight among the pictures.
+        let top = shownMode == .details ? table.rows(in: tableScroll.contentView.bounds).location : NSNotFound
+        setIconSize(value)
+        setViewMode(.icons)
+        if firstSelectedIndex == nil, top != NSNotFound, top < items.count {
+            grid.layoutSubtreeIfNeeded()
+            grid.scrollToItems(at: [IndexPath(item: top, section: 0)], scrollPosition: .top)
+        }
     }
 
     func setIconSize(_ side: CGFloat) {
@@ -1020,11 +1065,17 @@ final class ExplorerTab: NSViewController, NSSplitViewDelegate {
         Prefs.iconSize = side
         iconSlider.doubleValue = Double(side)
         guard let layout = grid.collectionViewLayout as? NSCollectionViewFlowLayout, layout.itemSize != Self.tileSize(side) else { return }
+        // The picture chosen, or else the first in sight, stays in sight as the size changes.
+        let anchor = grid.selectionIndexPaths.min() ?? grid.indexPathsForVisibleItems().min()
         // A wheel sends many sizes a second: the tiles on screen follow at
         // once, and the pictures are drawn again at the new size when it stops.
         layout.itemSize = Self.tileSize(side)
         for tile in grid.visibleItems() { (tile as? IconItem)?.side = side }
         layout.invalidateLayout()
+        if let anchor, !gridScroll.isHidden, anchor.item < items.count {
+            grid.layoutSubtreeIfNeeded()
+            grid.scrollToItems(at: [anchor], scrollPosition: grid.selectionIndexPaths.isEmpty ? .top : .nearestHorizontalEdge)
+        }
         iconReload?.cancel()
         let work = DispatchWorkItem { [weak self] in
             guard let self else { return }
@@ -1038,8 +1089,9 @@ final class ExplorerTab: NSViewController, NSSplitViewDelegate {
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.25, execute: work)
     }
 
-    @objc func biggerIcons(_ sender: Any?) { setIconSize(Prefs.iconSize * 1.25) }
-    @objc func smallerIcons(_ sender: Any?) { setIconSize(Prefs.iconSize / 1.25) }
+    /// ⌘+ from the list goes to pictures; ⌘− from the smallest pictures goes back to the list, as the slider does.
+    @objc func biggerIcons(_ sender: Any?) { setViewSize(viewMode == .icons ? Prefs.iconSize * 1.25 : Prefs.iconSize) }
+    @objc func smallerIcons(_ sender: Any?) { setViewSize(Prefs.iconSize <= 48 ? 0 : max(Prefs.iconSize / 1.25, 48)) }
 
     // MARK: Disk usage
 
@@ -1107,12 +1159,24 @@ final class ExplorerTab: NSViewController, NSSplitViewDelegate {
         waitingForFolderSizes = true
         measure { [weak self] tree in
             self?.waitingForFolderSizes = false
+            guard Prefs.folderSizes else { return }
             self?.showFolderSizes(tree)
         }
     }
 
+    /// View › Folder Sizes was switched: only the Size column changes, so the folder isn't read again.
+    func folderSizesChanged() {
+        if Prefs.folderSizes { return fillFolderSizes() }
+        for item in items { item.folderSize = nil }
+        sizesChanged()
+    }
+
     private func showFolderSizes(_ tree: UsageNode) {
         assignFolderSizes(tree)
+        sizesChanged()
+    }
+
+    private func sizesChanged() {
         if sort.key == .size {
             resort()
         } else {
@@ -1122,8 +1186,12 @@ final class ExplorerTab: NSViewController, NSSplitViewDelegate {
         }
     }
 
+    static func folderSizes(in tree: UsageNode) -> [String: Int64] {
+        Dictionary(tree.children.filter(\.isFolder).map { ($0.name, $0.size) }, uniquingKeysWith: { a, _ in a })
+    }
+
     private func assignFolderSizes(_ tree: UsageNode) {
-        let sizes = Dictionary(tree.children.filter(\.isFolder).map { ($0.name, $0.size) }, uniquingKeysWith: { a, _ in a })
+        let sizes = Self.folderSizes(in: tree)
         for item in items where item.isFolder && item.volume == nil { item.folderSize = sizes[item.name] }
     }
 
@@ -1253,6 +1321,8 @@ final class ExplorerTab: NSViewController, NSSplitViewDelegate {
         search.cancel()
         watcher.stop()
         cloudRefresh?.cancel()
+        iconReload?.cancel()
+        usageScanner?.cancel()
         previewPane.clear()
         if let keyMonitor { NSEvent.removeMonitor(keyMonitor) }
         keyMonitor = nil

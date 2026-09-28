@@ -357,7 +357,7 @@ enum Prefs {
 
     /// The picture size in Large icons, 48–256 points.
     static var iconSize: CGFloat {
-        get { UserDefaults.standard.object(forKey: "iconSize").map { CGFloat(($0 as? Double) ?? 64) } ?? 64 }
+        get { min(max(UserDefaults.standard.object(forKey: "iconSize").map { CGFloat(($0 as? Double) ?? 64) } ?? 64, 48), 256) }
         set { UserDefaults.standard.set(Double(newValue), forKey: "iconSize") }
     }
 

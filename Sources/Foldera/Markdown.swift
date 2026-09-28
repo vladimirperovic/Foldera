@@ -349,7 +349,11 @@ final class MarkdownView: NSView, WKNavigationDelegate {
             // The same file edited: only the text changes. (Scripts in the
             // page are off; this one comes from the app, not the file.)
             pictures.page = Markdown.page(text, base: pictures.base, fontSize: fontSize)
-            web.evaluateJavaScript("document.body.innerHTML = \(literal)")
+            web.evaluateJavaScript("document.body.innerHTML = \(literal); 0") { [weak self] _, error in
+                // Should the swap ever fail, load the page whole rather than leave it stale.
+                guard error != nil, let self else { return }
+                self.web.load(URLRequest(url: self.pictures.pageURL))
+            }
             return
         }
         shown = file
@@ -401,6 +405,7 @@ final class LocalPictures: NSObject, WKURLSchemeHandler {
         return real.hasPrefix(top == "/" ? "/" : top + "/") ? file : nil
     }
 
+    /// WebKit calls this on the main thread, where `serve` and `page` are set.
     func webView(_ webView: WKWebView, start task: WKURLSchemeTask) {
         guard let url = task.request.url else { return }
         let body: Data?

@@ -153,6 +153,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         openWindow(frontTab?.location ?? .folder(FileManager.default.homeDirectoryForCurrentUser))
     }
 
+    /// File › Sync Folders… with no file list in front: the pair synced last.
+    @objc func syncFolders(_ sender: Any?) {
+        SyncWindow.show([])
+    }
+
     /// ⌘W in a window without tabs (the viewer, Properties, the Markdown editor) closes it.
     @objc func closeTab(_ sender: Any?) {
         NSApp.keyWindow?.performClose(sender)
@@ -275,7 +280,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         let path = URL(fileURLWithPath: (args[0] as NSString).expandingTildeInPath)
         var controller: ExplorerTab?
         var capture = value("--capture")
-        if args[0] != "thismac" && ImageFiles.isImage(path) {
+        if let other = value("--sync") {
+            // The sync window for `path` and `other`, compared at once; its memory stays out of the real one.
+            Sync.Memory.folder = FileManager.default.temporaryDirectory.appendingPathComponent("FolderaSnapshotSync")
+            let size = value("--size")?.split(separator: "x").compactMap { Double($0) } ?? []
+            SyncWindow.showCompared(path, URL(fileURLWithPath: (other as NSString).expandingTildeInPath),
+                                    mode: value("--mode").flatMap(Sync.Mode.init(rawValue:)),
+                                    size: size.count == 2 ? NSSize(width: size[0], height: size[1]) : nil)
+            capture = "sync"
+        } else if args[0] != "thismac" && ImageFiles.isImage(path) {
             open(path, reveal: false)
             capture = "viewer"
         } else if ArchiveFolders.isArchive(path) {
@@ -302,6 +315,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
             switch capture {
             case "viewer": return NSApp.windows.first { $0 is ViewerWindow }
             case "properties": return NSApp.windows.first { $0 is EscWindow && $0.isVisible }
+            case "sync": return NSApp.windows.first { $0.windowController is SyncWindow }
             default: return controller?.window
             }
         }
@@ -316,6 +330,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
             case "cut": controller?.cut(nil)
             case "properties": controller?.showProperties(nil)
             case "filters": controller?.filtersChanged(SearchFilters(kind: .images))
+            case "sync": (captured()?.windowController as? SyncWindow)?.synchronize(nil)
             case "tabs":
                 for name in ["Photos", "Projects 2026"] {
                     self.openWindow(.folder(path.appendingPathComponent(name)), tabbedWith: controller?.window, activate: false)

@@ -57,6 +57,7 @@ enum MainMenu {
             item("Extract All", #selector(W.extract(_:))),
             item("Extract To…", #selector(W.extractTo(_:))),
             item("AirDrop…", #selector(W.airDrop(_:))),
+            item("Sync Folders…", #selector(W.syncFolders(_:))),
             sep(),
             item("Rename", #selector(W.renameSelection(_:)), key(NSF2FunctionKey), []),
             item("Properties", #selector(W.showProperties(_:)), "i"),

@@ -31,7 +31,8 @@ the address bar, the navigation pane, the Details list with Enter, F2 and
 Backspace, tabs in the title bar, Cut and Paste, a Size column in KB. It
 also has things Explorer never had: a picture viewer in the manner of
 FastStone, zip/RAR/7z archives you walk into like folders, a disk usage
-map, and Markdown files shown (and edited) in the details pane.
+map, folder sync in the manner of FreeFileSync, and Markdown files shown
+(and edited) in the details pane.
 
 | | |
 |---|---|
@@ -158,6 +159,55 @@ gets back the width you dragged it to once there is room again.
   Trash, newest first. ⇧⌘Z redoes them. The history is shared by all
   windows and the viewer.
 
+## Sync folders
+
+**File › Sync Folders…** keeps two folders in step, as
+[FreeFileSync](https://freefilesync.org) does. Right-click a folder →
+*Sync with…*, or two selected folders → *Sync these folders…*, to start
+from those. The clock button at the top right brings back pairs synced
+before, with their settings.
+
+- **Two way** (⇄): what changed on either side is copied to the other,
+  deletions included. Foldera remembers what both sides held when they were
+  last the same, which is how it tells a file deleted on one side from a
+  file new on the other.
+  - The first time there is nothing to remember: nothing is deleted, and
+    of two different files the newer one wins.
+  - A file changed on both sides is a conflict and stays as it is until you
+    choose.
+- **Mirror** (→|): the right folder becomes an exact copy of the left.
+  Whatever is only on the right is deleted.
+- **Update** (→): new and newer files go from the left to the right.
+  Nothing is deleted, and a newer file on the right is kept.
+
+**Compare** (Enter, ⌘R) lists what would happen; nothing changes until
+**Synchronize**.
+- Right-click rows to change them: copy either way, delete, or don't sync.
+  Double-click one to see it in Foldera.
+- A folder on one side only is a single row, with what it holds.
+- Files are the same when size and date modified agree (to two seconds, as
+  FAT drives keep dates), or, with *Compare content*, when every byte does.
+
+Replaced and deleted files go to the Trash, and ⌘Z undoes the whole sync.
+Network drives often have no Trash; *Delete files permanently* syncs them,
+asks first, and can't be undone.
+
+What keeps it careful:
+- Nothing inside a folder that couldn't be read is deleted or replaced, and
+  a folder that can't be read at all stops the compare.
+- Anything that changed after Compare is left alone.
+- A replacement is copied in beside the old file first, so a failed copy
+  leaves the old one as it was.
+- A sync that would replace or delete more than half of one side's files
+  asks first (an empty or unmounted drive looks like everything deleted).
+- Names are compared ignoring case unless both drives tell case apart.
+- `.DS_Store`, `._` files and a drive's own folders (`.Trashes`,
+  `.Spotlight-V100`…) are never synced. Symbolic links are copied as links.
+
+What Two way remembers is kept in `~/Library/Application Support/Foldera/Sync`,
+one small file per pair. There are no filters, no detection of moved files and
+no scheduled syncs yet.
+
 ## Archives: zip, RAR, 7z, tar
 
 - **Open an archive like a folder** (Enter or double-click), as Windows does
@@ -272,7 +322,8 @@ first time. Every new build gets a new ad-hoc signature, so macOS asks
 again after each rebuild. Full Disk Access for Foldera stops the prompts.
 
 `Foldera --snapshot <folder|image> out.png [--icons|--columns] [--pane]
-[--light|--dark] [--size WxH] [--tabs count] [--search text] [--select name] [--press keys]`
+[--light|--dark] [--size WxH] [--tabs count] [--search text] [--select name] [--press keys]
+[--sync other-folder [--mode twoWay|mirror|update]]`
 renders a window to a PNG. It is used during development to check the
 interface without clicking (the screenshots above were made this way, of a
 made-up folder). It leaves your settings as they were.

@@ -163,18 +163,21 @@ final class Transfer {
     let plan: Plan
     let move: Bool
     private let cancelled = CancelFlag()
+    private let copier: TreeCopier
     // Touched only from the worker thread (copyfile calls back on it).
     private var progress = Progress()
     private var stepBase: Int64 = 0
-    private var stepFinished: Int64 = 0
-    private var fileCopied: Int64 = 0
-    private var stepErrors: [String] = []
     private var lastPublished = Date.distantPast
     private var report: ((Progress) -> Void)?
 
     init(plan: Plan, move: Bool) {
         self.plan = plan
         self.move = move
+        copier = TreeCopier(cancelled: cancelled)
+        copier.copied = { [unowned self] bytes in
+            self.progress.bytesDone = self.stepBase + bytes
+            self.publish(force: false)
+        }
     }
 
     func cancel() { cancelled.set() }
@@ -228,10 +231,11 @@ final class Transfer {
                     try fm.moveItem(at: step.from, to: step.to)
                     outcome.changes.append(.moved(from: step.from, to: step.to))
                 } else {
-                    try copy(step.from, to: step.to)
+                    try copier.copy(step.from, to: step.to)
+                    outcome.failures += copier.errors
                     if move {
                         // The original goes only once every byte arrived.
-                        if stepErrors.isEmpty {
+                        if copier.errors.isEmpty {
                             try fm.removeItem(at: step.from)
                             outcome.changes.append(.moved(from: step.from, to: step.to))
                         } else {
@@ -243,7 +247,6 @@ final class Transfer {
                     }
                 }
                 outcome.made.append(step.to)
-                outcome.failures += stepErrors
             } catch is CancellationError {
                 outcome.cancelled = true
                 break
@@ -267,59 +270,6 @@ final class Transfer {
         progress.itemsDone = plan.steps.count
         publish(force: true)
         return outcome
-    }
-
-    /// One item, with its whole folder tree: data, permissions, dates,
-    /// extended attributes. On APFS a copy is a clone and takes no space.
-    private func copy(_ from: URL, to: URL) throws {
-        guard !FileOps.exists(to) else {
-            throw OpError("There is already an item named “\(to.lastPathComponent)”.")
-        }
-        stepFinished = 0
-        fileCopied = 0
-        stepErrors = []
-        let state = copyfile_state_alloc()
-        defer { copyfile_state_free(state) }
-        let callback: copyfile_callback_t = transferStatus
-        copyfile_state_set(state, UInt32(COPYFILE_STATE_STATUS_CB), unsafeBitCast(callback, to: UnsafeRawPointer.self))
-        copyfile_state_set(state, UInt32(COPYFILE_STATE_STATUS_CTX), Unmanaged.passUnretained(self).toOpaque())
-        let flags = copyfile_flags_t(COPYFILE_ALL | COPYFILE_RECURSIVE | COPYFILE_EXCL | COPYFILE_NOFOLLOW_SRC | COPYFILE_CLONE)
-        let result = copyfile(from.path, to.path, state, flags)
-        let code = errno
-        if cancelled.isSet {
-            // Nothing half-copied is left behind.
-            try? FileManager.default.removeItem(at: to)
-            throw CancellationError()
-        }
-        if result != 0 {
-            try? FileManager.default.removeItem(at: to)
-            throw NSError(domain: NSPOSIXErrorDomain, code: Int(code))
-        }
-    }
-
-    fileprivate func status(what: Int32, stage: Int32, state: copyfile_state_t?, source: UnsafePointer<CChar>?) -> Int32 {
-        if cancelled.isSet { return COPYFILE_QUIT }
-        switch (what, stage) {
-        case (COPYFILE_RECURSE_FILE, COPYFILE_START):
-            fileCopied = 0
-        case (COPYFILE_RECURSE_FILE, COPYFILE_FINISH):
-            var info = stat()
-            if let source, lstat(source, &info) == 0 { stepFinished += Int64(info.st_size) }
-            fileCopied = 0
-        case (COPYFILE_COPY_DATA, COPYFILE_PROGRESS):
-            var copied: off_t = 0
-            if let state { copyfile_state_get(state, UInt32(COPYFILE_STATE_COPIED), &copied) }
-            fileCopied = Int64(copied)
-        case (_, COPYFILE_ERR), (COPYFILE_RECURSE_ERROR, _):
-            let name = source.map { String(cString: $0) }.map { ($0 as NSString).lastPathComponent } ?? "an item"
-            stepErrors.append("“\(name)”: \(String(cString: strerror(errno)))")
-            return COPYFILE_SKIP
-        default:
-            break
-        }
-        progress.bytesDone = stepBase + stepFinished + fileCopied
-        publish(force: false)
-        return COPYFILE_CONTINUE
     }
 
     private func publish(force: Bool) {
@@ -352,11 +302,79 @@ final class Transfer {
     }
 }
 
-/// copyfile's C callback; the context is the Transfer doing the copying.
-private func transferStatus(what: Int32, stage: Int32, state: copyfile_state_t?, source: UnsafePointer<CChar>?,
-                            destination: UnsafePointer<CChar>?, context: UnsafeMutableRawPointer?) -> Int32 {
+/// copyfile for one item with its whole folder tree: data, permissions,
+/// dates, extended attributes. On APFS a copy is a clone and takes no space.
+/// Copying and Sync both use it; it reports as the bytes arrive.
+final class TreeCopier {
+    /// Bytes of the current item that have arrived so far (on the copying thread).
+    var copied: ((Int64) -> Void)?
+    /// Parts of the last item that couldn't be copied and were skipped.
+    private(set) var errors: [String] = []
+    private let cancelled: CancelFlag
+    // Touched only from the copying thread (copyfile calls back on it).
+    private var finished: Int64 = 0
+    private var fileCopied: Int64 = 0
+
+    init(cancelled: CancelFlag) {
+        self.cancelled = cancelled
+    }
+
+    /// Nothing half-copied is left behind when it fails or is cancelled.
+    func copy(_ from: URL, to: URL) throws {
+        errors = []
+        guard !FileOps.exists(to) else {
+            throw OpError("There is already an item named “\(to.lastPathComponent)”.")
+        }
+        finished = 0
+        fileCopied = 0
+        let state = copyfile_state_alloc()
+        defer { copyfile_state_free(state) }
+        let callback: copyfile_callback_t = copierStatus
+        copyfile_state_set(state, UInt32(COPYFILE_STATE_STATUS_CB), unsafeBitCast(callback, to: UnsafeRawPointer.self))
+        copyfile_state_set(state, UInt32(COPYFILE_STATE_STATUS_CTX), Unmanaged.passUnretained(self).toOpaque())
+        let flags = copyfile_flags_t(COPYFILE_ALL | COPYFILE_RECURSIVE | COPYFILE_EXCL | COPYFILE_NOFOLLOW_SRC | COPYFILE_CLONE)
+        let result = copyfile(from.path, to.path, state, flags)
+        let code = errno
+        if cancelled.isSet {
+            try? FileManager.default.removeItem(at: to)
+            throw CancellationError()
+        }
+        if result != 0 {
+            try? FileManager.default.removeItem(at: to)
+            throw NSError(domain: NSPOSIXErrorDomain, code: Int(code))
+        }
+    }
+
+    fileprivate func status(what: Int32, stage: Int32, state: copyfile_state_t?, source: UnsafePointer<CChar>?) -> Int32 {
+        if cancelled.isSet { return COPYFILE_QUIT }
+        switch (what, stage) {
+        case (COPYFILE_RECURSE_FILE, COPYFILE_START):
+            fileCopied = 0
+        case (COPYFILE_RECURSE_FILE, COPYFILE_FINISH):
+            var info = stat()
+            if let source, lstat(source, &info) == 0 { finished += Int64(info.st_size) }
+            fileCopied = 0
+        case (COPYFILE_COPY_DATA, COPYFILE_PROGRESS):
+            var bytes: off_t = 0
+            if let state { copyfile_state_get(state, UInt32(COPYFILE_STATE_COPIED), &bytes) }
+            fileCopied = Int64(bytes)
+        case (_, COPYFILE_ERR), (COPYFILE_RECURSE_ERROR, _):
+            let name = source.map { String(cString: $0) }.map { ($0 as NSString).lastPathComponent } ?? "an item"
+            errors.append("“\(name)”: \(String(cString: strerror(errno)))")
+            return COPYFILE_SKIP
+        default:
+            break
+        }
+        copied?(finished + fileCopied)
+        return COPYFILE_CONTINUE
+    }
+}
+
+/// copyfile's C callback; the context is the TreeCopier doing the copying.
+private func copierStatus(what: Int32, stage: Int32, state: copyfile_state_t?, source: UnsafePointer<CChar>?,
+                          destination: UnsafePointer<CChar>?, context: UnsafeMutableRawPointer?) -> Int32 {
     guard let context else { return COPYFILE_CONTINUE }
-    return Unmanaged<Transfer>.fromOpaque(context).takeUnretainedValue()
+    return Unmanaged<TreeCopier>.fromOpaque(context).takeUnretainedValue()
         .status(what: what, stage: stage, state: state, source: source)
 }
 

@@ -451,6 +451,20 @@ extension ExplorerTab: NSMenuItemValidation {
         if let folder = terminalFolder { FileOps.openTerminal(at: folder) }
     }
 
+    /// Sync Folders: the one or two folders selected (a single one with the
+    /// folder it was last synced with); with none, the pair synced last.
+    @objc func syncFolders(_ sender: Any?) {
+        let folders = selectedItems.compactMap(folderTarget(of:))
+        if (1...2).contains(folders.count) { return SyncWindow.show(folders) }
+        if SyncWindow.Setup.recent.isEmpty, let url = location.url { return SyncWindow.show([url]) }
+        SyncWindow.show([])
+    }
+
+    /// Right-click on the empty part of the list: this folder.
+    @objc func syncThisFolder(_ sender: Any?) {
+        if let url = location.url { SyncWindow.show([url]) }
+    }
+
     @objc func showInFinder(_ sender: Any?) {
         let urls = selectedURLs
         if !urls.isEmpty {
@@ -766,6 +780,7 @@ extension ExplorerTab: NSMenuItemValidation {
         menu.addItem(item("Open in Terminal", "terminal", #selector(openInTerminal(_:))))
         menu.addItem(item("Show in Finder", "folder", #selector(showInFinder(_:))))
         menu.addItem(item(pinTitle, "pin", #selector(togglePin(_:))))
+        menu.addItem(item("Sync folders…", "arrow.triangle.2.circlepath", #selector(syncFolders(_:))))
         menu.addItem(.separator())
         menu.addItem(item("Properties", "info.circle", #selector(showProperties(_:)), key: "i"))
         return menu
@@ -805,6 +820,7 @@ extension ExplorerTab: NSMenuItemValidation {
             menu.addItem(.separator())
             menu.addItem(item("Open in Terminal", "terminal", #selector(openInTerminal(_:))))
             menu.addItem(item("Analyze disk usage", "square.split.2x2", #selector(analyzeDiskUsage(_:))))
+            menu.addItem(item("Sync with…", "arrow.triangle.2.circlepath", #selector(syncThisFolder(_:))))
             menu.addItem(item("Copy as path", "link", #selector(copyPath(_:)), key: "c", mods: [.command, .shift]))
             menu.addItem(item(pinTitle, "pin", #selector(togglePin(_:))))
             menu.addItem(.separator())
@@ -871,6 +887,9 @@ extension ExplorerTab: NSMenuItemValidation {
         if folders.count == 1 && chosen.count == 1 {
             menu.addItem(item("Open in Terminal", "terminal", #selector(openInTerminal(_:))))
             menu.addItem(item("Analyze disk usage", "square.split.2x2", #selector(analyzeDiskUsage(_:))))
+            menu.addItem(item("Sync with…", "arrow.triangle.2.circlepath", #selector(syncFolders(_:))))
+        } else if folders.count == 2 && chosen.count == 2 {
+            menu.addItem(item("Sync these folders…", "arrow.triangle.2.circlepath", #selector(syncFolders(_:))))
         }
         menu.addItem(item("Show in Finder", "folder", #selector(showInFinder(_:))))
         menu.addItem(item("Properties", "info.circle", #selector(showProperties(_:)), key: "i"))
@@ -905,6 +924,8 @@ extension ExplorerTab: NSMenuItemValidation {
             return !editing && (!chosen.isEmpty || location.url != nil)
         case #selector(openInTerminal(_:)):
             return terminalFolder != nil
+        case #selector(syncFolders(_:)), #selector(syncThisFolder(_:)):
+            return !isInArchive
         case #selector(togglePin(_:)):
             menuItem.title = pinTitle
             return !pinTargets.isEmpty

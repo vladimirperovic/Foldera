@@ -13,7 +13,9 @@ import CryptoKit
 ///
 /// Two files are the same when size and date modified agree (dates to two
 /// seconds, as FAT drives keep them), or, if asked, when their bytes do.
-/// Nothing inside a folder that couldn't be read is touched.
+/// A symbolic link is the same as another when it points to the same place.
+/// Nothing inside a folder that couldn't be read is touched, and nothing is
+/// changed that isn't still as the compare found it.
 enum Sync {
     enum Mode: String, CaseIterable, Codable {
         case twoWay, mirror, update
@@ -49,22 +51,43 @@ enum Sync {
         var size: Int64
         /// Date modified, in seconds since 1970.
         var modified: Double
+        /// A symbolic link: copied and compared as a link, never as what it points to.
+        var link = false
 
-        init(folder: Bool, size: Int64, modified: Double) {
+        init(folder: Bool, size: Int64, modified: Double, link: Bool = false) {
             self.folder = folder
             self.size = size
             self.modified = modified
+            self.link = link
         }
 
         init(_ values: URLResourceValues) {
-            folder = values.isDirectory == true && values.isSymbolicLink != true
+            link = values.isSymbolicLink == true
+            folder = values.isDirectory == true && !link
             size = folder ? 0 : Int64(values.fileSize ?? 0)
             modified = values.contentModificationDate?.timeIntervalSince1970 ?? 0
         }
 
-        /// The same as far as size and date tell.
+        /// The same kind, size and date (dates to two seconds). Folders only
+        /// by kind: what is inside one is looked at on its own (see
+        /// `Job.unchanged`), since a folder's date moves whenever Finder
+        /// writes its .DS_Store.
         func matches(_ other: Item) -> Bool {
-            folder == other.folder && (folder || (size == other.size && abs(modified - other.modified) <= Sync.tolerance))
+            folder == other.folder && link == other.link
+                && (folder || (size == other.size && abs(modified - other.modified) <= Sync.tolerance))
+        }
+    }
+
+    /// Whether a file was touched at all since it was looked at: which file
+    /// it is on the disk, and when anything about it last changed. Unlike
+    /// the date modified, that time can't be set back.
+    struct Stamp: Equatable {
+        let id: UInt64
+        let changed: Double
+
+        init(_ values: URLResourceValues) {
+            id = values.fileIdentifier ?? 0
+            changed = values.attributeModificationDate?.timeIntervalSince1970 ?? 0
         }
     }
 
@@ -74,11 +97,32 @@ enum Sync {
     /// Half-copied replacements are named so; they are never synced.
     static let partialSuffix = ".foldera-sync"
 
-    static let keys: [URLResourceKey] = [.isDirectoryKey, .isSymbolicLinkKey, .fileSizeKey, .contentModificationDateKey]
+    static let keys: [URLResourceKey] = [.isDirectoryKey, .isSymbolicLinkKey, .fileSizeKey, .contentModificationDateKey,
+                                         .fileIdentifierKey, .attributeModificationDateKey]
+    private static let keySet = Set(keys)
 
     /// What is at `url` now, if anything.
     static func item(at url: URL) -> Item? {
-        (try? url.resourceValues(forKeys: Set(keys))).map(Item.init)
+        (try? url.resourceValues(forKeys: keySet)).map(Item.init)
+    }
+
+    static func stamp(at url: URL) -> Stamp? {
+        (try? url.resourceValues(forKeys: keySet)).map(Stamp.init)
+    }
+
+    /// The path with every symbolic link in it followed, as the disk has it
+    /// (with /private, unlike `resolvingSymlinksInPath`).
+    static func realPath(_ url: URL) -> String? {
+        guard let real = realpath(url.path, nil) else { return nil }
+        defer { free(real) }
+        return String(cString: real)
+    }
+
+    /// Which folder this is, on which disk: another drive mounted in the
+    /// same place is another folder.
+    static func identity(of url: URL) -> String? {
+        guard let values = try? url.resourceValues(forKeys: [.volumeUUIDStringKey, .fileIdentifierKey]) else { return nil }
+        return "\(values.volumeUUIDString ?? "?")/\(values.fileIdentifier ?? 0)"
     }
 
     /// Never synced: Finder's and the drive's own bookkeeping.
@@ -99,6 +143,10 @@ enum Sync {
         var items: [String: Item] = [:]
         /// The path as this side spells it, where that differs from the key.
         var spelled: [String: String] = [:]
+        /// For files and links: whether they are touched before anything is done to them.
+        var stamps: [String: Stamp] = [:]
+        /// Where each symbolic link points.
+        var targets: [String: String] = [:]
         /// Folders whose contents couldn't be read, and items that couldn't be looked at.
         var unreadable: Set<String> = []
         var problems: [String] = []
@@ -113,10 +161,18 @@ enum Sync {
         let left: URL
         let right: URL
         let comparison: Comparison
+        /// Names compared ignoring case (see `caseSensitive`).
+        var ignoreCase = false
         var leftSide = Listing()
         var rightSide = Listing()
         /// Files of equal size read byte by byte (Content only): key → the same.
         var sameContent: [String: Bool] = [:]
+        /// SHA-256 of what files hold, where Content read them whole.
+        var leftHashes: [String: String] = [:]
+        var rightHashes: [String: String] = [:]
+        /// `Sync.identity` of both folders when they were read.
+        var leftIdentity: String?
+        var rightIdentity: String?
         var memory = Memory()
 
         var problems: [String] { leftSide.problems + rightSide.problems }
@@ -133,7 +189,8 @@ enum Sync {
 
         /// Two files that are not the same, by the comparison chosen.
         func differ(_ key: String, _ l: Item, _ r: Item) -> Bool {
-            if l.size != r.size { return true }
+            if l.link != r.link || l.size != r.size { return true }
+            if l.link { return leftSide.targets[key] != rightSide.targets[key] }
             if let same = sameContent[key] { return !same }
             return abs(l.modified - r.modified) > Sync.tolerance
         }
@@ -154,8 +211,8 @@ enum Sync {
     static func compare(_ left: URL, _ right: URL, by comparison: Comparison, cancelled: CancelFlag,
                         progress: @escaping (String) -> Void = { _ in }) throws -> Scan {
         // A folder chosen through a symbolic link is read, and synced, where it really is.
-        let left = left.resolvingSymlinksInPath()
-        let right = right.resolvingSymlinksInPath()
+        let left = realPath(left).map { URL(fileURLWithPath: $0, isDirectory: true) } ?? left
+        let right = realPath(right).map { URL(fileURLWithPath: $0, isDirectory: true) } ?? right
         let ignoreCase = !(caseSensitive(left) && caseSensitive(right))
         var last = Date.distantPast
         func report(_ text: @autoclosure () -> String) {
@@ -163,45 +220,65 @@ enum Sync {
             last = Date()
             progress(text())
         }
-        var scan = Scan(left: left, right: right, comparison: comparison)
+        var scan = Scan(left: left, right: right, comparison: comparison, ignoreCase: ignoreCase)
+        scan.leftIdentity = identity(of: left)
+        scan.rightIdentity = identity(of: right)
         scan.leftSide = try list(left, ignoreCase: ignoreCase, cancelled: cancelled) {
             report("Reading “\(left.lastPathComponent)”… \(Format.items($0))")
         }
         scan.rightSide = try list(right, ignoreCase: ignoreCase, cancelled: cancelled) {
             report("Reading “\(right.lastPathComponent)”… \(Format.items($0))")
         }
+        scan.memory = Memory.load(left, right)
         if comparison == .content {
             let keys = scan.leftSide.items.compactMap { key, l -> String? in
-                guard !l.folder, let r = scan.rightSide.items[key], !r.folder, l.size == r.size else { return nil }
+                guard !l.folder, !l.link, let r = scan.rightSide.items[key], !r.folder, !r.link, l.size == r.size else { return nil }
                 return key
             }.sorted()
-            for (index, key) in keys.enumerated() {
+            // Every byte of these is read on both sides, which takes a while for big folders.
+            let total = keys.reduce(Int64(0)) { $0 + (scan.leftSide.items[$1]?.size ?? 0) }
+            var read: Int64 = 0
+            for key in keys {
                 if cancelled.isSet { throw CancellationError() }
-                report("Comparing contents… \(Format.count(Int64(index + 1))) of \(Format.count(Int64(keys.count)))")
+                report("Comparing contents… \(Format.bytes(read)) of \(Format.bytes(total))")
+                read += scan.leftSide.items[key]?.size ?? 0
                 let a = left.appendingPathComponent(scan.leftSide.path(key))
                 let b = right.appendingPathComponent(scan.rightSide.path(key))
-                // A symbolic link is compared as a link: by size and date.
-                if isLink(a) || isLink(b) { continue }
-                if let same = sameBytes(a, b, cancelled: cancelled) {
+                if let (same, hash) = sameBytes(a, b, cancelled: cancelled) {
                     scan.sameContent[key] = same
+                    if let hash {
+                        scan.leftHashes[key] = hash
+                        scan.rightHashes[key] = hash
+                    }
                 } else if !cancelled.isSet {
                     scan.leftSide.unreadable.insert(key)
                     scan.leftSide.problems.append("“\(scan.leftSide.path(key))” couldn't be read on both sides.")
                 }
             }
+            // By content, a file is unchanged since the last sync only if its
+            // bytes are: those that look unchanged by size and date, and
+            // weren't read whole above, are read now.
+            for (key, pair) in scan.memory.items where scan.memory.hashes?[key] != nil {
+                for onLeft in [true, false] {
+                    let side = onLeft ? scan.leftSide : scan.rightSide
+                    guard let item = side.items[key], !item.folder, !item.link, item.matches(onLeft ? pair.left : pair.right),
+                          (onLeft ? scan.leftHashes : scan.rightHashes)[key] == nil else { continue }
+                    if cancelled.isSet { throw CancellationError() }
+                    report("Comparing contents… “\(side.path(key))”")
+                    let hash = self.hash((onLeft ? left : right).appendingPathComponent(side.path(key)), cancelled: cancelled)
+                    if onLeft { scan.leftHashes[key] = hash } else { scan.rightHashes[key] = hash }
+                }
+            }
         }
         if cancelled.isSet { throw CancellationError() }
-        scan.memory = Memory.load(left, right)
         scan.memory.remember(scan)
         try? scan.memory.save()
         return scan
     }
 
-    private static func isLink(_ url: URL) -> Bool {
-        (try? url.resourceValues(forKeys: [.isSymbolicLinkKey]))?.isSymbolicLink == true
-    }
-
-    static func list(_ root: URL, ignoreCase: Bool, cancelled: CancelFlag, found: (Int) -> Void = { _ in }) throws -> Listing {
+    /// `top`: `root` is one of the two folders synced, where a drive's own folders may be.
+    static func list(_ root: URL, ignoreCase: Bool, top: Bool = true, cancelled: CancelFlag,
+                     found: (Int) -> Void = { _ in }) throws -> Listing {
         // An unreadable folder must not look empty: that would read as everything deleted.
         _ = try FileManager.default.contentsOfDirectory(atPath: root.path)
         var listing = Listing()
@@ -222,12 +299,12 @@ enum Sync {
         while let url = walker?.nextObject() as? URL {
             if cancelled.isSet { throw CancellationError() }
             let path = url.pathComponents.suffix(walker?.level ?? 1).joined(separator: "/")
-            if isIgnored(url.lastPathComponent, atTop: !path.contains("/")) {
+            if isIgnored(url.lastPathComponent, atTop: top && !path.contains("/")) {
                 walker?.skipDescendants()
                 continue
             }
             let key = ignoreCase ? path.lowercased() : path
-            guard let values = try? url.resourceValues(forKeys: Set(keys)) else {
+            guard let values = try? url.resourceValues(forKeys: keySet) else {
                 listing.unreadable.insert(key)
                 listing.problems.append("“\(path)” couldn't be looked at.")
                 continue
@@ -238,7 +315,10 @@ enum Sync {
                 listing.problems.append("“\(path)” and another item differ only in upper and lower case, so neither is synced.")
                 continue
             }
-            listing.items[key] = Item(values)
+            let item = Item(values)
+            listing.items[key] = item
+            if !item.folder { listing.stamps[key] = Stamp(values) }
+            if item.link { listing.targets[key] = (try? FileManager.default.destinationOfSymbolicLink(atPath: url.path)) ?? "" }
             if key != path { listing.spelled[key] = path }
             if listing.items.count % 500 == 0 { found(listing.items.count) }
         }
@@ -252,19 +332,37 @@ enum Sync {
         return listing
     }
 
-    /// Byte by byte; nil when either can't be read.
-    static func sameBytes(_ a: URL, _ b: URL, cancelled: CancelFlag) -> Bool? {
+    /// Byte by byte, with the SHA-256 of what both hold when they are the
+    /// same; nil when either can't be read.
+    static func sameBytes(_ a: URL, _ b: URL, cancelled: CancelFlag) -> (Bool, String?)? {
         guard let x = FileHandle(forReadingAtPath: a.path), let y = FileHandle(forReadingAtPath: b.path) else { return nil }
         defer {
             try? x.close()
             try? y.close()
         }
+        var sha = SHA256()
         do {
             while !cancelled.isSet {
                 let p = try x.read(upToCount: 1 << 20) ?? Data()
                 let q = try y.read(upToCount: 1 << 20) ?? Data()
-                if p != q { return false }
-                if p.isEmpty { return true }
+                if p != q { return (false, nil) }
+                if p.isEmpty { return (true, Data(sha.finalize()).base64EncodedString()) }
+                sha.update(data: p)
+            }
+        } catch {}
+        return nil
+    }
+
+    /// The SHA-256 of what a file holds; nil when it can't be read.
+    static func hash(_ url: URL, cancelled: CancelFlag) -> String? {
+        guard let file = FileHandle(forReadingAtPath: url.path) else { return nil }
+        defer { try? file.close() }
+        var sha = SHA256()
+        do {
+            while !cancelled.isSet {
+                let chunk = try file.read(upToCount: 1 << 20) ?? Data()
+                if chunk.isEmpty { return Data(sha.finalize()).base64EncodedString() }
+                sha.update(data: chunk)
             }
         } catch {}
         return nil
@@ -295,6 +393,9 @@ enum Sync {
         let rightFiles: Int
         let leftBytes: Int64
         let rightBytes: Int64
+        /// Everything inside a whole folder (files and folders), on each side.
+        let leftEntries: Int
+        let rightEntries: Int
         /// What can be chosen for it.
         let choices: [Action]
 
@@ -317,12 +418,56 @@ enum Sync {
         var rows: [Row] = []
         /// Files found the same on both sides.
         var equal = 0
+
+        /// What deserves a question before Synchronize: deleting everything
+        /// on one side (an empty or unmounted drive looks like that), or
+        /// replacing and deleting more than half of it.
+        func worries(_ scan: Scan) -> [String] {
+            var lost = (left: 0, right: 0)
+            var deleted = (left: 0, right: 0)
+            for row in rows {
+                switch row.action {
+                case .deleteLeft:
+                    lost.left += max(row.leftFiles, 1)
+                    deleted.left += max(row.leftFiles, 1)
+                case .deleteRight:
+                    lost.right += max(row.rightFiles, 1)
+                    deleted.right += max(row.rightFiles, 1)
+                case .toLeft where row.left != nil && !row.isFolderOnly: lost.left += max(row.leftFiles, 1)
+                case .toRight where row.right != nil && !row.isFolderOnly: lost.right += max(row.rightFiles, 1)
+                default: break
+                }
+            }
+            var worries: [String] = []
+            for (side, lost, deleted, total) in [("left", lost.left, deleted.left, scan.leftSide.files),
+                                                 ("right", lost.right, deleted.right, scan.rightSide.files)] {
+                if deleted > 0 && deleted >= total {
+                    worries.append("Everything in the \(side) folder would be deleted.")
+                } else if lost >= 10 && lost * 2 > total {
+                    worries.append("\(Format.count(Int64(lost))) of the \(Format.count(Int64(total))) files on the \(side) would be replaced or deleted.")
+                }
+            }
+            return worries
+        }
+
+        /// Whether Synchronize would replace or delete anything.
+        var removesAnything: Bool {
+            rows.contains {
+                switch $0.action {
+                case .deleteLeft, .deleteRight: return true
+                case .toLeft: return $0.left != nil && !$0.isFolderOnly
+                case .toRight: return $0.right != nil && !$0.isFolderOnly
+                case .none: return false
+                }
+            }
+        }
     }
 
     /// What a folder holds, as far as deciding about the folder goes.
     private struct Tally {
         var actions = Set<Action>()
         var files = 0
+        var entries = 0
         var bytes: Int64 = 0
         var unreadable = false
     }
@@ -350,6 +495,16 @@ enum Sync {
 
         typealias Decision = (action: Action, conflict: String?, note: String?)
 
+        /// Still what both sides held at the last sync? By content that takes
+        /// the same bytes, not just the same size and date; nil when that
+        /// can't be told (no content was remembered for it).
+        func unchanged(_ key: String, _ item: Item, since was: Item, onLeft: Bool) -> Bool? {
+            guard item.matches(was) else { return false }
+            guard scan.comparison == .content, !item.folder, !item.link else { return true }
+            guard let before = scan.memory.hashes?[key], let now = (onLeft ? scan.leftHashes : scan.rightHashes)[key] else { return nil }
+            return before == now
+        }
+
         /// Files, and a file facing a folder.
         func decideFile(_ key: String, _ l: Item?, _ r: Item?) -> Decision {
             let was = scan.memory.items[key]
@@ -374,22 +529,32 @@ enum Sync {
                     if l.folder != r.folder { return (.none, fileAndFolder, nil) }
                     guard scan.differ(key, l, r) else { return (.none, nil, nil) }
                     if let was {
-                        let leftSame = l.matches(was.left)
-                        let rightSame = r.matches(was.right)
-                        if leftSame && !rightSame { return (.toLeft, nil, nil) }
-                        if rightSame && !leftSame { return (.toRight, nil, nil) }
-                        if !leftSame && !rightSame { return (.none, "Changed on both sides", nil) }
+                        switch (unchanged(key, l, since: was.left, onLeft: true), unchanged(key, r, since: was.right, onLeft: false)) {
+                        case (true?, false?): return (.toLeft, nil, nil)
+                        case (false?, true?): return (.toRight, nil, nil)
+                        case (false?, false?): return (.none, "Changed on both sides", nil)
+                        case (true?, true?): break
+                        default: return (.none, "Can't tell which side changed", nil)
+                        }
                     }
                     // Never synced before: the newer one wins.
                     if let direction = newer(l, r) { return (direction, nil, nil) }
                     return (.none, sameDate, nil)
                 case let (l?, nil):
                     // Gone from the right since the last sync: deleted there, unless changed here since.
-                    if let was, l.matches(was.left) { return (.deleteLeft, nil, nil) }
-                    return (.toRight, nil, nil)
+                    guard let was else { return (.toRight, nil, nil) }
+                    switch unchanged(key, l, since: was.left, onLeft: true) {
+                    case true?: return (.deleteLeft, nil, nil)
+                    case false?: return (.toRight, nil, nil)
+                    case nil: return (.none, "Deleted on the right; can't tell whether it changed here", nil)
+                    }
                 case let (nil, r?):
-                    if let was, r.matches(was.right) { return (.deleteRight, nil, nil) }
-                    return (.toLeft, nil, nil)
+                    guard let was else { return (.toLeft, nil, nil) }
+                    switch unchanged(key, r, since: was.right, onLeft: false) {
+                    case true?: return (.deleteRight, nil, nil)
+                    case false?: return (.toLeft, nil, nil)
+                    case nil: return (.none, "Deleted on the left; can't tell whether it changed here", nil)
+                    }
                 case (nil, nil):
                     return (.none, nil, nil)
                 }
@@ -452,6 +617,7 @@ enum Sync {
             up.actions.formUnion(inside.actions)
             let existing = l ?? r
             up.files += inside.files + (existing?.folder == false ? 1 : 0)
+            up.entries += inside.entries + 1
             up.bytes += inside.bytes + (existing?.size ?? 0)
             up.unreadable = up.unreadable || inside.unreadable || blocked.contains(key)
             tallies[parent(key)] = up
@@ -504,6 +670,8 @@ enum Sync {
                 rightFiles: r?.folder == true ? inside.files : (r == nil ? 0 : 1),
                 leftBytes: l?.folder == true ? inside.bytes : l?.size ?? 0,
                 rightBytes: r?.folder == true ? inside.bytes : r?.size ?? 0,
+                leftEntries: l?.folder == true ? inside.entries : 0,
+                rightEntries: r?.folder == true ? inside.entries : 0,
                 choices: choices))
         }
         return plan
@@ -512,16 +680,37 @@ enum Sync {
     // MARK: Remembering
 
     /// What both sides held when they were last found the same, path by path.
-    /// One small file per pair of folders, in ~/Library/Application Support/Foldera/Sync.
+    /// One file per pair of folders, in ~/Library/Application Support/Foldera/Sync,
+    /// of a few dozen bytes per item: some megabytes for a hundred thousand files.
     struct Memory: Codable {
         struct Pair: Codable {
             var left: Item
             var right: Item
+
+            init(left: Item, right: Item) {
+                self.left = left
+                self.right = right
+            }
+
+            /// One [size, date] when both sides are alike, as they are after a sync.
+            init(from decoder: Decoder) throws {
+                var values = try decoder.unkeyedContainer()
+                left = try values.decode(Item.self)
+                right = values.isAtEnd ? left : try values.decode(Item.self)
+            }
+
+            func encode(to encoder: Encoder) throws {
+                var values = encoder.unkeyedContainer()
+                try values.encode(left)
+                if right != left { try values.encode(right) }
+            }
         }
 
         var left = ""
         var right = ""
         var items: [String: Pair] = [:]
+        /// SHA-256 of what both sides held, for files last compared by content.
+        var hashes: [String: String]?
 
         static var folder = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
             .appendingPathComponent("Foldera/Sync", isDirectory: true)
@@ -540,7 +729,7 @@ enum Sync {
             if memory.left == left.key && memory.right == right.key { return memory }
             if memory.left == right.key && memory.right == left.key {
                 return Memory(left: left.key, right: right.key,
-                              items: memory.items.mapValues { Pair(left: $0.right, right: $0.left) })
+                              items: memory.items.mapValues { Pair(left: $0.right, right: $0.left) }, hashes: memory.hashes)
             }
             return fresh
         }
@@ -554,13 +743,26 @@ enum Sync {
         /// Anything else is remembered as it was, until it is gone from both.
         mutating func remember(_ scan: Scan) {
             var now: [String: Pair] = [:]
+            var sums: [String: String] = [:]
             for (key, l) in scan.leftSide.items {
-                if let r = scan.rightSide.items[key], scan.same(key, l, r) { now[key] = Pair(left: l, right: r) }
+                guard let r = scan.rightSide.items[key], scan.same(key, l, r) else { continue }
+                now[key] = Pair(left: l, right: r)
+                // What both hold, when it was read; otherwise what was known,
+                // as long as nothing about either file moved since.
+                if let sum = scan.leftHashes[key], scan.rightHashes[key] == sum {
+                    sums[key] = sum
+                } else if let old = items[key], old.left == l, old.right == r, let sum = hashes?[key] {
+                    sums[key] = sum
+                }
             }
             for (key, pair) in items where now[key] == nil {
-                if scan.leftSide.items[key] != nil || scan.rightSide.items[key] != nil || scan.isBlocked(key) { now[key] = pair }
+                if scan.leftSide.items[key] != nil || scan.rightSide.items[key] != nil || scan.isBlocked(key) {
+                    now[key] = pair
+                    if let sum = hashes?[key] { sums[key] = sum }
+                }
             }
             items = now
+            hashes = sums.isEmpty ? nil : sums
         }
     }
 
@@ -568,7 +770,7 @@ enum Sync {
 
     /// Does what the rows say: copies first, in order, so folders come before
     /// what goes in them; deletions last, deepest first. Whatever is
-    /// replaced or deleted must still be as the compare found it.
+    /// replaced or deleted must still be as the compare found it, all the way down.
     final class Job {
         struct Outcome {
             var changes: [Change] = []
@@ -576,15 +778,17 @@ enum Sync {
             var copied = 0
             var deleted = 0
             var cancelled = false
-            /// Both folders read again afterwards, by date and size, so what is
-            /// now the same is remembered even if nobody compares again.
+            /// Both folders read again afterwards, compared as before, so what
+            /// is now the same is remembered even if nobody compares again.
             var scan: Scan?
         }
 
-        let left: URL
-        let right: URL
+        let scan: Scan
         let rows: [Row]
         let permanently: Bool
+        var left: URL { scan.left }
+        var right: URL { scan.right }
+        var isCancelled: Bool { cancelled.isSet }
         private let cancelled = CancelFlag()
         private let copier: TreeCopier
         // Touched only from the worker thread.
@@ -594,9 +798,8 @@ enum Sync {
         private var lastPublished = Date.distantPast
         private var report: ((Transfer.Progress) -> Void)?
 
-        init(left: URL, right: URL, rows: [Row], permanently: Bool) {
-            self.left = left
-            self.right = right
+        init(_ scan: Scan, rows: [Row], permanently: Bool) {
+            self.scan = scan
             self.rows = rows.filter { $0.action != .none }
             self.permanently = permanently
             copier = TreeCopier(cancelled: cancelled)
@@ -604,6 +807,8 @@ enum Sync {
                 self.progress.bytesDone = self.base + bytes
                 self.publish(force: false)
             }
+            // What the compare left out stays out of a folder copied whole.
+            copier.skips = { Sync.isIgnored($0, atTop: false) }
         }
 
         func cancel() { cancelled.set() }
@@ -619,8 +824,10 @@ enum Sync {
         /// Does it all on the calling thread (`run` calls it in the background).
         func perform() -> Outcome {
             var outcome = Outcome()
-            guard FileOps.exists(left), FileOps.exists(right) else {
-                outcome.failures = ["One of the folders is no longer there."]
+            // The same two folders, where they were: not another drive mounted in their place.
+            guard Sync.identity(of: left) == scan.leftIdentity, Sync.identity(of: right) == scan.rightIdentity,
+                  Sync.realPath(left) == left.path, Sync.realPath(right) == right.path else {
+                outcome.failures = ["One of the folders is no longer where it was when compared. Compare again."]
                 return outcome
             }
             let copies = rows.filter { $0.action == .toRight || $0.action == .toLeft }
@@ -661,14 +868,29 @@ enum Sync {
             if trashFailed {
                 outcome.failures.append("Some items couldn't be moved to the Trash; network drives often have none. With “Delete files permanently” they can be synced.")
             }
-            progress.current = "Checking the result…"
-            publish(force: true)
-            outcome.scan = try? Sync.compare(left, right, by: .dateAndSize, cancelled: CancelFlag())
+            if !cancelled.isSet {
+                progress.current = "Checking the result…"
+                publish(force: true)
+                outcome.scan = try? Sync.compare(left, right, by: scan.comparison, cancelled: cancelled) { [unowned self] text in
+                    self.progress.current = text
+                    self.publish(force: false)
+                }
+            }
             return outcome
         }
 
         private func url(_ row: Row, onLeft: Bool) -> URL {
             onLeft ? left.appendingPathComponent(row.leftPath) : right.appendingPathComponent(row.rightPath)
+        }
+
+        /// Nothing is read or written through a folder that has become a
+        /// symbolic link since the compare: that could lead outside both folders.
+        private func guardInside(_ url: URL, onLeft: Bool) throws {
+            let root = onLeft ? left : right
+            let folder = url.deletingLastPathComponent()
+            guard Sync.realPath(folder) == folder.path, folder.path == root.path || folder.path.hasPrefix(root.path + "/") else {
+                throw OpError("The folder it is in isn't where it was when compared (it may now be a link), so it was left alone.")
+            }
         }
 
         private func copy(_ row: Row, into outcome: inout Outcome) throws {
@@ -681,8 +903,15 @@ enum Sync {
                 outcome.copied += 1
                 return
             }
+            try guardInside(source, onLeft: toRight)
+            // A file goes over as it was compared, or not at all. (A folder
+            // copied whole takes what is in it now, but for what is never synced.)
+            if let from = toRight ? row.left : row.right, !from.folder, try !unchanged(row, onLeft: toRight, at: source) {
+                throw OpError("It changed on the \(toRight ? "left" : "right") since the comparison, so it wasn't copied.")
+            }
             guard let expected = toRight ? row.right : row.left else {
                 outcome.changes += try makeFolders(target.deletingLastPathComponent(), below: toRight ? right : left)
+                try guardInside(target, onLeft: !toRight)
                 try copier.copy(source, to: target)
                 outcome.changes.append(.created(target))
                 outcome.failures += copier.errors
@@ -691,9 +920,9 @@ enum Sync {
             }
             // A replacement: the new version is copied in beside the old one
             // first, so a failed copy leaves the old one as it was.
-            guard let now = Sync.item(at: target), now.matches(expected) else {
-                throw OpError("It changed on the \(side) since the comparison, so it was left alone.")
-            }
+            let changed = OpError("\(expected.folder ? "Something inside it" : "It") changed on the \(side) since the comparison, so it was left alone.")
+            try guardInside(target, onLeft: !toRight)
+            guard try unchanged(row, onLeft: !toRight, at: target) else { throw changed }
             let partial = target.deletingLastPathComponent()
                 .appendingPathComponent(".\(UUID().uuidString.prefix(8))-\(target.lastPathComponent)\(Sync.partialSuffix)")
             try copier.copy(source, to: partial)
@@ -702,6 +931,9 @@ enum Sync {
                 throw OpError(copier.errors.joined(separator: " "))
             }
             do {
+                // Looked at again right before it goes: the copy may have taken a while.
+                try guardInside(target, onLeft: !toRight)
+                guard try unchanged(row, onLeft: !toRight, at: target) else { throw changed }
                 if let change = try remove(target) { outcome.changes.append(change) }
             } catch {
                 try? FileManager.default.removeItem(at: partial)
@@ -720,11 +952,43 @@ enum Sync {
             let onLeft = row.action == .deleteLeft
             let target = url(row, onLeft: onLeft)
             guard let expected = onLeft ? row.left : row.right else { return }
-            guard let now = Sync.item(at: target), now.matches(expected) else {
-                throw OpError("It changed on the \(onLeft ? "left" : "right") since the comparison, so it was left alone.")
+            // It is deleted because the other side doesn't have it. Back there since, it stays.
+            let other = url(row, onLeft: !onLeft)
+            guard !FileOps.exists(other) else {
+                throw OpError("It is on the \(onLeft ? "right" : "left") again since the comparison, so it wasn't deleted.")
+            }
+            try guardInside(target, onLeft: onLeft)
+            guard try unchanged(row, onLeft: onLeft, at: target) else {
+                let side = onLeft ? "left" : "right"
+                throw OpError("\(expected.folder ? "Something inside it" : "It") changed on the \(side) since the comparison, so it was left alone.")
             }
             if let change = try remove(target) { outcome.changes.append(change) }
             outcome.deleted += 1
+        }
+
+        /// What is at `url` is exactly what the compare found there: the same
+        /// file, untouched since (see `Stamp`), not merely the same size and
+        /// about the same date. A folder is read again, to the bottom: a file
+        /// added deep inside it since leaves the folder's own date as it was.
+        private func unchanged(_ row: Row, onLeft: Bool, at url: URL) throws -> Bool {
+            let side = onLeft ? scan.leftSide : scan.rightSide
+            guard let expected = onLeft ? row.left : row.right, let now = Sync.item(at: url) else { return false }
+            guard expected.folder else { return now == expected && Sync.stamp(at: url) == side.stamps[row.key] }
+            guard now.folder else { return false }
+            let found: Listing
+            do {
+                found = try Sync.list(url, ignoreCase: scan.ignoreCase, top: false, cancelled: cancelled)
+            } catch is CancellationError {
+                throw CancellationError()
+            } catch {
+                return false
+            }
+            guard found.unreadable.isEmpty, found.items.count == (onLeft ? row.leftEntries : row.rightEntries) else { return false }
+            return found.items.allSatisfy { key, item in
+                let whole = row.key + "/" + key
+                guard let was = side.items[whole] else { return false }
+                return item.folder ? was.folder : item == was && found.stamps[key] == side.stamps[whole]
+            }
         }
 
         /// Out of the way: to the Trash (Undo brings it back), or gone for good.
@@ -748,11 +1012,16 @@ enum Sync {
             var missing: [URL] = []
             var url = folder
             while !FileOps.exists(url) {
-                guard url.key.hasPrefix(root.key == "/" ? "/" : root.key + "/") else {
+                // Paths as built, not `key`s: standardizing drops /private only from paths that exist.
+                guard url.path.hasPrefix(root.path == "/" ? "/" : root.path + "/") else {
                     throw OpError("“\(root.lastPathComponent)” is no longer there.")
                 }
                 missing.insert(url, at: 0)
                 url = url.deletingLastPathComponent()
+            }
+            // What is there already must be a real folder inside the root, not a link out of it.
+            guard Sync.realPath(url) == url.path, url.path == root.path || url.path.hasPrefix(root.path + "/") else {
+                throw OpError("“\(url.lastPathComponent)” isn't where it was when compared (it may now be a link), so nothing was put in it.")
             }
             for url in missing { try FileManager.default.createDirectory(at: url, withIntermediateDirectories: false) }
             return missing.map { .created($0) }
@@ -769,17 +1038,20 @@ enum Sync {
     }
 }
 
-/// Stored as [size, date], a folder with size −1: the memory of a big folder stays small.
+/// Stored as [size, date]: a folder with size −1, a symbolic link with a 1 after the date.
 extension Sync.Item: Codable {
     init(from decoder: Decoder) throws {
         var values = try decoder.unkeyedContainer()
         let size = try values.decode(Int64.self)
-        self.init(folder: size < 0, size: max(size, 0), modified: try values.decode(Double.self))
+        let modified = try values.decode(Double.self)
+        let link = values.isAtEnd ? false : try values.decode(Int.self) == 1
+        self.init(folder: size < 0, size: max(size, 0), modified: modified, link: link)
     }
 
     func encode(to encoder: Encoder) throws {
         var values = encoder.unkeyedContainer()
         try values.encode(folder ? -1 : size)
         try values.encode(modified)
+        if link { try values.encode(1) }
     }
 }

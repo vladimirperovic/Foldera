@@ -187,6 +187,14 @@ before, with their settings.
 - A folder on one side only is a single row, with what it holds.
 - Files are the same when size and date modified agree (to two seconds, as
   FAT drives keep dates), or, with *Compare content*, when every byte does.
+  That reads every file of the same size on both sides, which takes a while
+  for big folders.
+- A symbolic link is the same as another when it points to the same place,
+  whichever comparison; a link and a file are never the same.
+- By date and size, a file edited without its size or date changing looks
+  unchanged, as in FreeFileSync. *Compare content* remembers what the files
+  held (a SHA-256 of each), so Two way sees such an edit too. Where it has
+  nothing remembered by content yet, it shows a conflict rather than guess.
 
 Replaced and deleted files go to the Trash, and ⌘Z undoes the whole sync.
 Network drives often have no Trash; *Delete files permanently* syncs them,
@@ -195,18 +203,34 @@ asks first, and can't be undone.
 What keeps it careful:
 - Nothing inside a folder that couldn't be read is deleted or replaced, and
   a folder that can't be read at all stops the compare.
-- Anything that changed after Compare is left alone.
+- Nothing is changed unless it is still as Compare found it: the same file
+  on the disk, not touched since (its size, its date, and the time anything
+  about it changed, which can't be set back). A folder to be deleted or
+  replaced whole is read again first, to the bottom. A file to be deleted
+  must still be missing on the other side. A replacement is looked at once
+  more right before the old file goes.
+- Nothing is read or written through a folder that has become a symbolic
+  link since Compare, and a sync stops if another drive or folder now
+  stands where one of the two was.
 - A replacement is copied in beside the old file first, so a failed copy
   leaves the old one as it was.
-- A sync that would replace or delete more than half of one side's files
-  asks first (an empty or unmounted drive looks like everything deleted).
+- A sync that would delete everything on one side, however little, or
+  replace and delete more than half of its files (and at least 10), asks
+  first. An empty or unmounted drive looks like everything deleted.
 - Names are compared ignoring case unless both drives tell case apart.
 - `.DS_Store`, `._` files and a drive's own folders (`.Trashes`,
-  `.Spotlight-V100`…) are never synced. Symbolic links are copied as links.
+  `.Spotlight-V100`…) are never synced, also inside a folder copied whole.
+  Symbolic links are copied as links.
+- Quitting while a sync, copy or archive is still going asks first, stops
+  it and lets it clean up.
+
+The checks shrink the time in which another program's change could slip
+through to the moment between the last look and the change itself, but
+can't close it: don't sync folders that other programs are busy writing to.
 
 What Two way remembers is kept in `~/Library/Application Support/Foldera/Sync`,
-one small file per pair. There are no filters, no detection of moved files and
-no scheduled syncs yet.
+one file per pair, a few dozen bytes per item. There are no filters, no
+detection of moved files and no scheduled syncs yet.
 
 ## Archives: zip, RAR, 7z, tar
 

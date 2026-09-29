@@ -54,6 +54,9 @@ final class SyncWindow: NSWindowController, NSWindowDelegate, NSTableViewDataSou
 
     private var scan: Sync.Scan?
     private var plan = Sync.Plan()
+    /// Plans are made in the background; the one on screen is current when these agree.
+    private var planWanted = 0
+    private var planShown = 0
     private var comparing: CancelFlag?
     private var syncing = false
     /// What the last Synchronize did, said until you compare again.
@@ -157,7 +160,7 @@ final class SyncWindow: NSWindowController, NSWindowDelegate, NSTableViewDataSou
         modeControl.target = self
         modeControl.action = #selector(modeChanged(_:))
         comparePopup.addItems(withTitles: Sync.Comparison.allCases.map { "Compare \($0.title.lowercased())" })
-        comparePopup.toolTip = "How to tell whether two files are the same"
+        comparePopup.toolTip = "How to tell whether two files are the same. Content reads every file of the same size on both sides: slow for big folders."
         comparePopup.target = self
         comparePopup.action = #selector(comparisonChanged(_:))
         removalPopup.addItems(withTitles: ["Deleted files to the Trash", "Delete files permanently"])
@@ -275,6 +278,8 @@ final class SyncWindow: NSWindowController, NSWindowDelegate, NSTableViewDataSou
         comparing = nil
         scan = nil
         plan = Sync.Plan()
+        planWanted += 1
+        planShown = planWanted
         result = nil
         table.reloadData()
         updateSummary()
@@ -342,7 +347,7 @@ final class SyncWindow: NSWindowController, NSWindowDelegate, NSTableViewDataSou
     }
 
     @objc private func comparisonChanged(_ sender: Any?) {
-        guard let scan, scan.comparison != comparison else { return }
+        guard let scan, scan.comparison != comparison else { return updateControls() }
         foldersChanged()
     }
 
@@ -430,22 +435,36 @@ final class SyncWindow: NSWindowController, NSWindowDelegate, NSTableViewDataSou
               info: problems.prefix(6).joined(separator: "\n"))
     }
 
+    /// Off the main thread: a hundred thousand files take a moment. Until
+    /// the new plan is on screen, Synchronize waits.
     private func replan() {
         guard let scan else { return }
-        plan = Sync.plan(scan, mode: mode)
-        table.reloadData()
-        updateSummary()
+        planWanted += 1
+        let wanted = planWanted
+        let mode = self.mode
         updateControls()
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            let plan = Sync.plan(scan, mode: mode)
+            DispatchQueue.main.async {
+                guard let self, wanted == self.planWanted else { return }
+                self.plan = plan
+                self.planShown = wanted
+                self.table.reloadData()
+                self.updateSummary()
+                self.updateControls()
+            }
+        }
     }
 
     // MARK: Synchronizing
 
     @objc func synchronize(_ sender: Any?) {
-        guard let scan, comparing == nil, !syncing, plan.rows.contains(where: { $0.action != .none }) else { return }
+        guard let scan, comparing == nil, !syncing, planShown == planWanted,
+              plan.rows.contains(where: { $0.action != .none }) else { return }
         let permanently = self.permanently
         guard confirmed(scan, permanently: permanently) else { return }
         Setup.remember(setup)
-        let job = Sync.Job(left: scan.left, right: scan.right, rows: plan.rows, permanently: permanently)
+        let job = Sync.Job(scan, rows: plan.rows, permanently: permanently)
         let progress = ProgressWindow(title: "Syncing “\(scan.left.lastPathComponent)” and “\(scan.right.lastPathComponent)”")
         progress.onCancel = { job.cancel() }
         progress.showSoon()
@@ -468,8 +487,15 @@ final class SyncWindow: NSWindowController, NSWindowDelegate, NSTableViewDataSou
             var done = [outcome.copied == 1 ? "1 item copied" : "\(Format.count(Int64(outcome.copied))) items copied"]
             if outcome.deleted > 0 { done.append("\(Format.count(Int64(outcome.deleted))) deleted") }
             self.result = (outcome.cancelled ? "Stopped: " : "Done: ") + done.joined(separator: ", ") + "."
-            if scan.comparison == .dateAndSize, let after = outcome.scan {
+            if let after = outcome.scan {
+                // Read again with the same comparison once the sync was done.
                 self.show(after)
+            } else if job.isCancelled {
+                // What was compared is out of date; comparing again is up to you.
+                self.scan = nil
+                self.plan = Sync.Plan()
+                self.table.reloadData()
+                self.updateSummary()
             } else {
                 self.runCompare(scan.left, scan.right, by: scan.comparison)
             }
@@ -477,26 +503,11 @@ final class SyncWindow: NSWindowController, NSWindowDelegate, NSTableViewDataSou
         })
     }
 
-    /// Asks first when a sync would replace or delete most of one side, and
-    /// whenever what it replaces or deletes won't go to the Trash.
+    /// Asks first when a sync would delete all of one side or replace and
+    /// delete most of it, and whenever what it removes won't go to the Trash.
     private func confirmed(_ scan: Sync.Scan, permanently: Bool) -> Bool {
-        var left = 0
-        var right = 0
-        for row in plan.rows {
-            switch row.action {
-            case .deleteLeft: left += max(row.leftFiles, 1)
-            case .deleteRight: right += max(row.rightFiles, 1)
-            case .toLeft where row.left != nil && !row.isFolderOnly: left += max(row.leftFiles, 1)
-            case .toRight where row.right != nil && !row.isFolderOnly: right += max(row.rightFiles, 1)
-            default: break
-            }
-        }
-        var worries: [String] = []
-        for (side, count, total) in [("left", left, scan.leftSide.files), ("right", right, scan.rightSide.files)]
-        where count >= 10 && count * 2 > total {
-            worries.append("\(Format.count(Int64(count))) of the \(Format.count(Int64(total))) files on the \(side) would be replaced or deleted.")
-        }
-        guard !worries.isEmpty || (permanently && left + right > 0) else { return true }
+        let worries = plan.worries(scan)
+        guard !worries.isEmpty || (permanently && plan.removesAnything) else { return true }
         let alert = NSAlert()
         alert.alertStyle = .warning
         alert.messageText = worries.isEmpty ? "Replace and delete files permanently?" : "This changes most of a folder. Synchronize anyway?"
@@ -540,17 +551,21 @@ final class SyncWindow: NSWindowController, NSWindowDelegate, NSTableViewDataSou
         let idle = comparing == nil && !syncing
         compareButton.title = comparing == nil ? "Compare" : "Stop"
         compareButton.isEnabled = !syncing && (comparing != nil || (leftField.url != nil && rightField.url != nil))
-        syncButton.isEnabled = idle && scan != nil && plan.rows.contains { $0.action != .none }
-        for control in [leftField, rightField, chooseLeft, chooseRight, swapButton, recentButton, comparePopup] as [NSControl] {
+        syncButton.isEnabled = idle && scan != nil && planShown == planWanted && plan.rows.contains { $0.action != .none }
+        // While a sync runs, the window shows the settings it runs with.
+        for control in [leftField, rightField, chooseLeft, chooseRight, swapButton, recentButton, comparePopup,
+                        modeControl, removalPopup] as [NSControl] {
             control.isEnabled = idle
         }
         if idle { spinner.stopAnimation(nil) } else { spinner.startAnimation(nil) }
-        emptyLabel.isHidden = !idle || !plan.rows.isEmpty
+        emptyLabel.isHidden = !idle || !plan.rows.isEmpty || planShown != planWanted
         if scan != nil {
             emptyLabel.stringValue = "The two folders are in sync."
         } else {
             emptyLabel.stringValue = leftField.url == nil || rightField.url == nil
                 ? "Choose the two folders to sync."
+                : comparison == .content
+                ? "Compare content reads every file that has the same size on both sides, which takes a while for big folders."
                 : "Press Compare to see what would change. Nothing is changed until you press Synchronize."
         }
     }

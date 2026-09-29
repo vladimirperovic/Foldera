@@ -155,11 +155,13 @@ final class PropertiesWindow: NSWindowController, NSWindowDelegate {
             var disk: Int64 = 0
             var files = 0
             var folders = 0
+            // What couldn't be read makes the numbers a lower bound, and says so.
+            var unreadable = 0
             var lastUpdate = Date()
 
             func publish(done: Bool) {
-                let (s, d, f, g) = (size, disk, files, folders)
-                DispatchQueue.main.async { self?.show(size: s, disk: d, files: f, folders: g, done: done) }
+                let (s, d, f, g, u) = (size, disk, files, folders, unreadable)
+                DispatchQueue.main.async { self?.show(size: s, disk: d, files: f, folders: g, unreadable: u, done: done) }
             }
 
             func add(_ url: URL) {
@@ -181,7 +183,7 @@ final class PropertiesWindow: NSWindowController, NSWindowDelegate {
                 }
                 if countSelf { folders += 1 }
                 let walker = FileManager.default.enumerator(
-                    at: url, includingPropertiesForKeys: Array(keys), options: [], errorHandler: { _, _ in true })
+                    at: url, includingPropertiesForKeys: Array(keys), options: [], errorHandler: { _, _ in unreadable += 1; return true })
                 while let child = walker?.nextObject() as? URL {
                     if flag.isSet { return }
                     add(child)
@@ -195,11 +197,16 @@ final class PropertiesWindow: NSWindowController, NSWindowDelegate {
         }
     }
 
-    private func show(size: Int64, disk: Int64, files: Int, folders: Int, done: Bool) {
+    private func show(size: Int64, disk: Int64, files: Int, folders: Int, unreadable: Int, done: Bool) {
         let more = done ? "" : "…"
-        sizeValue.stringValue = "\(Format.bytes(size))  (\(Format.count(size)) bytes)\(more)"
-        diskValue.stringValue = "\(Format.bytes(disk))  (\(Format.count(disk)) bytes)\(more)"
-        containsValue.stringValue = "\(Format.count(Int64(files))) files, \(Format.count(Int64(folders))) folders\(more)"
+        let atLeast = unreadable > 0 ? "at least " : ""
+        sizeValue.stringValue = "\(atLeast)\(Format.bytes(size))  (\(Format.count(size)) bytes)\(more)"
+        diskValue.stringValue = "\(atLeast)\(Format.bytes(disk))  (\(Format.count(disk)) bytes)\(more)"
+        var contains = "\(Format.count(Int64(files))) files, \(Format.count(Int64(folders))) folders\(more)"
+        if unreadable > 0 {
+            contains += "\n\(unreadable == 1 ? "1 folder" : "\(Format.count(Int64(unreadable))) folders") couldn't be read"
+        }
+        containsValue.stringValue = contains
     }
 
     func windowWillClose(_ notification: Notification) {

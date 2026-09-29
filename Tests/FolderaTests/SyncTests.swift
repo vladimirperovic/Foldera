@@ -44,14 +44,19 @@ private final class Pair {
     }
 
     func plan(_ mode: Sync.Mode, by: Sync.Comparison = .dateAndSize) throws -> Sync.Plan {
-        Sync.plan(try compare(by), mode: mode)
+        try compared(mode, by: by).plan
+    }
+
+    func compared(_ mode: Sync.Mode, by: Sync.Comparison = .dateAndSize) throws -> (scan: Sync.Scan, plan: Sync.Plan) {
+        let scan = try compare(by)
+        return (scan, Sync.plan(scan, mode: mode))
     }
 
     /// Compare, then Synchronize; deletions are permanent, to leave the Trash alone.
     @discardableResult
     func sync(_ mode: Sync.Mode) throws -> Sync.Job.Outcome {
-        let plan = try self.plan(mode)
-        return Sync.Job(left: left, right: right, rows: plan.rows, permanently: true).perform()
+        let (scan, plan) = try compared(mode)
+        return Sync.Job(scan, rows: plan.rows, permanently: true).perform()
     }
 
     deinit { try? FileManager.default.removeItem(at: root) }
@@ -273,7 +278,8 @@ private extension Sync.Plan {
         let plan = Sync.plan(scan, mode: .mirror)
         #expect(plan.rows.allSatisfy { $0.action == .none })
         #expect(plan.row("Locked")?.note != nil)
-        Sync.Job(left: p.left, right: p.right, rows: plan.rows, permanently: true).perform()
+        let outcome = Sync.Job(scan, rows: plan.rows, permanently: true).perform()
+        #expect(outcome.deleted == 0)
         #expect(p.exists("R/Locked/b.txt"))
     }
 
@@ -299,13 +305,254 @@ private extension Sync.Plan {
         try p.file("L/a.txt", "left", age: 60)
         try p.file("R/a.txt", "right", age: 7200)
         try p.file("R/extra.txt", "extra", age: 7200)
-        let plan = try p.plan(.mirror)
+        let (scan, plan) = try p.compared(.mirror)
         try p.file("R/a.txt", "edited meanwhile", age: 1)
         try p.file("R/extra.txt", "edited meanwhile", age: 1)
-        let outcome = Sync.Job(left: p.left, right: p.right, rows: plan.rows, permanently: true).perform()
+        let outcome = Sync.Job(scan, rows: plan.rows, permanently: true).perform()
         #expect(outcome.failures.count == 2)
         #expect(p.text("R/a.txt") == "edited meanwhile")
         #expect(p.text("R/extra.txt") == "edited meanwhile")
+    }
+
+    @Test func mirrorLeavesAFolderThatGainedAFileAfterTheCompare() throws {
+        let p = try Pair()
+        try p.file("R/Photos/old.jpg")
+        try p.file("R/Photos/2024/older.jpg")
+        let (scan, plan) = try p.compared(.mirror)
+        #expect(plan.action("Photos") == .deleteRight)
+        try p.file("R/Photos/NEW.jpg", "new", age: 1)
+        let outcome = Sync.Job(scan, rows: plan.rows, permanently: true).perform()
+        #expect(outcome.failures.count == 1)
+        #expect(outcome.deleted == 0)
+        #expect(p.text("R/Photos/NEW.jpg") == "new")
+    }
+
+    @Test func aFolderDeletedWholeIsCheckedAllTheWayDown() throws {
+        let p = try Pair()
+        try p.file("R/Photos/2024/older.jpg")
+        let (scan, plan) = try p.compared(.mirror)
+        // Deep inside: the top folder's own date doesn't change.
+        try p.file("R/Photos/2024/NEW.jpg", "new", age: 1)
+        let outcome = Sync.Job(scan, rows: plan.rows, permanently: true).perform()
+        #expect(outcome.deleted == 0)
+        #expect(p.text("R/Photos/2024/NEW.jpg") == "new")
+    }
+
+    @Test func twoWayLeavesAFolderThatGainedAFileAfterTheCompare() throws {
+        let p = try Pair()
+        try p.file("L/Project/a.txt")
+        try p.sync(.twoWay)
+        try FileManager.default.removeItem(at: p.url("R/Project"))
+        let (scan, plan) = try p.compared(.twoWay)
+        #expect(plan.action("Project") == .deleteLeft)
+        try p.file("L/Project/NEW.txt", "new", age: 1)
+        let outcome = Sync.Job(scan, rows: plan.rows, permanently: true).perform()
+        #expect(outcome.failures.count == 1)
+        #expect(p.text("L/Project/NEW.txt") == "new")
+    }
+
+    @Test func aFolderReplacedByAFileIsCheckedToo() throws {
+        let p = try Pair()
+        try p.file("L/thing", "file")
+        try p.file("R/thing/inside.txt")
+        let (scan, plan) = try p.compared(.mirror)
+        try p.file("R/thing/NEW.txt", "new", age: 1)
+        let outcome = Sync.Job(scan, rows: plan.rows, permanently: true).perform()
+        #expect(outcome.failures.count == 1)
+        #expect(p.text("R/thing/NEW.txt") == "new")
+    }
+
+    @Test func aWholeFolderStillAsComparedIsDeleted() throws {
+        let p = try Pair()
+        try p.file("R/Photos/2024/older.jpg")
+        try p.file("R/Photos/.DS_Store")
+        let (scan, plan) = try p.compared(.mirror)
+        // Finder writing its .DS_Store changes nothing that counts.
+        try p.file("R/Photos/2024/.DS_Store", "view settings", age: 1)
+        let outcome = Sync.Job(scan, rows: plan.rows, permanently: true).perform()
+        #expect(outcome.failures.isEmpty)
+        #expect(!p.exists("R/Photos"))
+    }
+
+    @Test func aCancelledSyncDoesntReadBothFoldersAgain() throws {
+        let p = try Pair()
+        try p.file("L/a.txt")
+        let (scan, plan) = try p.compared(.mirror)
+        let job = Sync.Job(scan, rows: plan.rows, permanently: true)
+        job.cancel()
+        let outcome = job.perform()
+        #expect(outcome.cancelled)
+        #expect(outcome.scan == nil)
+        #expect(!p.exists("R/a.txt"))
+    }
+
+    @Test func deletingEverythingOnOneSideAsksFirstHoweverLittleThereIs() throws {
+        let p = try Pair()
+        try p.file("R/a.txt")
+        try p.file("R/b.txt")
+        let (scan, plan) = try p.compared(.mirror)
+        #expect(plan.worries(scan) == ["Everything in the right folder would be deleted."])
+        try p.file("L/a.txt")
+        let (fewer, some) = try p.compared(.mirror)
+        #expect(some.worries(fewer).isEmpty)
+    }
+
+    @Test func memoryKeepsOneEntryWhenBothSidesAreAlike() throws {
+        let same = Sync.Item(folder: false, size: 3, modified: 100)
+        let other = Sync.Item(folder: false, size: 4, modified: 200)
+        let memory = Sync.Memory(left: "/a", right: "/b", items: ["x": .init(left: same, right: same), "y": .init(left: same, right: other)])
+        let json = String(decoding: try JSONEncoder().encode(memory.items), as: UTF8.self)
+        #expect(json.contains("\"x\":[[3,100]]"))
+        #expect(json.contains("\"y\":[[3,100],[4,200]]"))
+        let back = try JSONDecoder().decode([String: Sync.Memory.Pair].self, from: Data(json.utf8))
+        #expect(back["x"]?.right == same && back["y"]?.right == other)
+    }
+
+    @Test func aDeletionIsCalledOffWhenTheOtherCopyIsBack() throws {
+        let p = try Pair()
+        try p.file("L/a.txt", "old")
+        try p.sync(.twoWay)
+        try FileManager.default.removeItem(at: p.url("L/a.txt"))
+        let (scan, plan) = try p.compared(.twoWay)
+        #expect(plan.action("a.txt") == .deleteRight)
+        try p.file("L/a.txt", "old")
+        let outcome = Sync.Job(scan, rows: plan.rows, permanently: true).perform()
+        #expect(outcome.deleted == 0 && outcome.failures.count == 1)
+        #expect(p.text("R/a.txt") == "old")
+        // …and the next sync doesn't take the other one either.
+        try p.sync(.twoWay)
+        #expect(p.text("L/a.txt") == "old" && p.text("R/a.txt") == "old")
+    }
+
+    @Test func contentKeepsAnEditThatKeptItsSizeAndDate() throws {
+        let p = try Pair()
+        try p.file("L/a.txt", "old")
+        try p.file("R/a.txt", "old")
+        _ = try p.compare(.content)
+        try p.file("L/a.txt", "NEW")
+        try FileManager.default.removeItem(at: p.url("R/a.txt"))
+        let (scan, plan) = try p.compared(.twoWay, by: .content)
+        #expect(plan.action("a.txt") == .toRight)
+        let outcome = Sync.Job(scan, rows: plan.rows, permanently: true).perform()
+        #expect(outcome.failures.isEmpty)
+        #expect(p.text("L/a.txt") == "NEW" && p.text("R/a.txt") == "NEW")
+    }
+
+    @Test func contentSeesAFileEditedOnBothSides() throws {
+        let p = try Pair()
+        try p.file("L/a.txt", "old")
+        try p.file("R/a.txt", "old")
+        _ = try p.compare(.content)
+        try p.file("L/a.txt", "AAA")
+        try p.file("R/a.txt", "BBB", age: 60)
+        #expect(try p.plan(.twoWay, by: .content).row("a.txt")?.conflict == "Changed on both sides")
+    }
+
+    @Test func withoutRememberedContentContentModeDoesntGuess() throws {
+        let p = try Pair()
+        try p.file("L/a.txt", "old")
+        try p.file("R/a.txt", "old")
+        _ = try p.compare(.dateAndSize)
+        try FileManager.default.removeItem(at: p.url("R/a.txt"))
+        let plan = try p.plan(.twoWay, by: .content)
+        #expect(plan.action("a.txt") == Sync.Action.none)
+        #expect(plan.row("a.txt")?.conflict != nil)
+    }
+
+    @Test func afterASyncByContentTheContentIsRemembered() throws {
+        let p = try Pair()
+        try p.file("L/a.txt", "abc")
+        let (scan, plan) = try p.compared(.mirror, by: .content)
+        let outcome = Sync.Job(scan, rows: plan.rows, permanently: true).perform()
+        #expect(outcome.scan?.comparison == .content)
+        #expect(outcome.scan?.memory.hashes?["a.txt"] != nil)
+    }
+
+    @Test func aTargetEditedWithinTwoSecondsIsLeftAlone() throws {
+        let p = try Pair()
+        try p.file("L/a.txt", "NEW", age: 7200)
+        try p.file("R/a.txt", "old", age: 60)
+        let (scan, plan) = try p.compared(.mirror, by: .content)
+        try p.file("R/a.txt", "EDI", age: 59)
+        let outcome = Sync.Job(scan, rows: plan.rows, permanently: true).perform()
+        #expect(outcome.failures.count == 1)
+        #expect(p.text("R/a.txt") == "EDI")
+    }
+
+    @Test func aTargetEditedWithItsDateSetBackIsLeftAlone() throws {
+        let p = try Pair()
+        try p.file("L/a.txt", "NEW", age: 60)
+        let target = try p.file("R/a.txt", "old", age: 7200)
+        let (scan, plan) = try p.compared(.mirror)
+        let date = try FileManager.default.attributesOfItem(atPath: target.path)[.modificationDate]
+        try "EDI".write(to: target, atomically: false, encoding: .utf8)
+        try FileManager.default.setAttributes([.modificationDate: date as Any], ofItemAtPath: target.path)
+        let outcome = Sync.Job(scan, rows: plan.rows, permanently: true).perform()
+        #expect(outcome.failures.count == 1)
+        #expect(p.text("R/a.txt") == "EDI")
+    }
+
+    @Test func aFolderTurnedIntoALinkLeadsNowhere() throws {
+        let p = try Pair()
+        try p.file("L/sub/new.txt", "incoming")
+        try p.folder("L/other")
+        try p.folder("R/sub")
+        try p.file("R/other/extra.txt", "data")
+        let (scan, plan) = try p.compared(.mirror)
+        let outside = p.root.appendingPathComponent("outside", isDirectory: true)
+        try FileManager.default.createDirectory(at: outside, withIntermediateDirectories: true)
+        try "outside data".write(to: outside.appendingPathComponent("extra.txt"), atomically: false, encoding: .utf8)
+        for name in ["sub", "other"] {
+            try FileManager.default.removeItem(at: p.url("R/\(name)"))
+            try FileManager.default.createSymbolicLink(at: p.url("R/\(name)"), withDestinationURL: outside)
+        }
+        let outcome = Sync.Job(scan, rows: plan.rows, permanently: true).perform()
+        #expect(outcome.failures.count == 2)
+        #expect(!FileOps.exists(outside.appendingPathComponent("new.txt")))
+        #expect(FileOps.exists(outside.appendingPathComponent("extra.txt")))
+    }
+
+    @Test func anotherFolderInTheSamePlaceStopsTheSync() throws {
+        let p = try Pair()
+        try p.file("R/a.txt")
+        let (scan, plan) = try p.compared(.mirror)
+        try FileManager.default.removeItem(at: p.right)
+        try p.file("R/a.txt")
+        let outcome = Sync.Job(scan, rows: plan.rows, permanently: true).perform()
+        #expect(outcome.deleted == 0 && outcome.failures.count == 1)
+        #expect(p.exists("R/a.txt"))
+    }
+
+    @Test func linksAreComparedByWhereTheyPoint() throws {
+        let p = try Pair()
+        try FileManager.default.createSymbolicLink(atPath: p.url("L/link").path, withDestinationPath: "one")
+        try FileManager.default.createSymbolicLink(atPath: p.url("R/link").path, withDestinationPath: "two")
+        try FileManager.default.createSymbolicLink(atPath: p.url("L/same").path, withDestinationPath: "x")
+        try FileManager.default.createSymbolicLink(atPath: p.url("R/same").path, withDestinationPath: "x")
+        try p.file("R/plain", "one")
+        try FileManager.default.createSymbolicLink(atPath: p.url("L/plain").path, withDestinationPath: "one")
+        for by in Sync.Comparison.allCases {
+            let plan = try p.plan(.mirror, by: by)
+            #expect(Set(plan.rows.map(\.name)) == ["link", "plain"])
+        }
+        try p.sync(.mirror)
+        #expect(try FileManager.default.destinationOfSymbolicLink(atPath: p.url("R/link").path) == "one")
+    }
+
+    @Test func whatIsNeverSyncedStaysOutOfAFolderCopiedWhole() throws {
+        let p = try Pair()
+        try p.file("L/new/document.txt", "real")
+        try p.file("L/new/.DS_Store", "metadata")
+        try p.file("L/new/deeper/.recovery.foldera-sync", "partial")
+        try p.file("L/new/deeper/._resource", "apple double")
+        let plan = try p.plan(.mirror)
+        #expect(plan.rows.count == 1 && plan.rows[0].whole)
+        try p.sync(.mirror)
+        #expect(p.text("R/new/document.txt") == "real")
+        #expect(p.exists("R/new/deeper"))
+        #expect(!p.exists("R/new/.DS_Store"))
+        #expect(!p.exists("R/new/deeper/.recovery.foldera-sync"))
+        #expect(!p.exists("R/new/deeper/._resource"))
     }
 
     @Test func aFileFacingAFolderIsAConflictUnlessMirroring() throws {
@@ -337,8 +584,8 @@ private extension Sync.Plan {
         let p = try Pair()
         try p.file("L/a.txt", "new", age: 60)
         try p.file("R/a.txt", "old", age: 7200)
-        let plan = try p.plan(.mirror)
-        let outcome = Sync.Job(left: p.left, right: p.right, rows: plan.rows, permanently: true).perform()
+        let (scan, plan) = try p.compared(.mirror)
+        let outcome = Sync.Job(scan, rows: plan.rows, permanently: true).perform()
         #expect(outcome.copied == 1)
         guard case .created(let made)? = outcome.changes.last else { Issue.record("nothing recorded"); return }
         #expect(made.key == p.url("R/a.txt").key)

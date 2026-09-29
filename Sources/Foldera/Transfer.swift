@@ -308,6 +308,8 @@ final class Transfer {
 final class TreeCopier {
     /// Bytes of the current item that have arrived so far (on the copying thread).
     var copied: ((Int64) -> Void)?
+    /// Names inside a folder being copied that are left out.
+    var skips: ((String) -> Bool)?
     /// Parts of the last item that couldn't be copied and were skipped.
     private(set) var errors: [String] = []
     private let cancelled: CancelFlag
@@ -347,6 +349,10 @@ final class TreeCopier {
 
     fileprivate func status(what: Int32, stage: Int32, state: copyfile_state_t?, source: UnsafePointer<CChar>?) -> Int32 {
         if cancelled.isSet { return COPYFILE_QUIT }
+        if stage == COPYFILE_START, what == COPYFILE_RECURSE_FILE || what == COPYFILE_RECURSE_DIR,
+           let skips, let source, skips((String(cString: source) as NSString).lastPathComponent) {
+            return COPYFILE_SKIP
+        }
         switch (what, stage) {
         case (COPYFILE_RECURSE_FILE, COPYFILE_START):
             fileCopied = 0
@@ -475,6 +481,14 @@ final class ProgressWindow: NSWindowController {
         finished = true
         close()
         Self.open.removeAll { $0 === self }
+    }
+
+    /// Work on files still going (copying, syncing, packing, unpacking), for Quit.
+    static var anyRunning: Bool { !open.isEmpty }
+
+    /// Quit: stops all of it. Each job cleans up after itself and then finishes.
+    static func cancelAll() {
+        open.forEach { $0.cancelPressed(nil) }
     }
 
     @objc private func cancelPressed(_ sender: Any?) {

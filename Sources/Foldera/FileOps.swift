@@ -13,6 +13,15 @@ enum FileOps {
         (try? FileManager.default.attributesOfItem(atPath: url.path)) != nil
     }
 
+    /// Two names for one file: the same entry on the same disk, as a
+    /// name differing only in case is on a drive that ignores case.
+    static func isSameItem(_ a: URL, _ b: URL) -> Bool {
+        var x = stat()
+        var y = stat()
+        guard lstat(a.path, &x) == 0, lstat(b.path, &y) == 0 else { return false }
+        return x.st_dev == y.st_dev && x.st_ino == y.st_ino
+    }
+
     static func isFolder(_ url: URL) -> Bool {
         let v = try? url.resourceValues(forKeys: [.isDirectoryKey, .isPackageKey])
         return v?.isDirectory == true && v?.isPackage != true

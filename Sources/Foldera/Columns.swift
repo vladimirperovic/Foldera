@@ -4,20 +4,28 @@ import AppKit
 final class ColumnNode {
     let url: URL
     let item: FileItem?
+    /// Stands in for the contents of a folder that couldn't be read, so it doesn't pass for empty.
+    let problem: String?
     var children: [ColumnNode]?
 
-    init(url: URL, item: FileItem?) {
+    init(url: URL, item: FileItem?, problem: String? = nil) {
         self.url = url
         self.item = item
+        self.problem = problem
     }
 
-    var isLeaf: Bool { item.map { !$0.isFolder } ?? false }
+    var isLeaf: Bool { problem != nil || item.map { !$0.isFolder } ?? false }
 
+    /// A folder that can't be read shows why, until F5 reads it again.
     func loadChildren(sort: SortSpec) -> [ColumnNode] {
         if let children { return children }
         let target = item?.isSymlink == true ? url.resolvingSymlinksInPath() : url
-        let items = (try? FileItem.contents(of: target, showHidden: Prefs.showHidden)) ?? []
-        let made = items.sorted(by: sort).map { ColumnNode(url: $0.url, item: $0) }
+        let made: [ColumnNode]
+        do {
+            made = try FileItem.contents(of: target, showHidden: Prefs.showHidden).sorted(by: sort).map { ColumnNode(url: $0.url, item: $0) }
+        } catch {
+            made = [ColumnNode(url: url, item: nil, problem: "Couldn't be read: \(error.localizedDescription)")]
+        }
         children = made
         return made
     }
@@ -153,6 +161,9 @@ final class Columns: NSObject, NSBrowserDelegate {
     /// The browser's cells are plain text cells on current macOS (it ignores
     /// setCellClass), so the icon travels inside the title.
     func browser(_ browser: NSBrowser, objectValueForItem item: Any?) -> Any? {
+        if let problem = node(item)?.problem {
+            return NSAttributedString(string: problem, attributes: [.foregroundColor: NSColor.secondaryLabelColor])
+        }
         guard let file = node(item)?.item else { return "" }
         let icon = NSTextAttachment()
         icon.image = menuIcon(file.icon)
@@ -165,7 +176,7 @@ final class Columns: NSObject, NSBrowserDelegate {
     }
 
     func browser(_ browser: NSBrowser, canDragRowsWith rowIndexes: IndexSet, inColumn column: Int, with event: NSEvent) -> Bool {
-        true
+        !rowIndexes.contains { (browser.item(atRow: $0, inColumn: column) as? ColumnNode)?.problem != nil }
     }
 
     func browser(_ browser: NSBrowser, writeRowsWith rowIndexes: IndexSet, inColumn column: Int, to pasteboard: NSPasteboard) -> Bool {

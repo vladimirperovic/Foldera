@@ -35,15 +35,27 @@ enum Archive {
         return FileOps.freeURL(in: parent, base: base, ext: format.rawValue)
     }
 
-    /// A running compression. Cancel stops it and removes the half-made archive.
+    /// A running compression. The archive is made under a name of its own
+    /// (hidden, beside where it goes) and takes its real name only once it
+    /// is whole; failing or cancelled, only that one goes, never a file
+    /// someone else put under the real name meanwhile.
     final class Job {
         let process = Process()
+        let format: Format
+        /// The name it is meant to have; it gets the next free one if that is taken by then.
         let output: URL
+        let partial: URL
         private let cancelled = CancelFlag()
         private let errors = Pipe()
         static let diagnosticLimit = 64 * 1024
 
-        fileprivate init(output: URL) { self.output = output }
+        fileprivate init(output: URL, format: Format) {
+            self.output = output
+            self.format = format
+            // The suffix stays: tar picks the format from it.
+            partial = output.deletingLastPathComponent()
+                .appendingPathComponent(".foldera-\(UUID().uuidString.prefix(8)).\(format.rawValue)")
+        }
 
         func cancel() {
             cancelled.set()
@@ -62,6 +74,8 @@ enum Archive {
         func runAndWait() -> (URL?, String?) {
             guard !cancelled.isSet else { return (nil, nil) }
             do { try FileOps.refuseInArchive([output]) } catch { return (nil, error.localizedDescription) }
+            // A new archive never takes an older one's place.
+            guard !FileOps.exists(partial) else { return (nil, "“\(partial.lastPathComponent)” is in the way.") }
             prepare()
             defer {
                 try? errors.fileHandleForReading.close()
@@ -95,20 +109,31 @@ enum Archive {
 
         private func finish(message: String) -> (URL?, String?) {
             if cancelled.isSet {
-                try? FileManager.default.removeItem(at: output)
+                try? FileManager.default.removeItem(at: partial)
                 return (nil, nil)
             }
             if process.terminationStatus != 0 {
-                try? FileManager.default.removeItem(at: output)
+                try? FileManager.default.removeItem(at: partial)
                 return (nil, !message.isEmpty ? message : "The archive tool stopped with code \(process.terminationStatus).")
             }
-            return (output, nil)
+            // Into place without ever replacing anything: a name taken since makes it "name (2)".
+            let folder = output.deletingLastPathComponent()
+            let base = output.lastPathComponent.dropLast(format.rawValue.count + 1)
+            var target = output
+            for attempt in 2...1000 {
+                if renamex_np(partial.path, target.path, UInt32(RENAME_EXCL)) == 0 { return (target, nil) }
+                guard errno == EEXIST else { break }
+                target = FileOps.freeURL(in: folder, base: String(base), ext: format.rawValue, from: attempt)
+            }
+            let problem = String(cString: strerror(errno))
+            try? FileManager.default.removeItem(at: partial)
+            return (nil, "The archive couldn't be named “\(output.lastPathComponent)”: \(problem)")
         }
     }
 
     /// Packs `urls` (all from one folder) next to them.
     static func compress(_ urls: [URL], as format: Format = .zip) -> Job {
-        let job = Job(output: archiveURL(for: urls, format: format))
+        let job = Job(output: archiveURL(for: urls, format: format), format: format)
         let parent = urls[0].deletingLastPathComponent()
         // "./" keeps a name that starts with a dash from being read as an option.
         let names = urls.map { $0.lastPathComponent.hasPrefix("-") ? "./" + $0.lastPathComponent : $0.lastPathComponent }
@@ -116,11 +141,11 @@ enum Archive {
         switch format {
         case .zip:
             job.process.executableURL = URL(fileURLWithPath: "/usr/bin/zip")
-            job.process.arguments = ["-r", "-y", "-X", "-q", job.output.path] + names + ["-x", "*.DS_Store"]
+            job.process.arguments = ["-r", "-y", "-X", "-q", job.partial.path] + names + ["-x", "*.DS_Store"]
         case .sevenZip, .tarGz:
             // bsdtar picks the format from the suffix.
             job.process.executableURL = URL(fileURLWithPath: "/usr/bin/tar")
-            job.process.arguments = ["-a", "-c", "-f", job.output.path, "--exclude", ".DS_Store", "-C", parent.path] + names
+            job.process.arguments = ["-a", "-c", "-f", job.partial.path, "--exclude", ".DS_Store", "-C", parent.path] + names
         }
         return job
     }

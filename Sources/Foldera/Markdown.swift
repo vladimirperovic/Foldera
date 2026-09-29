@@ -63,7 +63,16 @@ enum Markdown {
         match(#"^ {0,3}(#{1,6}( |$)|```|~~~|>)"#, line) != nil || isRule(line) || listMarker(line) != nil
     }
 
-    private static func blocks(_ input: ArraySlice<String>) -> String {
+    /// Quotes and lists inside each other this deep are more than any page
+    /// needs; past it, what is left is shown as text rather than parsed
+    /// further, so no file can run the parser out of stack.
+    static let deepest = 32
+
+    private static func blocks(_ input: ArraySlice<String>, depth: Int = 0) -> String {
+        guard depth < deepest else {
+            let text = input.filter { !isBlank($0) }.map { escape($0) }.joined(separator: "<br>\n")
+            return text.isEmpty ? "" : "<p>\(text)</p>\n"
+        }
         var out = ""
         var lines = input
         while let line = lines.first {
@@ -102,12 +111,12 @@ enum Markdown {
                     inner.append(next.replacingOccurrences(of: #"^ {0,3}> ?"#, with: "", options: .regularExpression))
                     lines.removeFirst()
                 }
-                out += "<blockquote>\n\(blocks(inner[...]))</blockquote>\n"
+                out += "<blockquote>\n\(blocks(inner[...], depth: depth + 1))</blockquote>\n"
                 continue
             }
             // List.
             if let first = listMarker(line) {
-                out += list(&lines, first)
+                out += list(&lines, first, depth: depth)
                 continue
             }
             // Indented code.
@@ -158,7 +167,8 @@ enum Markdown {
         }.joined(separator: "\n")
     }
 
-    private static func list(_ lines: inout ArraySlice<String>, _ first: (indent: Int, ordered: Bool, start: Int, content: Int)) -> String {
+    private static func list(_ lines: inout ArraySlice<String>, _ first: (indent: Int, ordered: Bool, start: Int, content: Int),
+                             depth: Int) -> String {
         var items: [[String]] = []
         var loose = false
         while let line = lines.first {
@@ -196,7 +206,7 @@ enum Markdown {
                 task = "<input type=\"checkbox\" disabled\(box[1] == " " ? "" : " checked")> "
                 content[0].removeFirst(4)
             }
-            let inner = blocks(content[...])
+            let inner = blocks(content[...], depth: depth + 1)
             let tight = !loose && inner.hasPrefix("<p>") && inner.components(separatedBy: "<p>").count == 2
             let body = tight ? inner.replacingOccurrences(of: "<p>", with: "").replacingOccurrences(of: "</p>", with: "") : inner
             out += "<li\(task.isEmpty ? "" : " class=\"task\"")>\(task)\(body.trimmingCharacters(in: .newlines))</li>\n"
@@ -282,6 +292,11 @@ enum Markdown {
 
     /// A whole page, styled like GitHub, light or dark with the app.
     static func page(_ text: String, base: URL, fontSize: Int = 14) -> String {
+        page(rendered: html(text), base: base, fontSize: fontSize)
+    }
+
+    /// The same, from what `html` made of the text already.
+    static func page(rendered body: String, base: URL, fontSize: Int = 14) -> String {
         """
         <!DOCTYPE html><html><head><meta charset="utf-8"><base href="\(escape(base.absoluteString))">
         <style>
@@ -310,7 +325,7 @@ enum Markdown {
           pre, th { background: #2a2a2a; }
         }
         </style></head><body>
-        \(html(text))
+        \(body)
         </body></html>
         """
     }
@@ -350,11 +365,12 @@ final class MarkdownView: NSView, WKNavigationDelegate {
 
     /// Renders `text`; pictures and links are found relative to `file`'s folder.
     func show(_ text: String, file: URL) {
-        if shown?.key == file.key, !web.isLoading, let body = try? JSONEncoder().encode(Markdown.html(text)),
+        let rendered = Markdown.html(text)
+        if shown?.key == file.key, !web.isLoading, let body = try? JSONEncoder().encode(rendered),
            let literal = String(data: body, encoding: .utf8) {
             // The same file edited: only the text changes. (Scripts in the
             // page are off; this one comes from the app, not the file.)
-            pictures.page = Markdown.page(text, base: pictures.base, fontSize: fontSize)
+            pictures.page = Markdown.page(rendered: rendered, base: pictures.base, fontSize: fontSize)
             web.evaluateJavaScript("document.body.innerHTML = \(literal); 0") { [weak self] _, error in
                 // Should the swap ever fail, load the page whole rather than leave it stale.
                 guard error != nil, let self else { return }
@@ -364,7 +380,7 @@ final class MarkdownView: NSView, WKNavigationDelegate {
         }
         shown = file
         pictures.serve(file.deletingLastPathComponent())
-        pictures.page = Markdown.page(text, base: pictures.base, fontSize: fontSize)
+        pictures.page = Markdown.page(rendered: rendered, base: pictures.base, fontSize: fontSize)
         web.load(URLRequest(url: pictures.pageURL))
     }
 

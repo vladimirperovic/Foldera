@@ -113,6 +113,15 @@ enum FileUndo {
             guard FileOps.exists(to) else {
                 return failures.append("“\(to.lastPathComponent)” is no longer where it was put.")
             }
+            // "readme.md" → "README.md" on a drive that ignores case: both names are the one file.
+            if FileOps.isSameItem(from, to) {
+                if renamex_np(to.path, from.path, UInt32(RENAME_EXCL)) == 0 {
+                    back.append(.moved(from: to, to: from))
+                } else {
+                    failures.append(String(cString: strerror(errno)))
+                }
+                return
+            }
             guard !FileOps.exists(from) else {
                 return failures.append("Something named “\(from.lastPathComponent)” is already in its old place.")
             }

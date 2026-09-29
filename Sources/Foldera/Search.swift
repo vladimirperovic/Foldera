@@ -143,7 +143,8 @@ final class FolderSearch {
     }
 
     func start(in root: URL, for query: String, filters: SearchFilters = SearchFilters(), showHidden: Bool,
-               found: @escaping ([FileItem]) -> Void, finished: @escaping (_ truncated: Bool) -> Void) {
+               found: @escaping ([FileItem]) -> Void,
+               finished: @escaping (_ truncated: Bool, _ unreadable: Int) -> Void) {
         cancel()
         let flag = CancelFlag()
         current = flag
@@ -151,9 +152,11 @@ final class FolderSearch {
         DispatchQueue.global(qos: .userInitiated).async {
             var options: FileManager.DirectoryEnumerationOptions = [.skipsPackageDescendants]
             if !showHidden { options.insert(.skipsHiddenFiles) }
+            // Folders that can't be searched are counted, so no results there isn't taken for none there.
+            var unreadable = 0
             let walker = FileManager.default.enumerator(
                 at: root, includingPropertiesForKeys: FileItem.keys, options: options,
-                errorHandler: { _, _ in true })
+                errorHandler: { _, _ in unreadable += 1; return true })
             var batch: [FileItem] = []
             var total = 0
             var truncated = false
@@ -183,10 +186,11 @@ final class FolderSearch {
                 }
             }
             let rest = batch
+            let missed = unreadable
             DispatchQueue.main.async {
                 guard !flag.isSet else { return }
                 if !rest.isEmpty { found(rest) }
-                finished(truncated)
+                finished(truncated, missed)
             }
         }
     }

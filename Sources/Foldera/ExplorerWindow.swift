@@ -28,6 +28,8 @@ final class ExplorerTab: NSViewController, NSSplitViewDelegate {
     var isSearching: Bool { !searchQuery.isEmpty || filters.isActive }
     var searchRunning = false
     var searchTruncated = false
+    /// Folders the search couldn't look into.
+    var searchUnreadable = 0
     var busyText: String?
 
     // Bookkeeping between a request and the list catching up with it.
@@ -878,6 +880,9 @@ final class ExplorerTab: NSViewController, NSSplitViewDelegate {
             var found = "\(Format.items(items.count)) found"
             if searchRunning { found = "Searching… " + found }
             if searchTruncated { found += " (stopped at \(Format.count(Int64(FolderSearch.limit))))" }
+            if searchUnreadable > 0 {
+                found += " (\(searchUnreadable == 1 ? "1 folder" : "\(Format.count(Int64(searchUnreadable))) folders") couldn't be searched)"
+            }
             parts.append(found)
         } else {
             parts.append(Format.items(items.count))
@@ -931,16 +936,18 @@ final class ExplorerTab: NSViewController, NSSplitViewDelegate {
         loadError = nil
         searchRunning = true
         searchTruncated = false
+        searchUnreadable = 0
         searchSorted = false
         pendingSelection = []
         scrollToTop = true
         showItems()
         search.start(in: root, for: searchQuery, filters: filters, showHidden: Prefs.showHidden, found: { [weak self] batch in
             self?.appendResults(batch)
-        }, finished: { [weak self] truncated in
+        }, finished: { [weak self] truncated, unreadable in
             guard let self else { return }
             self.searchRunning = false
             self.searchTruncated = truncated
+            self.searchUnreadable = unreadable
             self.updateEmptyState()
             self.updateStatus()
         })
@@ -989,6 +996,7 @@ final class ExplorerTab: NSViewController, NSSplitViewDelegate {
         }
         searchRunning = false
         searchTruncated = false
+        searchUnreadable = 0
         pendingSelection = []
         scrollToTop = true
         load()

@@ -9,7 +9,8 @@ final class UsageNode {
     let kind: SearchFilters.Kind?
     var size: Int64 = 0
     var files = 0
-    /// On the scan's top node: items that couldn't be read, so the sizes are a lower bound.
+    /// Items in this folder's tree that couldn't be read, so its size is a
+    /// lower bound. Kept on every folder, for when one is opened from the cache.
     var unreadable = 0
     /// Files too small to keep one by one, summed per folder…
     var smallFiles: Int64 = 0
@@ -52,13 +53,16 @@ final class UsageNode {
     func total() -> Int64 {
         var bytes = smallFiles
         var count = smallCount
+        var missing = unreadable
         for child in children {
             if child.isFolder { child.total() }
             bytes += child.size
             count += child.isFolder ? child.files : 1
+            missing += child.isFolder ? child.unreadable : 0
         }
         size = bytes
         files = count
+        unreadable = missing
         children.sort { $0.size > $1.size }
         return bytes
     }
@@ -84,6 +88,7 @@ final class UsageNode {
         while let node = ancestor {
             node.size -= size
             node.files -= isFolder ? files : 1
+            node.unreadable -= isFolder ? unreadable : 0
             ancestor = node.parent
         }
         parent?.children.removeAll { $0 === self }
@@ -126,11 +131,12 @@ final class UsageScanner {
             folders[String(cString: real)] = top
             free(real)
         }
-        // Folders that can't be read are counted, so a partial measure doesn't pass for a whole one.
-        let unreadable = Tally()
+        // Folders that can't be read are counted where they are, so a partial
+        // measure doesn't pass for a whole one, here or in any folder above.
+        var failed: [URL] = []
         guard let walker = FileManager.default.enumerator(
             at: URL(fileURLWithPath: rootPath, isDirectory: true), includingPropertiesForKeys: keys, options: [],
-            errorHandler: { _, _ in unreadable.count += 1; return true }) else {
+            errorHandler: { url, _ in failed.append(url); return true }) else {
             top.unreadable = 1
             return top
         }
@@ -144,7 +150,7 @@ final class UsageScanner {
             let path = url.path
             guard let parent = folders[(path as NSString).deletingLastPathComponent] else { continue }
             guard let values = try? url.resourceValues(forKeys: keySet) else {
-                unreadable.count += 1
+                parent.unreadable += 1
                 walker.skipDescendants()
                 continue
             }
@@ -184,12 +190,15 @@ final class UsageScanner {
                 }
             }
         }
+        for url in failed {
+            // As the walk spells paths (standardizing would drop a /private the walk kept).
+            let path = url.path
+            let node = folders[path] ?? folders[(path as NSString).deletingLastPathComponent] ?? top
+            node.unreadable += 1
+        }
         top.total()
-        top.unreadable = unreadable.count
         return top
     }
-
-    private final class Tally { var count = 0 }
 }
 
 /// Scans kept for the session, so walking into a folder already measured

@@ -57,7 +57,29 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
         // Failed pane saves move to retained editor windows before the quit check.
         windows.flatMap(\.tabs).forEach { $0.previewPane.clear() }
-        return MarkdownEditor.canCloseAll() ? .terminateNow : .terminateCancel
+        guard MarkdownEditor.canCloseAll() else { return .terminateCancel }
+        // Copying, syncing or packing still going stops first and cleans up
+        // after itself, so nothing is left half done; an undo under way finishes.
+        guard ProgressWindow.anyRunning || FileUndo.manager.isBusy else { return .terminateNow }
+        let alert = NSAlert()
+        alert.messageText = "Foldera is still working on files."
+        alert.informativeText = "Stopping removes whatever is half copied; what is done stays done. An undo under way finishes first."
+        alert.addButton(withTitle: "Stop and Quit")
+        alert.addButton(withTitle: "Keep Working")
+        guard alert.runModal() == .alertFirstButtonReturn else { return .terminateCancel }
+        ProgressWindow.cancelAll()
+        quitWhenIdle(since: Date())
+        return .terminateLater
+    }
+
+    /// Quits once the stopped work has wound down (or, should something
+    /// hang, after half a minute anyway).
+    private func quitWhenIdle(since start: Date) {
+        if (ProgressWindow.anyRunning || FileUndo.manager.isBusy) && Date().timeIntervalSince(start) < 30 {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) { self.quitWhenIdle(since: start) }
+        } else {
+            NSApp.reply(toApplicationShouldTerminate: true)
+        }
     }
 
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {

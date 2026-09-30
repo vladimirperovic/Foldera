@@ -1002,9 +1002,14 @@ extension ExplorerTab: NSMenuItemValidation {
     func handleKey(_ event: NSEvent) -> Bool {
         guard let window, event.window === window, host?.selected === self else { return false }
         let responder = window.firstResponder
-        if responder is NSText { return false }
+        if responder is NSText {
+            typeSelection.reset()
+            return false
+        }
         let mods = event.modifierFlags.intersection([.command, .option, .control, .shift])
         let listFocused = (responder as? NSView)?.isDescendant(of: activeList) == true
+        if listFocused && handleTypeSelection(event) { return true }
+        typeSelection.reset()
         switch event.keyCode {
         case 36, 76: // Return, Enter
             if listFocused && mods.isEmpty { openSelection(nil); return true }

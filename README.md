@@ -112,6 +112,7 @@ gets back the width you dragged it to once there is room again.
 | Windows habit | Here |
 |---|---|
 | Enter opens · Backspace goes back | same |
+| Type the start of a name to select it, then Enter to open | same, in Details, Large icons and Columns |
 | Alt+← → ↑ | ⌥← ⌥→ ⌥↑ |
 | F2 rename · F5 refresh · F3 search · F4 / Alt+D address | same |
 | Delete → Recycle Bin · Shift+Delete → gone | fn+Delete → Trash · ⇧fn+Delete → gone (asks first) |

@@ -130,6 +130,8 @@ final class Columns: NSObject, NSBrowserDelegate {
         let selection = selectedItems
         if selection.count == 1, selection[0].isFolder { return selection[0].url }
         let column = max(browser.selectedColumn, 0)
+        // The first listing may still be loading when this layout is selected.
+        guard column <= browser.lastColumn else { return root?.url }
         return (browser.parentForItems(inColumn: column) as? ColumnNode)?.url ?? root?.url
     }
 

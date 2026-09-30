@@ -48,6 +48,7 @@ final class ExplorerTab: NSViewController, NSSplitViewDelegate {
     var cancelRename = false
     var reloadDeferred = false
     var keyMonitor: Any?
+    var typeSelection = TypeSelection()
     var observers: [NSObjectProtocol] = []
     /// Lists that missed a reload while hidden; they catch up when shown.
     var staleViews: Set<ViewMode> = []
@@ -447,7 +448,11 @@ final class ExplorerTab: NSViewController, NSSplitViewDelegate {
         observers.append(center.addObserver(forName: .explorerPreviewPaneChanged, object: nil, queue: .main) { [weak self] _ in
             self?.applyPreviewPane()
         })
-        keyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
+        keyMonitor = NSEvent.addLocalMonitorForEvents(matching: [.keyDown, .leftMouseDown, .rightMouseDown, .otherMouseDown]) { [weak self] event in
+            if event.type != .keyDown {
+                self?.typeSelection.reset()
+                return event
+            }
             guard let self, self.handleKey(event) else { return event }
             return nil
         }
@@ -477,6 +482,7 @@ final class ExplorerTab: NSViewController, NSSplitViewDelegate {
     }
 
     func navigate(to target: Location, record: Bool = true, select: [URL] = []) {
+        typeSelection.reset()
         navigationGeneration += 1
         if renamingKey != nil { focusList() }
         addressBar.endEditing()
@@ -827,6 +833,7 @@ final class ExplorerTab: NSViewController, NSSplitViewDelegate {
     }
 
     func focusList() {
+        typeSelection.reset()
         window?.makeFirstResponder(activeList)
     }
 

@@ -90,7 +90,7 @@ final class ExplorerWindow: NSWindowController, NSWindowDelegate {
         view.nextResponder = tab
         tab.nextResponder = container
         tab.didAttach()
-        window?.makeFirstResponder(tab.activeList)
+        tab.focusList()
         tab.updateCommandStates()
         tabDidChange(tab)
     }

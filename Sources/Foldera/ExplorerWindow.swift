@@ -37,6 +37,7 @@ final class ExplorerTab: NSViewController, NSSplitViewDelegate {
     let watcher = DirectoryWatcher()
     var loadGeneration = 0
     private var navigationGeneration = 0
+    private var pendingRecentVisit = false
     var sortGeneration = 0
     /// A column was clicked while this search runs: later results go in order too.
     var searchSorted = false
@@ -483,6 +484,7 @@ final class ExplorerTab: NSViewController, NSSplitViewDelegate {
 
     func navigate(to target: Location, record: Bool = true, select: [URL] = []) {
         typeSelection.reset()
+        pendingRecentVisit = true
         navigationGeneration += 1
         if renamingKey != nil { focusList() }
         addressBar.endEditing()
@@ -628,6 +630,10 @@ final class ExplorerTab: NSViewController, NSSplitViewDelegate {
             return
         }
         loadError = error
+        if pendingRecentVisit, error == nil, !isSearching, let folder = location.url {
+            RecentFolders.remember(folder)
+            pendingRecentVisit = false
+        }
         items = order == sort ? loaded : loaded.sorted(by: sort)
         // A scan that finished while the folder was being read: its sizes go
         // in before the list is drawn, not in a second pass.

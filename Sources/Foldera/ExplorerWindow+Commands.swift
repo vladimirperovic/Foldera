@@ -861,6 +861,9 @@ extension ExplorerTab: NSMenuItemValidation {
         menu.addItem(item("Copy", "doc.on.doc", #selector(copy(_:)), key: "c"))
         menu.addItem(item("Copy as path", "link", #selector(copyPath(_:)), key: "c", mods: [.command, .shift]))
         menu.addItem(item("Share", "square.and.arrow.up", #selector(share(_:))))
+        if chosen.count == 1, isPicture(chosen[0]) {
+            menu.addItem(item("Copy text from image", "text.viewfinder", #selector(copyTextFromImage(_:))))
+        }
         menu.addItem(item("AirDrop", "airplayaudio", #selector(airDrop(_:))))
         menu.addItem(.separator())
         menu.addItem(item("Rename", "character.cursor.ibeam", #selector(renameSelection(_:))))
@@ -905,6 +908,10 @@ extension ExplorerTab: NSMenuItemValidation {
         // Inside an archive everything is read-only: copy out, but change nothing.
         let changeable = files && !isInArchive
         switch menuItem.action {
+        case #selector(quickOpen(_:)), #selector(findCommand(_:)):
+            return window?.attachedSheet == nil
+        case #selector(copyTextFromImage(_:)):
+            return !editing && chosen.count == 1 && isPicture(chosen[0]) && window?.attachedSheet == nil
         case #selector(goBack(_:)): return !backStack.isEmpty
         case #selector(goForward(_:)): return !forwardStack.isEmpty
         case #selector(goUp(_:)): return parentLocation != nil

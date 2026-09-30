@@ -11,6 +11,7 @@ final class ExplorerWindow: NSWindowController, NSWindowDelegate {
     private let container = NSView()
     private lazy var stripHeight = strip.heightAnchor.constraint(equalToConstant: 40)
     private var keyMonitor: Any?
+    private var quickOpenController: QuickOpenController?
     var onClose: (() -> Void)?
 
     init(first: ExplorerTab) {
@@ -139,6 +140,14 @@ final class ExplorerWindow: NSWindowController, NSWindowDelegate {
     }
 
     // MARK: Commands
+
+    func showQuickOpen(scope: QuickOpenController.Scope, query: String = "") {
+        guard let selected, let window, window.attachedSheet == nil else { return }
+        let controller = QuickOpenController(tab: selected, scope: scope)
+        controller.setQuery(query)
+        quickOpenController = controller
+        controller.present(in: window) { [weak self] in self?.quickOpenController = nil }
+    }
 
     @objc func newTab(_ sender: Any?) {
         add(ExplorerTab(location: .folder(FileManager.default.homeDirectoryForCurrentUser)))

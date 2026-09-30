@@ -78,6 +78,7 @@ enum MainMenu {
             item("Paste", #selector(NSText.paste(_:)), "v"),
             item("Move Item Here", #selector(W.pasteMove(_:)), "v", [.command, .option]),
             item("Copy as Path", #selector(W.copyPath(_:)), "c", [.command, .shift]),
+            item("Copy Text from Image", #selector(W.copyTextFromImage(_:))),
             sep(),
             item("Select All", #selector(NSText.selectAll(_:)), "a"),
             item("Select None", #selector(W.selectNone(_:))),
@@ -114,6 +115,9 @@ enum MainMenu {
         }
 
         _ = menu("Go", [
+            item("Quick Open…", #selector(W.quickOpen(_:)), "p"),
+            item("Find Command…", #selector(W.findCommand(_:)), "p", [.command, .option]),
+            sep(),
             item("Back", #selector(W.goBack(_:)), "["),
             item("Forward", #selector(W.goForward(_:)), "]"),
             item("Enclosing Folder", #selector(W.goUp(_:)), key(NSUpArrowFunctionKey)),

@@ -113,6 +113,7 @@ gets back the width you dragged it to once there is room again.
 |---|---|
 | Enter opens · Backspace goes back | same |
 | Type the start of a name to select it, then Enter to open | same, in Details, Large icons and Columns |
+| Jump to a folder or tab / search commands | ⌘P Quick Open · ⌥⌘P commands |
 | Alt+← → ↑ | ⌥← ⌥→ ⌥↑ |
 | F2 rename · F5 refresh · F3 search · F4 / Alt+D address | same |
 | Delete → Recycle Bin · Shift+Delete → gone | fn+Delete → Trash · ⇧fn+Delete → gone (asks first) |
@@ -121,6 +122,19 @@ gets back the width you dragged it to once there is room again.
 | Ctrl+Shift+N new folder · Alt+Enter properties | ⇧⌘N · ⌥↩ (or ⌘I) |
 | Alt+P preview pane | ⌥P or ⇧⌘P |
 | — | Space: Quick Look · ⇧⌘. hidden files · ⌘K connect to server |
+
+**Quick Open** (⌘P, Go menu) searches pinned folders, the last 50 successfully
+visited folders, open tabs across all windows, and Foldera's commands. Type part
+of a name, use ↑/↓, and press Enter to open the folder, switch tabs, or run the
+command. Escape closes it. Choose **Folders & Tabs** or **Commands** to narrow
+the results; ⌥⌘P starts with commands. Serbian search words such as `skriveni`,
+`sinhronizacija`, and `kopiraj tekst` work too. Unavailable commands are dimmed.
+
+**Copy text from image** appears when you right-click one image, including in
+Foldera's picture viewer, and in the Edit menu. Text recognition runs locally
+using macOS Vision, with a Cancel button. It copies recognized text to the
+clipboard; an unreadable image or one without text leaves the clipboard alone.
+For animated or multi-frame images it reads the first frame.
 
 ## Disk usage and folder sizes
 

@@ -272,7 +272,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
     // MARK: Screenshots for development
 
     /// `Foldera --snapshot <folder|thismac|image> <out.png> [--icons|--columns] [--pane] [--dark|--light] [--search text]
-    /// [--select name] [--tabs count] [--act newfolder|cut|properties] [--press token,token…] [--capture properties|viewer]`
+    /// [--select name] [--tabs count] [--act newfolder|cut|properties|quickopen|commands] [--query text]
+    /// [--press token,token…] [--press-delay seconds] [--capture properties|viewer|sheet]`
     /// renders one window to a PNG and quits. `--press` sends real key events
     /// through the event queue, the way typing would: a number is a key code,
     /// anything else is typed as characters. An image as the target opens the viewer.
@@ -338,6 +339,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
             case "viewer": return NSApp.windows.first { $0 is ViewerWindow }
             case "properties": return NSApp.windows.first { $0 is EscWindow && $0.isVisible }
             case "sync": return NSApp.windows.first { $0.windowController is SyncWindow }
+            case "sheet": return controller?.window?.attachedSheet
             default: return controller?.window
             }
         }
@@ -353,22 +355,28 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
             case "properties": controller?.showProperties(nil)
             case "filters": controller?.filtersChanged(SearchFilters(kind: .images))
             case "sync": (captured()?.windowController as? SyncWindow)?.synchronize(nil)
+            case "quickopen": controller?.host?.showQuickOpen(scope: .all, query: value("--query") ?? "")
+            case "commands": controller?.host?.showQuickOpen(scope: .commands, query: value("--query") ?? "")
             case "tabs":
                 for name in ["Photos", "Projects 2026"] {
                     self.openWindow(.folder(path.appendingPathComponent(name)), tabbedWith: controller?.window, activate: false)
                 }
             default: break
             }
-            guard let tokens = value("--press"), let window = captured() else { return }
-            for token in tokens.split(separator: ",").map(String.init) {
-                let code = UInt16(token) ?? 0
-                let characters = UInt16(token) == nil ? token : ""
-                for type in [NSEvent.EventType.keyDown, .keyUp] {
-                    if let event = NSEvent.keyEvent(
-                        with: type, location: .zero, modifierFlags: [], timestamp: ProcessInfo.processInfo.systemUptime,
-                        windowNumber: window.windowNumber, context: nil, characters: characters,
-                        charactersIgnoringModifiers: characters, isARepeat: false, keyCode: code) {
-                        NSApp.postEvent(event, atStart: false)
+            guard let tokens = value("--press") else { return }
+            DispatchQueue.main.asyncAfter(deadline: .now() + (value("--press-delay").flatMap(Double.init) ?? 0)) {
+                guard let target = captured() else { return }
+                let window = target.attachedSheet ?? target
+                for token in tokens.split(separator: ",").map(String.init) {
+                    let code = UInt16(token) ?? 0
+                    let characters = UInt16(token) == nil ? token : ""
+                    for type in [NSEvent.EventType.keyDown, .keyUp] {
+                        if let event = NSEvent.keyEvent(
+                            with: type, location: .zero, modifierFlags: [], timestamp: ProcessInfo.processInfo.systemUptime,
+                            windowNumber: window.windowNumber, context: nil, characters: characters,
+                            charactersIgnoringModifiers: characters, isARepeat: false, keyCode: code) {
+                            NSApp.postEvent(event, atStart: false)
+                        }
                     }
                 }
             }

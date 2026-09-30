@@ -202,6 +202,16 @@ final class ViewerCanvas: NSImageView {
     private var origin: NSPoint?
     private var dragged = false
 
+    override func menu(for event: NSEvent) -> NSMenu? {
+        guard let viewer else { return nil }
+        let menu = NSMenu()
+        let copy = NSMenuItem(title: "Copy text from image", action: #selector(ImageViewer.copyTextFromImage(_:)), keyEquivalent: "")
+        copy.target = viewer
+        copy.image = NSImage(systemSymbolName: "text.viewfinder", accessibilityDescription: nil)
+        menu.addItem(copy)
+        return menu
+    }
+
     override func mouseDown(with event: NSEvent) {
         if event.clickCount == 2 {
             viewer?.toggleFullScreen(nil)
@@ -251,7 +261,7 @@ final class ViewerWindow: NSWindow {
 /// A FastStone-style image viewer: one picture on a dark background, the
 /// rest of the folder one key away, and the tools out of sight until the
 /// mouse moves.
-final class ImageViewer: NSWindowController, NSWindowDelegate {
+final class ImageViewer: NSWindowController, NSWindowDelegate, NSMenuItemValidation {
     private static var shared: ImageViewer?
 
     private var urls: [URL] = []
@@ -712,6 +722,16 @@ final class ImageViewer: NSWindowController, NSWindowDelegate {
 
     @objc func copy(_ sender: Any?) {
         if let url = current { FileClipboard.shared.put([url], cut: false) }
+    }
+
+    @objc func copyTextFromImage(_ sender: Any?) {
+        guard let current, let window else { return }
+        ImageTextCopy.start(current, in: window)
+    }
+
+    func validateMenuItem(_ menuItem: NSMenuItem) -> Bool {
+        if menuItem.action == #selector(copyTextFromImage(_:)) { return current != nil && window?.attachedSheet == nil }
+        return true
     }
 
     /// Delete: to the Trash, and on to the next picture.

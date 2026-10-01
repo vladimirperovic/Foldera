@@ -337,7 +337,8 @@ final class ExplorerTab: NSViewController, NSSplitViewDelegate {
         table.allowsEmptySelection = true
         table.allowsColumnReordering = true
         table.allowsColumnResizing = true
-        table.allowsTypeSelect = true
+        // Typing a name is handled for every layout alike (see handleTypeSelection).
+        table.allowsTypeSelect = false
         table.columnAutoresizingStyle = .noColumnAutoresizing
         let columns: [(NSUserInterfaceItemIdentifier, String, CGFloat, SortKey?, Bool)] = [
             (.nameColumn, "Name", 320, .name, false),

@@ -89,6 +89,18 @@ private extension Sync.Plan {
         #expect(try p.plan(.mirror).rows.isEmpty)
     }
 
+    @Test func aFileAnotherAppFillsInOnlyWhenReadIsSyncedWhole() throws {
+        let p = try Pair()
+        try p.file("R/changed.pdf", "old", age: 7200)
+        let new = try LazyFile(p.url("L/new.pdf"), contents: LazyFile.bytes(100_000))
+        let changed = try LazyFile(p.url("L/changed.pdf"), contents: LazyFile.bytes(50_000))
+        defer { new.stop(); changed.stop() }
+        let outcome = try p.sync(.mirror)
+        #expect(outcome.failures.isEmpty)
+        #expect(try Data(contentsOf: p.url("R/new.pdf")) == new.contents)
+        #expect(try Data(contentsOf: p.url("R/changed.pdf")) == changed.contents)
+    }
+
     @Test func mirrorOverwritesANewerFileOnTheRightToo() throws {
         let p = try Pair()
         try p.file("L/a.txt", "left", age: 7200)

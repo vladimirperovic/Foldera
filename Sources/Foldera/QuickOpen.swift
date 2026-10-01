@@ -34,7 +34,8 @@ struct QuickOpenItem {
         switch destination {
         case .folder(let url): return "folder:" + url.key
         case .tab(let tab): return "tab:\(ObjectIdentifier(tab))"
-        case .command(let item, _): return "command:\(item.action.map(NSStringFromSelector) ?? ""):\(item.title):\(item.tag)"
+        // The detail names the menu, so one title in two menus stays two rows.
+        case .command(let item, _): return "command:\(item.action.map(NSStringFromSelector) ?? ""):\(item.title):\(item.tag):\(detail)"
         }
     }
 

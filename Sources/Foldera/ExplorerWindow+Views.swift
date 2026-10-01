@@ -51,10 +51,6 @@ extension ExplorerTab: NSTableViewDataSource, NSTableViewDelegate {
         resort()
     }
 
-    func tableView(_ tableView: NSTableView, typeSelectStringFor tableColumn: NSTableColumn?, row: Int) -> String? {
-        tableColumn?.identifier == .nameColumn && row < items.count ? items[row].name : nil
-    }
-
     func tableView(_ tableView: NSTableView, pasteboardWriterForRow row: Int) -> NSPasteboardWriting? {
         guard row < items.count, items[row].volume == nil else { return nil }
         return items[row].url as NSURL

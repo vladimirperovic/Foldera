@@ -153,7 +153,11 @@ final class Columns: NSObject, NSBrowserDelegate {
     }
 
     func browser(_ browser: NSBrowser, child index: Int, ofItem item: Any?) -> Any {
-        node(item)!.loadChildren(sort: sort)[index]
+        // Only rows numberOfChildrenOfItem counted are asked for, from the same kept listing.
+        guard let children = node(item)?.loadChildren(sort: sort), children.indices.contains(index) else {
+            return ColumnNode(url: root?.url ?? URL(fileURLWithPath: "/"), item: nil, problem: "")
+        }
+        return children[index]
     }
 
     func browser(_ browser: NSBrowser, isLeafItem item: Any?) -> Bool {

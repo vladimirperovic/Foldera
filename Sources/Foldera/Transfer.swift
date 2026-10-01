@@ -28,9 +28,11 @@ final class Transfer {
         var itemsTotal = 0
         var current = ""
         var preparing = true
+        /// Another app is still handing `current` over (see `TreeCopier.whileReading`).
+        var waiting = false
 
         var fraction: Double? {
-            if preparing { return nil }
+            if preparing || waiting { return nil }
             if bytesTotal > 0 { return min(Double(bytesDone) / Double(bytesTotal), 1) }
             return itemsTotal > 0 ? Double(itemsDone) / Double(itemsTotal) : nil
         }
@@ -178,6 +180,10 @@ final class Transfer {
             self.progress.bytesDone = self.stepBase + bytes
             self.publish(force: false)
         }
+        copier.waiting = { [unowned self] waiting in
+            self.progress.waiting = waiting
+            self.publish(force: true)
+        }
     }
 
     func cancel() { cancelled.set() }
@@ -228,7 +234,8 @@ final class Transfer {
                     if let trashed { outcome.changes.append(.moved(from: step.to, to: trashed as URL)) }
                 }
                 if move && sameVolume(step) {
-                    try fm.moveItem(at: step.from, to: step.to)
+                    // A placeholder renamed is still a placeholder: its app fills it in first.
+                    try copier.whileReading(step.from) { try fm.moveItem(at: $0, to: step.to) }
                     outcome.changes.append(.moved(from: step.from, to: step.to))
                 } else {
                     try copier.copy(step.from, to: step.to)
@@ -312,7 +319,13 @@ final class TreeCopier {
     var skips: ((String) -> Bool)?
     /// Parts of the last item that couldn't be copied and were skipped.
     private(set) var errors: [String] = []
+    /// Told (on the copying thread) when another app is taking a moment to
+    /// hand an item over, and again once it has.
+    var waiting: ((Bool) -> Void)?
+    /// How long an app gets to start handing over a placeholder it has just made.
+    var patience: TimeInterval = 10
     private let cancelled: CancelFlag
+    private let coordinator = NSFileCoordinator()
     // Touched only from the copying thread (copyfile calls back on it).
     private var finished: Int64 = 0
     private var fileCopied: Int64 = 0
@@ -327,6 +340,92 @@ final class TreeCopier {
         guard !FileOps.exists(to) else {
             throw OpError("There is already an item named “\(to.lastPathComponent)”.")
         }
+        try whileReading(from) { try copyNow($0, to: to) }
+    }
+
+    /// Runs `body` on this thread as a coordinated reader of `url`, the way
+    /// Finder copies: an app presenting the item (not what is inside a
+    /// folder) gets to save it first. Windows App puts a file copied in a
+    /// remote session on the clipboard as an empty placeholder of the right
+    /// size and fetches its contents only for such a reader; read plainly,
+    /// every byte is zero.
+    func whileReading(_ url: URL, _ body: (URL) throws -> Void) throws {
+        // `say` may be called from the thread watching the wait; `lock` keeps it apart from this one.
+        let lock = NSLock()
+        var said = false
+        func say() {
+            guard !said else { return }
+            said = true
+            waiting?(true)
+        }
+        defer {
+            lock.lock()
+            if said { waiting?(false) }
+            lock.unlock()
+        }
+        let started = Date()
+        // A fresh placeholder nobody filled in (its app busy, or gone with the
+        // session) is asked for again for a while, and is never copied as zeros.
+        while try !coordinated(url, lock: lock, waiting: say, { url -> Bool in
+            guard Self.isPlaceholder(url.path, bornWithin: 60) else {
+                try body(url)
+                return true
+            }
+            guard Date().timeIntervalSince(started) < patience else {
+                throw OpError("It is still empty: the app it comes from didn't hand it over. Try again.")
+            }
+            return false
+        }) {
+            lock.lock()
+            say()
+            lock.unlock()
+            Thread.sleep(forTimeInterval: 0.25)
+            if cancelled.isSet { throw CancellationError() }
+        }
+    }
+
+    /// One coordinated read, with `body` run on this thread while the item is
+    /// handed over. Meanwhile another thread watches: when the app takes a
+    /// while, it says so, and lets Cancel end the wait.
+    private func coordinated<T>(_ url: URL, lock: NSLock, waiting say: @escaping () -> Void,
+                                _ body: (URL) throws -> T) throws -> T {
+        var granted = false
+        DispatchQueue.global(qos: .userInitiated).async { [cancelled, coordinator] in
+            while true {
+                Thread.sleep(forTimeInterval: 0.25)
+                lock.lock()
+                defer { lock.unlock() }
+                if granted { return }
+                if cancelled.isSet { coordinator.cancel() }
+                say()
+            }
+        }
+        func stopWatching() {
+            lock.lock()
+            granted = true
+            lock.unlock()
+        }
+        var refused: NSError?
+        var result: Result<T, Error>?
+        coordinator.coordinate(readingItemAt: url, options: [], error: &refused) { url in
+            stopWatching()
+            result = Result { try body(url) }
+        }
+        stopWatching()
+        if let result { return try result.get() }
+        if cancelled.isSet { throw CancellationError() }
+        throw refused ?? CocoaError(.fileReadUnknown)
+    }
+
+    /// A size but nothing on disk: how an app that fills a file in on demand
+    /// leaves it until asked. `bornWithin`: made at most that many seconds ago.
+    static func isPlaceholder(_ path: String, bornWithin age: Int? = nil) -> Bool {
+        var info = stat()
+        guard lstat(path, &info) == 0, info.st_mode & S_IFMT == S_IFREG, info.st_size > 0, info.st_blocks == 0 else { return false }
+        return age.map { time(nil) - info.st_birthtimespec.tv_sec <= $0 } ?? true
+    }
+
+    private func copyNow(_ from: URL, to: URL) throws {
         finished = 0
         fileCopied = 0
         let state = copyfile_state_alloc()
@@ -356,6 +455,19 @@ final class TreeCopier {
         switch (what, stage) {
         case (COPYFILE_RECURSE_FILE, COPYFILE_START):
             fileCopied = 0
+            // Reading a folder doesn't ask the apps presenting what is inside
+            // it, so a file that looks like a placeholder is asked for itself.
+            // Asking for every file would cost a round trip each.
+            if let source, case let path = String(cString: source), Self.isPlaceholder(path) {
+                do {
+                    try whileReading(URL(fileURLWithPath: path)) { _ in }
+                } catch is CancellationError {
+                    return COPYFILE_QUIT
+                } catch {
+                    errors.append("“\((path as NSString).lastPathComponent)”: \(error.localizedDescription)")
+                    return COPYFILE_SKIP
+                }
+            }
         case (COPYFILE_RECURSE_FILE, COPYFILE_FINISH):
             var info = stat()
             if let source, lstat(source, &info) == 0 { finished += Int64(info.st_size) }
@@ -449,6 +561,15 @@ final class ProgressWindow: NSWindowController {
     }
 
     func update(_ progress: Transfer.Progress) {
+        if progress.waiting {
+            // Nothing arrives to be counted until the other app hands it over.
+            if !bar.isIndeterminate {
+                bar.isIndeterminate = true
+                bar.startAnimation(nil)
+            }
+            detail.stringValue = "Waiting for “\(progress.current)” to arrive…"
+            return
+        }
         guard let fraction = progress.fraction else { return }
         if bar.isIndeterminate {
             bar.stopAnimation(nil)

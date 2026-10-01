@@ -43,6 +43,91 @@ private final class Answers {
 }
 
 @Suite struct Transfers {
+    @Test(arguments: [false, true])
+    func aFileAnotherAppFillsInOnlyWhenReadArrivesWhole(move: Bool) throws {
+        let s = try Sandbox()
+        let lazy = try LazyFile(try s.folder("remote").appendingPathComponent("scan.pdf"), contents: LazyFile.bytes(100_000))
+        defer { lazy.stop() }
+        let source = try #require(lazy.presentedItemURL)
+        let plan = try #require(Transfer.plan([source], into: try s.folder("dest"), move: move, ask: Answers(.stop).ask))
+        let outcome = Transfer(plan: plan, move: move).perform()
+        #expect(outcome.failures.isEmpty)
+        #expect(try Data(contentsOf: s.url.appendingPathComponent("dest/scan.pdf")) == lazy.contents)
+    }
+
+    /// Windows App can be a moment late to start handing over a placeholder it has just made.
+    @Test(arguments: [0, 0.6])
+    func aFolderWithSuchAFileInsideArrivesWhole(readyAfter: TimeInterval) throws {
+        let s = try Sandbox()
+        let lazy = try LazyFile(try s.folder("remote/Scans").appendingPathComponent("scan.pdf"), contents: LazyFile.bytes(100_000),
+                                readyAfter: readyAfter)
+        defer { lazy.stop() }
+        let plan = try #require(Transfer.plan([s.url.appendingPathComponent("remote/Scans")], into: try s.folder("dest"),
+                                              move: false, ask: Answers(.stop).ask))
+        _ = Transfer(plan: plan, move: false).perform()
+        #expect(try Data(contentsOf: s.url.appendingPathComponent("dest/Scans/scan.pdf")) == lazy.contents)
+    }
+
+    @Test func anAppALittleLateIsAskedAgain() throws {
+        let s = try Sandbox()
+        let lazy = try LazyFile(try s.folder("remote").appendingPathComponent("photo.jpg"), contents: LazyFile.bytes(5000), readyAfter: 0.6)
+        defer { lazy.stop() }
+        let plan = try #require(Transfer.plan([lazy.presentedItemURL!], into: try s.folder("dest"), move: false, ask: Answers(.stop).ask))
+        let outcome = Transfer(plan: plan, move: false).perform()
+        #expect(outcome.failures.isEmpty)
+        #expect(try Data(contentsOf: s.url.appendingPathComponent("dest/photo.jpg")) == lazy.contents)
+    }
+
+    @Test func aPlaceholderNobodyFillsInIsNotCopied() throws {
+        let s = try Sandbox()
+        let lazy = try LazyFile(try s.folder("remote").appendingPathComponent("photo.jpg"), contents: LazyFile.bytes(5000), readyAfter: nil)
+        let copier = TreeCopier(cancelled: CancelFlag())
+        copier.patience = 0.5
+        #expect(throws: OpError.self) { try copier.copy(lazy.presentedItemURL!, to: s.url.appendingPathComponent("photo.jpg")) }
+        #expect(!s.exists("photo.jpg"))
+    }
+
+    @Test func anOldSparseFileIsCopiedAsItIs() throws {
+        let s = try Sandbox()
+        let sparse = s.url.appendingPathComponent("disk.img")
+        FileManager.default.createFile(atPath: sparse.path, contents: nil)
+        let handle = try FileHandle(forWritingTo: sparse)
+        try handle.truncate(atOffset: 1 << 20)
+        try handle.close()
+        try FileManager.default.setAttributes([.creationDate: Date(timeIntervalSinceNow: -3600)], ofItemAtPath: sparse.path)
+        let started = Date()
+        try TreeCopier(cancelled: CancelFlag()).copy(sparse, to: s.url.appendingPathComponent("copy.img"))
+        #expect(Date().timeIntervalSince(started) < 1)
+        #expect(try Data(contentsOf: s.url.appendingPathComponent("copy.img")) == Data(count: 1 << 20))
+    }
+
+    @Test func aSlowHandOverIsSaid() throws {
+        let s = try Sandbox()
+        let lazy = try LazyFile(try s.folder("remote").appendingPathComponent("big.iso"), contents: LazyFile.bytes(1000), delay: 0.6)
+        defer { lazy.stop() }
+        let copier = TreeCopier(cancelled: CancelFlag())
+        var said: [Bool] = []
+        copier.waiting = { said.append($0) }
+        try copier.copy(lazy.presentedItemURL!, to: s.url.appendingPathComponent("big.iso"))
+        #expect(said == [true, false])
+        #expect(try Data(contentsOf: s.url.appendingPathComponent("big.iso")) == lazy.contents)
+    }
+
+    @Test func cancelStopsWaitingForAHandOver() throws {
+        let s = try Sandbox()
+        let lazy = try LazyFile(try s.folder("remote").appendingPathComponent("big.iso"), contents: LazyFile.bytes(1000), delay: 5)
+        defer { lazy.stop() }
+        let cancelled = CancelFlag()
+        let copier = TreeCopier(cancelled: cancelled)
+        copier.waiting = { if $0 { cancelled.set() } }
+        let started = Date()
+        #expect(throws: CancellationError.self) {
+            try copier.copy(lazy.presentedItemURL!, to: s.url.appendingPathComponent("big.iso"))
+        }
+        #expect(Date().timeIntervalSince(started) < 3)
+        #expect(!s.exists("big.iso"))
+    }
+
     @Test func copiesAFolderTreeWithItsContents() throws {
         let s = try Sandbox()
         try s.file("src/Project/a.txt", "A")

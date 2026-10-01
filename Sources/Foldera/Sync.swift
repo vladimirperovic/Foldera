@@ -807,6 +807,10 @@ enum Sync {
                 self.progress.bytesDone = self.base + bytes
                 self.publish(force: false)
             }
+            copier.waiting = { [unowned self] waiting in
+                self.progress.waiting = waiting
+                self.publish(force: true)
+            }
             // What the compare left out stays out of a folder copied whole.
             copier.skips = { Sync.isIgnored($0, atTop: false) }
         }

@@ -1113,9 +1113,9 @@ extension ExplorerTab: NSMenuItemValidation {
             menuItem.state = host?.partner != nil ? .on : .off
             return host != nil
         case #selector(copyToOtherPane(_:)), #selector(moveToOtherPane(_:)):
-            let target = host?.otherPane(of: self)?.currentFolder
-            return !editing && files && target != nil && target?.key != currentFolder?.key
-                && (menuItem.action == #selector(copyToOtherPane(_:)) || changeable)
+            guard !editing, files, let target = host?.otherPane(of: self)?.currentFolder else { return false }
+            let allowed = menuItem.action == #selector(copyToOtherPane(_:)) || changeable
+            return allowed && target.key != currentFolder?.key
         case #selector(sameFolderInOtherPane(_:)), #selector(swapPanes(_:)), #selector(comparePanes(_:)):
             return host?.otherPane(of: self) != nil
         case #selector(syncPanes(_:)):

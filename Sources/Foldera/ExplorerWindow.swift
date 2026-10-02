@@ -1035,9 +1035,11 @@ final class ExplorerTab: NSViewController, NSSplitViewDelegate {
             return
         }
         if isSearching {
-            var found = flatView && searchQuery.isEmpty && !filters.isActive
-                ? "\(Format.count(Int64(items.count))) \(items.count == 1 ? "file" : "files") here and in all subfolders"
-                : "\(Format.items(items.count)) found"
+            let files = items.count == 1 ? "file" : "files"
+            var found = "\(Format.items(items.count)) found"
+            if flatView && searchQuery.isEmpty && !filters.isActive {
+                found = "\(Format.count(Int64(items.count))) \(files) here and in all subfolders"
+            }
             if searchRunning { found = "Searching… " + found }
             if searchTruncated { found += " (stopped at \(Format.count(Int64(FolderSearch.limit))))" }
             if searchUnreadable > 0 {

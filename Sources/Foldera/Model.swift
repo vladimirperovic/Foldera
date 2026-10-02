@@ -309,6 +309,13 @@ extension FileItem {
         let ext = url.pathExtension
         return ext.isEmpty ? "" : "." + ext.lowercased()
     }
+
+    /// What Size sorts by: a file's size, a measured folder's, or a drive's.
+    var sortSize: Int64 {
+        if let size { return size }
+        if let folderSize { return folderSize }
+        return volume?.total ?? 0
+    }
 }
 
 struct SortSpec: Equatable {
@@ -349,7 +356,7 @@ extension SortSpec {
         case .name: r = a.name.localizedStandardCompare(b.name)
         case .modified: r = order(a.modified ?? .distantPast, b.modified ?? .distantPast)
         case .kind: r = a.kind.localizedStandardCompare(b.kind)
-        case .size: r = order(a.size ?? a.folderSize ?? a.volume?.total ?? 0, b.size ?? b.folderSize ?? b.volume?.total ?? 0)
+        case .size: r = order(a.sortSize, b.sortSize)
         case .location:
             r = a.folderPath.localizedStandardCompare(b.folderPath)
         case .created: r = order(a.created ?? .distantPast, b.created ?? .distantPast)

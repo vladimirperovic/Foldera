@@ -45,8 +45,9 @@ extension ExplorerTab {
             let browser = columns.browser
             let column = max(browser.selectedColumn, 0)
             guard column <= browser.lastColumn,
-                  let parent = browser.parentForItems(inColumn: column) as? ColumnNode else { return true }
-            let children = parent.loadChildren(sort: columns.sort)
+                  let parent = browser.parentForItems(inColumn: column) as? ColumnNode,
+                  // A column still being read has nothing to select yet.
+                  let children = parent.children else { return true }
             if let row = typeSelection.match(text, at: event.timestamp,
                                              names: children.map { $0.item?.name ?? "" },
                                              selected: browser.selectedRow(inColumn: column)) {

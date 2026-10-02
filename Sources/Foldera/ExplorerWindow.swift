@@ -24,8 +24,11 @@ final class ExplorerTab: NSViewController, NSSplitViewDelegate {
     var searchQuery = ""
     var filters = SearchFilters()
     var showsFilterBar = false
-    /// Showing search results: a query was typed, or a search option is set.
-    var isSearching: Bool { !searchQuery.isEmpty || filters.isActive }
+    /// Every file in the folder and the folders inside it, in one list, as
+    /// Total Commander's branch view (Ctrl+B) shows them. Made by the search.
+    var flatView = false
+    /// Showing search results: a query was typed, a search option is set, or the flat view is on.
+    var isSearching: Bool { !searchQuery.isEmpty || filters.isActive || flatView }
     var searchRunning = false
     var searchTruncated = false
     /// Folders the search couldn't look into.
@@ -55,6 +58,12 @@ final class ExplorerTab: NSViewController, NSSplitViewDelegate {
     var staleViews: Set<ViewMode> = []
     var cloudRefresh: DispatchWorkItem?
     let textUndo = UndoManager()
+    /// The search waiting for the typing to pause.
+    private var searchDelay: DispatchWorkItem?
+    /// Rows whose Finder tags are to be read in the background, and whether that is on its way.
+    private var tagRows = IndexSet()
+    private var tagReadQueued = false
+    private static let tagQueue = DispatchQueue(label: "Foldera.tags", qos: .userInitiated)
 
     // Row 1: where you are.
     let backButton = ToolButton(symbol: "arrow.left", tip: "Back (⌥←)")
@@ -80,6 +89,13 @@ final class ExplorerTab: NSViewController, NSSplitViewDelegate {
     let moreButton = ToolButton(symbol: "ellipsis", tip: "See more")
     let paneButton = ToolButton(symbol: "sidebar.right", label: "Details", tip: "Preview and details pane (⇧⌘P)")
     let extractButton = ToolButton(symbol: "archivebox", label: "Extract all", tip: "Unpack this archive into a folder beside it")
+    // The switch between one pane with tabs and two panes side by side.
+    let onePaneButton = ToolButton(symbol: "rectangle", tip: "One pane, with tabs (⌥⌘1)", iconSize: 16)
+    let twoPanesButton = ToolButton(symbol: "rectangle.split.2x1", tip: "Two panes side by side, as in Total Commander (⌥⌘2)", iconSize: 16)
+    /// The second of two panes: no navigation pane and no details pane of its own.
+    let isSecondPane: Bool
+    /// With two panes, a line in the accent colour along the top of the one at work.
+    let activeMark = NSBox()
 
     // The middle and the bottom.
     let sidebar = Sidebar()
@@ -113,8 +129,9 @@ final class ExplorerTab: NSViewController, NSSplitViewDelegate {
     var usageItem: FileItem?
     var usageHover: UsageNode?
 
-    init(location: Location, select: [URL] = []) {
+    init(location: Location, select: [URL] = [], secondPane: Bool = false) {
         self.location = location
+        isSecondPane = secondPane
         viewMode = ViewMode(rawValue: UserDefaults.standard.string(forKey: "viewMode") ?? "") ?? .details
         super.init(nibName: nil, bundle: nil)
         view = NSView(frame: NSRect(x: 0, y: 0, width: 1040, height: 620))
@@ -143,6 +160,7 @@ final class ExplorerTab: NSViewController, NSSplitViewDelegate {
             (columnsToggle, #selector(setColumnsView(_:))), (paneButton, #selector(togglePreviewPane(_:))),
             (usageToggle, #selector(setUsageView(_:))),
             (extractButton, #selector(extract(_:))), (filterButton, #selector(toggleFilters(_:))),
+            (onePaneButton, #selector(setOnePane(_:))), (twoPanesButton, #selector(setTwoPanes(_:))),
         ]
         for (button, action) in buttons {
             button.target = self
@@ -184,11 +202,20 @@ final class ExplorerTab: NSViewController, NSSplitViewDelegate {
             command.setCustomSpacing(6, after: view)
             if let index = commandViews.firstIndex(of: view), index > 0 { command.setCustomSpacing(6, after: commandViews[index - 1]) }
         }
-        // At the far right, as Windows 11 has it.
+        // At the far right, as Windows 11 has it; before it, the one or two panes switch.
         command.addView(extractButton, in: .trailing)
+        command.addView(onePaneButton, in: .trailing)
+        command.addView(twoPanesButton, in: .trailing)
+        let switchEnd = divider()
+        command.addView(switchEnd, in: .trailing)
         command.addView(paneButton, in: .trailing)
         command.setCustomSpacing(8, after: extractButton)
+        command.setCustomSpacing(6, after: twoPanesButton)
+        command.setCustomSpacing(6, after: switchEnd)
         extractButton.isHidden = true
+        // The details pane follows the first pane; the second has none.
+        paneButton.isHidden = isSecondPane
+        switchEnd.isHidden = isSecondPane
         command.setClippingResistancePriority(.defaultLow, for: .horizontal)
 
         let sideBackground = NSVisualEffectView()
@@ -231,8 +258,10 @@ final class ExplorerTab: NSViewController, NSSplitViewDelegate {
         split.delegate = self
         split.addArrangedSubview(sideBackground)
         split.addArrangedSubview(contents)
-        if Prefs.previewPane { split.addArrangedSubview(previewPane) }
+        if Prefs.previewPane && !isSecondPane { split.addArrangedSubview(previewPane) }
         paneButton.isOn = Prefs.previewPane
+        // The pane beside the first has the room the navigation pane would take.
+        sideBackground.isHidden = isSecondPane
 
         statusLabel.font = .systemFont(ofSize: 12)
         statusLabel.textColor = .secondaryLabelColor
@@ -280,15 +309,43 @@ final class ExplorerTab: NSViewController, NSSplitViewDelegate {
             status.bottomAnchor.constraint(equalTo: root.bottomAnchor),
         ])
 
+        activeMark.boxType = .custom
+        activeMark.borderWidth = 0
+        activeMark.fillColor = .controlAccentColor
+        activeMark.isHidden = true
+        activeMark.translatesAutoresizingMaskIntoConstraints = false
+        root.addSubview(activeMark)
+        NSLayoutConstraint.activate([
+            activeMark.topAnchor.constraint(equalTo: root.topAnchor),
+            activeMark.leadingAnchor.constraint(equalTo: root.leadingAnchor),
+            activeMark.trailingAnchor.constraint(equalTo: root.trailingAnchor),
+            activeMark.heightAnchor.constraint(equalToConstant: 2),
+        ])
+    }
+
+    /// With two panes, the one at work is marked and the other's address
+    /// dimmed; nil, with one pane, shows neither.
+    func markActive(_ active: Bool?) {
+        activeMark.isHidden = active != true
+        addressBar.alphaValue = active == false ? 0.55 : 1
+    }
+
+    /// The one or two panes switch shows how the window is now.
+    func updatePaneSwitch() {
+        let two = host?.partner != nil
+        onePaneButton.isOn = !two
+        twoPanesButton.isOn = two
     }
 
     private var placed = false
 
     /// The first time the tab is on screen: panes get their widths.
     func didAttach() {
+        updatePaneSwitch()
         guard !placed else { return }
         placed = true
         view.layoutSubtreeIfNeeded()
+        guard !isSecondPane else { return split.resizeSubviews(withOldSize: split.bounds.size) }
         let sidebarWidth = UserDefaults.standard.double(forKey: "sidebarWidth")
         split.setPosition(sidebarWidth >= 150 ? sidebarWidth : 220, ofDividerAt: 0)
         if Prefs.previewPane { placePreviewPane() }
@@ -340,15 +397,16 @@ final class ExplorerTab: NSViewController, NSSplitViewDelegate {
         // Typing a name is handled for every layout alike (see handleTypeSelection).
         table.allowsTypeSelect = false
         table.columnAutoresizingStyle = .noColumnAutoresizing
-        let columns: [(NSUserInterfaceItemIdentifier, String, CGFloat, SortKey?, Bool)] = [
+        var columns: [(NSUserInterfaceItemIdentifier, String, CGFloat, SortKey?, Bool)] = [
             (.nameColumn, "Name", 320, .name, false),
             (.statusColumn, "Status", 56, nil, false),
             (.locationColumn, "Folder", 260, .location, false),
             (.modifiedColumn, "Date modified", 150, .modified, false),
             (.kindColumn, "Type", 170, .kind, false),
             (.sizeColumn, "Size", 100, .size, true),
-            (.freeColumn, "Free space", 110, nil, true),
+            (.freeColumn, "Free space", 190, nil, false),
         ]
+        for extra in Self.extraColumns { columns.append((extra.id, extra.title, extra.width, extra.key, false)) }
         for (id, title, width, key, rightAligned) in columns {
             let column = NSTableColumn(identifier: id)
             column.title = title
@@ -365,6 +423,12 @@ final class ExplorerTab: NSViewController, NSSplitViewDelegate {
         }
         table.autosaveName = "ExplorerColumns"
         table.autosaveTableColumns = true
+        // Right-clicking the headers chooses the columns, as in Windows.
+        let headerMenu = NSMenu()
+        for extra in Self.extraColumns {
+            headerMenu.addItem(item(extra.title, nil, #selector(toggleColumn(_:)), object: extra.id.rawValue))
+        }
+        table.headerView?.menu = headerMenu
         table.sortDescriptors = [NSSortDescriptor(key: sort.key.rawValue, ascending: sort.ascending)]
         table.dataSource = self
         table.delegate = self
@@ -453,6 +517,11 @@ final class ExplorerTab: NSViewController, NSSplitViewDelegate {
         keyMonitor = NSEvent.addLocalMonitorForEvents(matching: [.keyDown, .leftMouseDown, .rightMouseDown, .otherMouseDown]) { [weak self] event in
             if event.type != .keyDown {
                 self?.typeSelection.reset()
+                // With two panes, a click in one makes it the one at work.
+                if let self, let window = self.view.window, event.window === window,
+                   self.view.bounds.contains(self.view.convert(event.locationInWindow, from: nil)) {
+                    self.host?.activate(self)
+                }
                 return event
             }
             guard let self, self.handleKey(event) else { return event }
@@ -503,8 +572,10 @@ final class ExplorerTab: NSViewController, NSSplitViewDelegate {
         usageNote = nil
         usageItem = nil
         usageHover = nil
+        searchDelay?.cancel()
         search.cancel()
         searchQuery = ""
+        flatView = false
         filters = SearchFilters()
         filterBar.filters = filters
         applyFilterBar()
@@ -522,6 +593,14 @@ final class ExplorerTab: NSViewController, NSSplitViewDelegate {
         searchField.placeholderString = "Search \(target.url == nil ? "Home" : target.title)"
         sidebar.sync(to: target)
         watcher.watch(target.url)
+        // A folder opens in the layout it was last shown in, as in Windows;
+        // one never set keeps the layout on screen. Disk usage stays on.
+        if viewMode != .usage, let url = target.url,
+           let remembered = Prefs.folderView(for: url).flatMap(ViewMode.init(rawValue:)),
+           remembered != viewMode, remembered != .usage {
+            viewMode = remembered
+            layoutLists()
+        }
         load()
     }
 
@@ -635,6 +714,10 @@ final class ExplorerTab: NSViewController, NSSplitViewDelegate {
             RecentFolders.remember(folder)
             pendingRecentVisit = false
         }
+        // Tags on screen stay there while they are read again (see readTags).
+        var shown: [String: [String]] = [:]
+        for item in items { if let tags = item.knownTags ?? item.previousTags { shown[item.key] = tags } }
+        if !shown.isEmpty { for item in loaded where item.knownTags == nil { item.previousTags = shown[item.key] } }
         items = order == sort ? loaded : loaded.sorted(by: sort)
         // A scan that finished while the folder was being read: its sizes go
         // in before the list is drawn, not in a second pass.
@@ -677,6 +760,7 @@ final class ExplorerTab: NSViewController, NSSplitViewDelegate {
         var changed = IndexSet()
         for (index, key, item) in fresh where index < items.count && items[index].key == key {
             item.folderSize = items[index].folderSize
+            item.previousTags = items[index].knownTags ?? items[index].previousTags
             items[index] = item
             changed.insert(index)
         }
@@ -745,6 +829,66 @@ final class ExplorerTab: NSViewController, NSSplitViewDelegate {
         table.tableColumn(withIdentifier: .modifiedColumn)?.isHidden = drives
         table.tableColumn(withIdentifier: .freeColumn)?.isHidden = !drives
         table.tableColumn(withIdentifier: .sizeColumn)?.title = drives ? "Total size" : "Size"
+        let shown = Prefs.extraColumns
+        for extra in Self.extraColumns {
+            table.tableColumn(withIdentifier: extra.id)?.isHidden = drives || !shown.contains(extra.id.rawValue)
+        }
+    }
+
+    /// Columns Details can show besides the usual ones, as Windows' can: off
+    /// until switched on from the headers' right-click menu, or sorted by.
+    static let extraColumns: [(id: NSUserInterfaceItemIdentifier, title: String, width: CGFloat, key: SortKey)] = [
+        (.createdColumn, "Date created", 150, .created),
+        (.accessedColumn, "Date accessed", 150, .accessed),
+        (.extensionColumn, "File extension", 100, .fileExtension),
+        (.tagsColumn, "Tags", 150, .tags),
+    ]
+
+    @objc func toggleColumn(_ sender: NSMenuItem) {
+        guard let id = sender.representedObject as? String else { return }
+        var shown = Prefs.extraColumns
+        if shown.remove(id) == nil { shown.insert(id) }
+        Prefs.extraColumns = shown
+        configureColumns()
+    }
+
+    /// Sorting by a column that isn't shown shows it, as Windows does.
+    func showColumn(for key: SortKey) {
+        guard let extra = Self.extraColumns.first(where: { $0.key == key }), !Prefs.extraColumns.contains(extra.id.rawValue) else { return }
+        Prefs.extraColumns.insert(extra.id.rawValue)
+        configureColumns()
+    }
+
+    /// Finder tags are read off the main thread (a network drive can take its
+    /// time), a screenful at a time, and the rows showing them drawn again.
+    func readTags(row: Int) {
+        tagRows.insert(row)
+        guard !tagReadQueued else { return }
+        tagReadQueued = true
+        // The rest of the rows asked for in this pass come along.
+        DispatchQueue.main.async { [weak self] in self?.readQueuedTags() }
+    }
+
+    private func readQueuedTags() {
+        tagReadQueued = false
+        let wanted = tagRows.filter { $0 < items.count }.map { ($0, items[$0]) }
+        tagRows = IndexSet()
+        guard !wanted.isEmpty else { return }
+        Self.tagQueue.async { [weak self] in
+            for (_, item) in wanted { _ = item.tags }
+            DispatchQueue.main.async {
+                guard let self, self.shownMode == .details, !self.staleViews.contains(.details) else { return }
+                // Rows still showing the same file, and not one being renamed.
+                let rows = IndexSet(wanted.compactMap { row, item -> Int? in
+                    guard row < self.items.count, row < self.table.numberOfRows, self.items[row] === item,
+                          item.key != self.renamingKey else { return nil }
+                    return row
+                })
+                let columns = IndexSet([NSUserInterfaceItemIdentifier.nameColumn, .tagsColumn].map(self.table.column(withIdentifier:)).filter { $0 >= 0 })
+                guard !rows.isEmpty, !columns.isEmpty else { return }
+                self.table.reloadData(forRowIndexes: rows, columnIndexes: columns)
+            }
+        }
     }
 
     func updateEmptyState() {
@@ -857,7 +1001,7 @@ final class ExplorerTab: NSViewController, NSSplitViewDelegate {
         if shownMode == .usage { rememberUsageSelection() }
         updateStatus()
         updateCommandStates()
-        if Prefs.previewPane { previewPane.show(selectedItems, in: location, count: items.count) }
+        if Prefs.previewPane && !isSecondPane { previewPane.show(selectedItems, in: location, count: items.count) }
         if QLPreviewPanel.sharedPreviewPanelExists(), let panel = QLPreviewPanel.shared(), panel.isVisible,
            (panel.dataSource as AnyObject?) === self {
             panel.reloadData()
@@ -891,7 +1035,9 @@ final class ExplorerTab: NSViewController, NSSplitViewDelegate {
             return
         }
         if isSearching {
-            var found = "\(Format.items(items.count)) found"
+            var found = flatView && searchQuery.isEmpty && !filters.isActive
+                ? "\(Format.count(Int64(items.count))) \(items.count == 1 ? "file" : "files") here and in all subfolders"
+                : "\(Format.items(items.count)) found"
             if searchRunning { found = "Searching… " + found }
             if searchTruncated { found += " (stopped at \(Format.count(Int64(FolderSearch.limit))))" }
             if searchUnreadable > 0 {
@@ -921,7 +1067,7 @@ final class ExplorerTab: NSViewController, NSSplitViewDelegate {
         copyButton.isEnabled = files
         shareButton.isEnabled = files
         deleteButton.isEnabled = files && !isInArchive
-        renameButton.isEnabled = selected.count == 1 && selected[0].volume == nil && !isInArchive
+        renameButton.isEnabled = files && !isInArchive
         pasteButton.isEnabled = currentFolder != nil && FileClipboard.shared.hasFiles
         newButton.isEnabled = currentFolder != nil
         backButton.isEnabled = !backStack.isEmpty
@@ -931,15 +1077,26 @@ final class ExplorerTab: NSViewController, NSSplitViewDelegate {
 
     // MARK: Search
 
+    /// A word being typed starts one search once the typing pauses, not one
+    /// walk of the whole tree per letter. Enter searches at once.
     @objc func searchChanged(_ sender: NSSearchField) {
         let query = sender.stringValue.trimmingCharacters(in: .whitespaces)
+        searchDelay?.cancel()
+        searchDelay = nil
         guard query != searchQuery else { return }
-        if query.isEmpty {
-            endSearch()
-        } else {
-            searchQuery = query
-            runSearch()
-        }
+        if query.isEmpty { return endSearch() }
+        let enter = NSApp.currentEvent.map { $0.type == .keyDown && ($0.keyCode == 36 || $0.keyCode == 76) } ?? false
+        if enter { return startSearch(query) }
+        let work = DispatchWorkItem { [weak self] in self?.startSearch(query) }
+        searchDelay = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.25, execute: work)
+    }
+
+    private func startSearch(_ query: String) {
+        searchDelay?.cancel()
+        searchDelay = nil
+        searchQuery = query
+        runSearch()
     }
 
     func runSearch() {
@@ -955,7 +1112,7 @@ final class ExplorerTab: NSViewController, NSSplitViewDelegate {
         pendingSelection = []
         scrollToTop = true
         showItems()
-        search.start(in: root, for: searchQuery, filters: filters, showHidden: Prefs.showHidden, found: { [weak self] batch in
+        search.start(in: root, for: searchQuery, filters: filters, showHidden: Prefs.showHidden, filesOnly: flatView, found: { [weak self] batch in
             self?.appendResults(batch)
         }, finished: { [weak self] truncated, unreadable in
             guard let self else { return }
@@ -967,33 +1124,39 @@ final class ExplorerTab: NSViewController, NSSplitViewDelegate {
         })
     }
 
-    /// Results are added in the order they are found; a column click sorts them.
+    /// Results are added in the order they are found; a column click sorts
+    /// them, and then later ones are merged in where they belong. Either way
+    /// only the new rows are inserted, not the whole list loaded again.
     private func appendResults(_ batch: [FileItem]) {
+        let before = items.count
+        let inserted: [Int]
+        let keys = Set(selectedItems.map(\.key))
         if searchSorted {
-            // Sorted by a column click: new results go where they belong.
-            // The list is already in order, so this sort is little more than a merge.
-            let keys = Set(selectedItems.map(\.key))
-            items = (items + batch).sorted(by: sort)
-            reloadVisibleList()
-            selectQuietly(keys)
-            updateEmptyState()
-            updateStatus()
-            return
+            let result = items.merged(with: batch, by: sort)
+            items = result.merged
+            inserted = result.inserted
+        } else {
+            items += batch
+            inserted = Array(before..<items.count)
         }
-        let start = items.count
-        items += batch
         // Only the visible list gets a proper insert; the hidden one may not
         // have asked for its rows yet, so it is simply told to start over.
         switch shownMode {
         case .details, .columns, .usage:
-            table.insertRows(at: IndexSet(start..<items.count), withAnimation: [])
+            table.insertRows(at: IndexSet(inserted), withAnimation: [])
             staleViews.insert(.icons)
         case .icons:
-            let selection = grid.selectionIndexPaths
-            grid.reloadData()
-            grid.selectionIndexPaths = selection
+            // A grid that hasn't counted its items since it was loaded would
+            // count the new ones twice; that one is loaded again instead.
+            if grid.numberOfSections == 1 && grid.numberOfItems(inSection: 0) == before {
+                grid.insertItems(at: Set(inserted.map { IndexPath(item: $0, section: 0) }))
+            } else {
+                grid.reloadData()
+            }
             staleViews.insert(.details)
         }
+        // Rows inserted above the selection move it; it stays on the same files.
+        if !keys.isEmpty && (searchSorted || shownMode == .icons) { selectQuietly(keys) }
         updateEmptyState()
         updateStatus()
     }
@@ -1001,10 +1164,12 @@ final class ExplorerTab: NSViewController, NSSplitViewDelegate {
     /// The search box was emptied. With a search option still set, the
     /// search goes on without words; otherwise the folder comes back.
     func endSearch() {
+        searchDelay?.cancel()
+        searchDelay = nil
         search.cancel()
         searchQuery = ""
         if !searchField.stringValue.isEmpty { searchField.stringValue = "" }
-        if filters.isActive {
+        if filters.isActive || flatView {
             runSearch()
             return
         }
@@ -1035,6 +1200,9 @@ final class ExplorerTab: NSViewController, NSSplitViewDelegate {
         filters = new
         filterBar.filters = new
         applyFilterBar()
+        // Words typed a moment ago, still waiting, go along now.
+        let typed = searchField.stringValue.trimmingCharacters(in: .whitespaces)
+        if searchDelay != nil && !typed.isEmpty { return startSearch(typed) }
         if isSearching { runSearch() } else { endSearch() }
     }
 
@@ -1045,7 +1213,10 @@ final class ExplorerTab: NSViewController, NSSplitViewDelegate {
         let keys = Set(selectedItems.map(\.key))
         viewMode = mode
         // Disk usage is a look taken now and then, not how every folder should open.
-        if mode != .usage { UserDefaults.standard.set(mode.rawValue, forKey: "viewMode") }
+        if mode != .usage {
+            UserDefaults.standard.set(mode.rawValue, forKey: "viewMode")
+            if let url = location.url, !isSearching { Prefs.rememberFolderView(mode.rawValue, for: url) }
+        }
         applyViewMode()
         select(keys: keys)
         if let first = firstSelectedIndex { scroll(to: first) }
@@ -1274,8 +1445,8 @@ final class ExplorerTab: NSViewController, NSSplitViewDelegate {
     /// The pane is taken out of the split view when put away, so the file
     /// list gets the whole width back.
     func applyPreviewPane() {
-        let shown = Prefs.previewPane
-        paneButton.isOn = shown
+        paneButton.isOn = Prefs.previewPane
+        let shown = Prefs.previewPane && !isSecondPane
         guard (previewPane.superview === split) != shown else { return }
         if shown {
             split.addArrangedSubview(previewPane)
@@ -1310,21 +1481,23 @@ final class ExplorerTab: NSViewController, NSSplitViewDelegate {
             ? UserDefaults.standard.double(forKey: "sidebarWidth") : 220
         let paneWanted = UserDefaults.standard.double(forKey: "previewWidth") >= paneMin
             ? UserDefaults.standard.double(forKey: "previewWidth") : 300
-        var side = views[0].frame.width
+        // The second of two panes has no navigation pane, nor a divider for it.
+        let sideShown = !views[0].isHidden
+        var side = sideShown ? views[0].frame.width : 0
         var pane = hasPane ? views[2].frame.width : 0
-        let room = splitView.bounds.width - thickness * CGFloat(views.count - 1)
+        let room = splitView.bounds.width - (sideShown ? thickness : 0) - (hasPane ? thickness : 0)
         var list = room - side - pane
         if list < listMin, hasPane {
             let give = min(listMin - list, max(pane - paneMin, 0))
             pane -= give
             list += give
         }
-        if list < listMin {
+        if list < listMin && sideShown {
             let give = min(listMin - list, max(side - sideMin, 0))
             side -= give
             list += give
         }
-        if list > listMin && side < sideWanted {
+        if list > listMin && sideShown && side < sideWanted {
             let take = min(list - listMin, sideWanted - side)
             side += take
             list -= take
@@ -1335,9 +1508,19 @@ final class ExplorerTab: NSViewController, NSSplitViewDelegate {
             list -= take
         }
         list = max(room - side - pane, 0)
+        let start = sideShown ? side + thickness : 0
         views[0].frame = NSRect(x: 0, y: 0, width: side, height: height)
-        views[1].frame = NSRect(x: side + thickness, y: 0, width: list, height: height)
-        if hasPane { views[2].frame = NSRect(x: side + thickness + list + thickness, y: 0, width: pane, height: height) }
+        views[1].frame = NSRect(x: start, y: 0, width: list, height: height)
+        if hasPane { views[2].frame = NSRect(x: start + list + thickness, y: 0, width: pane, height: height) }
+    }
+
+    func splitView(_ splitView: NSSplitView, shouldHideDividerAt dividerIndex: Int) -> Bool {
+        dividerIndex == 0 && splitView.arrangedSubviews.first?.isHidden == true
+    }
+
+    func splitView(_ splitView: NSSplitView, effectiveRect proposedEffectiveRect: NSRect, forDrawnRect drawnRect: NSRect,
+                   ofDividerAt dividerIndex: Int) -> NSRect {
+        dividerIndex == 0 && splitView.arrangedSubviews.first?.isHidden == true ? .zero : proposedEffectiveRect
     }
 
     /// Widths are remembered only when you drag a divider, not when a narrow window squeezes the panes.
@@ -1363,6 +1546,7 @@ final class ExplorerTab: NSViewController, NSSplitViewDelegate {
     /// The tab is closing (or its window is): stop watching and listening.
     func tearDown() {
         navigationGeneration += 1
+        searchDelay?.cancel()
         search.cancel()
         watcher.stop()
         cloudRefresh?.cancel()

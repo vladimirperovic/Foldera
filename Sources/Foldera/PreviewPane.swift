@@ -187,7 +187,8 @@ final class PreviewPane: NSView {
                 rows.append(("Location", Format.path(item.url.deletingLastPathComponent())))
             }
             let url = item.url
-            slow = { Self.contentDetails(url) }
+            let unread = item.knownTags == nil ? item : nil
+            slow = { Self.tagRows(unread) + Self.contentDetails(url) }
         } else if selection.count == 1, let item = selection.first {
             showPicture(item.icon)
             title.stringValue = item.name
@@ -199,7 +200,8 @@ final class PreviewPane: NSView {
             rows += dates(item) + extras(item)
             let url = folderTarget(item)
             let hidden = Prefs.showHidden
-            slow = { [("Contains", Self.countDescription(url, hidden: hidden))] }
+            let unread = item.knownTags == nil ? item : nil
+            slow = { Self.tagRows(unread) + [("Contains", Self.countDescription(url, hidden: hidden))] }
         } else if !selection.isEmpty {
             showPicture(NSWorkspace.shared.icon(forFiles: selection.map(\.url.path)) ?? selection[0].icon)
             title.stringValue = "\(Format.items(selection.count)) selected"
@@ -354,11 +356,17 @@ final class PreviewPane: NSView {
         return rows
     }
 
+    /// Tags already read; the others are read with the slow details, off the main thread.
     private func extras(_ item: FileItem) -> [(String, String)] {
         var rows: [(String, String)] = []
-        if !item.tags.isEmpty { rows.append(("Tags", item.tags.joined(separator: ", "))) }
+        if let tags = item.knownTags, !tags.isEmpty { rows.append(("Tags", tags.joined(separator: ", "))) }
         if let cloud = item.cloud { rows.append(("iCloud", cloud.description)) }
         return rows
+    }
+
+    static func tagRows(_ item: FileItem?) -> [(String, String)] {
+        guard let tags = item?.tags, !tags.isEmpty else { return [] }
+        return [("Tags", tags.joined(separator: ", "))]
     }
 
     private func showPreview(_ url: URL) {

@@ -130,6 +130,16 @@ struct QuickOpenItem {
         "togglePreviewPane:": "pregled detalji preview", "showProperties:": "svojstva osobine detalji",
         "setDetailsView:": "lista detalji", "setIconsView:": "ikone slike", "setColumnsView:": "kolone",
         "refresh:": "osvezi osvjezi", "focusSearch:": "pretraga pronadji trazi",
+        "sortBy:": "sortiraj poredaj redoslijed", "sortAscending:": "rastuce sortiraj", "sortDescending:": "opadajuce sortiraj",
+        "selectByPattern:": "oznaci selektuj sablon maska", "deselectByPattern:": "odznaci sablon maska",
+        "toggleFlatView:": "ravno svi fajlovi podfolderi stablo branch",
+        "setOnePane:": "jedan panel tabovi", "setTwoPanes:": "dva panela total commander",
+        "copyToOtherPane:": "kopiraj drugi panel", "moveToOtherPane:": "premjesti premesti drugi panel",
+        "swapPanes:": "zamijeni zameni panele", "sameFolderInOtherPane:": "isti folder drugi panel",
+        "comparePanes:": "uporedi foldere panele novije", "syncPanes:": "sinhronizuj panele",
+        "compareFiles:": "uporedi fajlove sadrzaj", "copyChecksum:": "hash sha256 checksum kontrolni zbir",
+        "createChecksumFile:": "napravi checksum sha256 fajl", "verifyChecksums:": "provjeri proveri checksum sha256",
+        "renameMany:": "preimenuj vise grupno masovno",
     ]
 }
 

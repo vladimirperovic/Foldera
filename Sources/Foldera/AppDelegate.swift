@@ -56,7 +56,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
 
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
         // Failed pane saves move to retained editor windows before the quit check.
-        windows.flatMap(\.tabs).forEach { $0.previewPane.clear() }
+        windows.flatMap(\.allPanes).forEach { $0.previewPane.clear() }
         guard MarkdownEditor.canCloseAll() else { return .terminateCancel }
         // Copying, syncing or packing still going stops first and cleans up
         // after itself, so nothing is left half done; an undo under way finishes.
@@ -165,10 +165,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         }
         window.makeKeyAndOrderFront(nil)
         host.windowShown()
+        // Two panes, if that is how the last window was left (but not in a screenshot).
+        if UserDefaults.standard.bool(forKey: "twoPanes") && !CommandLine.arguments.contains("--snapshot") {
+            host.showTwoPanes(true)
+            host.selected?.focusList()
+        }
     }
 
-    /// The tab on screen in the front window.
-    var frontTab: ExplorerTab? { (NSApp.keyWindow?.windowController as? ExplorerWindow)?.selected }
+    /// The pane at work in the front window.
+    var frontTab: ExplorerTab? { (NSApp.keyWindow?.windowController as? ExplorerWindow)?.active }
 
     /// ⌘N: a new window where the current one is, as Ctrl+N does in Windows.
     @objc func newWindow(_ sender: Any?) {

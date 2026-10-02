@@ -145,6 +145,10 @@ extension NSUserInterfaceItemIdentifier {
     static let kindColumn = NSUserInterfaceItemIdentifier("kind")
     static let sizeColumn = NSUserInterfaceItemIdentifier("size")
     static let freeColumn = NSUserInterfaceItemIdentifier("free")
+    static let createdColumn = NSUserInterfaceItemIdentifier("created")
+    static let accessedColumn = NSUserInterfaceItemIdentifier("accessed")
+    static let extensionColumn = NSUserInterfaceItemIdentifier("extension")
+    static let tagsColumn = NSUserInterfaceItemIdentifier("tags")
     static let nameCell = NSUserInterfaceItemIdentifier("NameCell")
     static let textCell = NSUserInterfaceItemIdentifier("TextCell")
     static let iconItem = NSUserInterfaceItemIdentifier("IconItem")
@@ -192,7 +196,8 @@ final class NameCell: NSTableCellView {
         imageView?.image = item.icon
         imageView?.alphaValue = dimmed || item.isHidden ? 0.45 : 1
         textField?.stringValue = item.name
-        dots.tags = item.tags
+        // Tags not read yet are read in the background (see ExplorerTab.readTags), and the row drawn again.
+        dots.tags = item.shownTags
         textField?.isEditable = false
         textField?.isBordered = false
         textField?.drawsBackground = false
@@ -236,6 +241,58 @@ final class StatusCell: NSTableCellView {
         imageView?.image = cloud.flatMap { NSImage(systemSymbolName: $0.symbol, accessibilityDescription: $0.description) }
         imageView?.contentTintColor = cloud == .local ? .systemGreen : .secondaryLabelColor
         toolTip = cloud?.description
+    }
+}
+
+/// The Free space column of This Mac, as Windows' This PC draws it: a bar
+/// of how full the drive is (red when nearly full), and what is free.
+final class DriveUsageCell: NSTableCellView {
+    static let id = NSUserInterfaceItemIdentifier("DriveUsageCell")
+    private let bar = UsageBar()
+
+    override init(frame: NSRect) {
+        super.init(frame: frame)
+        identifier = Self.id
+        let text = NSTextField(labelWithString: "")
+        text.textColor = .secondaryLabelColor
+        text.lineBreakMode = .byTruncatingTail
+        for v in [bar, text] as [NSView] {
+            v.translatesAutoresizingMaskIntoConstraints = false
+            addSubview(v)
+        }
+        NSLayoutConstraint.activate([
+            bar.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 4),
+            bar.centerYAnchor.constraint(equalTo: centerYAnchor),
+            bar.widthAnchor.constraint(equalToConstant: 64),
+            bar.heightAnchor.constraint(equalToConstant: 6),
+            text.leadingAnchor.constraint(equalTo: bar.trailingAnchor, constant: 8),
+            text.trailingAnchor.constraint(lessThanOrEqualTo: trailingAnchor, constant: -6),
+            text.centerYAnchor.constraint(equalTo: centerYAnchor),
+        ])
+        textField = text
+    }
+
+    required init?(coder: NSCoder) { fatalError("not used") }
+
+    func configure(_ volume: FileItem.Volume) {
+        bar.fraction = volume.total > 0 ? Double(volume.total - volume.free) / Double(volume.total) : 0
+        textField?.stringValue = "\(Format.bytes(volume.free)) free"
+        toolTip = "\(Format.bytes(volume.free)) free of \(Format.bytes(volume.total))"
+    }
+}
+
+final class UsageBar: NSView {
+    var fraction: Double = 0 { didSet { needsDisplay = true } }
+
+    override func draw(_ dirtyRect: NSRect) {
+        let radius = bounds.height / 2
+        NSColor.quaternaryLabelColor.setFill()
+        NSBezierPath(roundedRect: bounds, xRadius: radius, yRadius: radius).fill()
+        let filled = bounds.width * CGFloat(min(max(fraction, 0), 1))
+        guard filled > 0 else { return }
+        (fraction > 0.9 ? NSColor.systemRed : NSColor.controlAccentColor).setFill()
+        NSBezierPath(roundedRect: NSRect(x: 0, y: 0, width: max(filled, bounds.height), height: bounds.height),
+                     xRadius: radius, yRadius: radius).fill()
     }
 }
 
@@ -334,6 +391,8 @@ final class IconItem: NSCollectionViewItem {
     private let picture = NSImageView()
     private let label = NSTextField(wrappingLabelWithString: "")
     private var key: String?
+    /// The thumbnail being made for this tile, given up if the tile moves on first.
+    private var thumbnail: Thumbnails.Ticket?
     private lazy var pictureWidth = picture.widthAnchor.constraint(equalToConstant: 64)
     private lazy var pictureHeight = picture.heightAnchor.constraint(equalToConstant: 64)
 
@@ -377,45 +436,101 @@ final class IconItem: NSCollectionViewItem {
         didSet { background.selected = isSelected }
     }
 
+    /// The tile went out of sight (or is shown for another file): its thumbnail is no longer wanted.
+    func stopThumbnail() {
+        if let thumbnail { Thumbnails.shared.cancel(thumbnail) }
+        thumbnail = nil
+    }
+
     func configure(_ item: FileItem, dimmed: Bool) {
+        let scale = view.window?.backingScaleFactor ?? 2
+        let wanted = item.isFolder ? nil : Thumbnails.cacheKey(for: item.url, side: side, scale: scale, version: item.modified)
+        // Drawn again for the same file (a cut, a refresh): the picture on its way stays on its way.
+        if thumbnail?.key != wanted { stopThumbnail() }
         key = item.key
         picture.image = item.icon
         picture.alphaValue = dimmed || item.isHidden ? 0.45 : 1
         label.stringValue = item.name
         background.selected = isSelected
-        guard !item.isFolder else { return }
-        let scale = view.window?.backingScaleFactor ?? 2
-        Thumbnails.shared.image(for: item.url, side: side, scale: scale, version: item.modified) { [weak self] image in
-            guard self?.key == item.key else { return }
-            self?.picture.image = image
+        guard !item.isFolder, thumbnail == nil else { return }
+        thumbnail = Thumbnails.shared.image(for: item.url, side: side, scale: scale, version: item.modified) { [weak self] image in
+            guard let self, self.key == item.key else { return }
+            self.thumbnail = nil
+            self.picture.image = image
         }
     }
 }
 
 /// Pictures of photos, PDFs and videos for the icons view, made by Quick Look.
+/// On the main thread.
 final class Thumbnails {
     static let shared = Thumbnails()
     private let cache = NSCache<NSString, NSImage>()
+
+    /// One request for a picture being made, with the tiles waiting for it.
+    private struct Pending {
+        let request: QLThumbnailGenerator.Request
+        var waiting: [UUID: (NSImage) -> Void]
+    }
+    /// A picture asked for again while it is being made isn't made twice.
+    private var pending: [NSString: Pending] = [:]
+
+    /// Hands back a picture still being made, to stop waiting for it.
+    struct Ticket {
+        fileprivate let key: NSString
+        fileprivate let id: UUID
+    }
 
     /// Bounded by memory, not count: 2,000 thumbnails at 128×128 would be 128 MB.
     init() { cache.totalCostLimit = 48 * 1024 * 1024 }
 
     /// `version` is the file's modification date, so an edited picture gets a new thumbnail.
-    func image(for url: URL, side: CGFloat, scale: CGFloat, version: Date?, done: @escaping (NSImage) -> Void) {
-        let cacheKey = "\(url.path)|\(side)@\(scale)|\(version?.timeIntervalSince1970 ?? 0)" as NSString
+    static func cacheKey(for url: URL, side: CGFloat, scale: CGFloat, version: Date?) -> NSString {
+        "\(url.path)|\(side)@\(scale)|\(version?.timeIntervalSince1970 ?? 0)" as NSString
+    }
+
+    /// Returns nil when the picture was ready (and `done` called).
+    @discardableResult
+    func image(for url: URL, side: CGFloat, scale: CGFloat, version: Date?, done: @escaping (NSImage) -> Void) -> Ticket? {
+        let cacheKey = Self.cacheKey(for: url, side: side, scale: scale, version: version)
         if let image = cache.object(forKey: cacheKey) {
             done(image)
-            return
+            return nil
+        }
+        let ticket = Ticket(key: cacheKey, id: UUID())
+        if pending[cacheKey] != nil {
+            pending[cacheKey]?.waiting[ticket.id] = done
+            return ticket
         }
         let request = QLThumbnailGenerator.Request(
             fileAt: url, size: CGSize(width: side, height: side), scale: scale, representationTypes: .thumbnail)
+        pending[cacheKey] = Pending(request: request, waiting: [ticket.id: done])
         QLThumbnailGenerator.shared.generateBestRepresentation(for: request) { [weak self] representation, _ in
-            guard let image = representation?.nsImage else { return }
+            let image = representation?.nsImage
             let cost = Int(representation?.cgImage.width ?? 0) * Int(representation?.cgImage.height ?? 0) * 4
             DispatchQueue.main.async {
-                self?.cache.setObject(image, forKey: cacheKey, cost: cost)
-                done(image)
+                // A request given up and asked for again since is a new one; this answer isn't for it.
+                guard let self, let entry = self.pending[cacheKey], entry.request === request else { return }
+                self.pending[cacheKey] = nil
+                guard let image else { return }
+                self.cache.setObject(image, forKey: cacheKey, cost: cost)
+                entry.waiting.values.forEach { $0(image) }
             }
+        }
+        return ticket
+    }
+
+    /// The tile scrolled away before its picture came: once nobody waits
+    /// for it, Quick Look stops making it, so a fast scroll doesn't queue
+    /// up hundreds of pictures nobody will see.
+    func cancel(_ ticket: Ticket) {
+        guard var entry = pending[ticket.key] else { return }
+        entry.waiting[ticket.id] = nil
+        if entry.waiting.isEmpty {
+            pending[ticket.key] = nil
+            QLThumbnailGenerator.shared.cancel(entry.request)
+        } else {
+            pending[ticket.key] = entry
         }
     }
 }

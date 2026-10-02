@@ -106,11 +106,40 @@ final class FileItem {
     let size: Int64?
     let modified: Date?
     let created: Date?
+    let accessed: Date?
     let kind: String
     let volume: Volume?
-    /// Finder tags, read when first shown: a second trip to the disk per
-    /// file that a folder of thousands shouldn't pay for up front.
-    lazy var tags: [String] = Self.tagNames(of: url)
+    /// Finder tags, read when first asked for: a second trip to the disk per
+    /// file that a folder of thousands shouldn't pay for up front. Safe from
+    /// any thread, so the list can have them read in the background.
+    var tags: [String] {
+        get {
+            if let known = knownTags { return known }
+            let read = Self.tagNames(of: url)
+            Self.tagLock.lock()
+            readTags = read
+            Self.tagLock.unlock()
+            return read
+        }
+        set {
+            Self.tagLock.lock()
+            readTags = newValue
+            Self.tagLock.unlock()
+        }
+    }
+    /// The tags if they were read already, without going to the disk.
+    var knownTags: [String]? {
+        Self.tagLock.lock()
+        defer { Self.tagLock.unlock() }
+        return readTags
+    }
+    private var readTags: [String]?
+    private static let tagLock = NSLock()
+    /// What the list showed for this file before it was read again, shown
+    /// until the tags are, so a refresh doesn't make them blink. Main thread.
+    var previousTags: [String]?
+    /// The tags to draw now, without going to the disk.
+    var shownTags: [String] { knownTags ?? previousTags ?? [] }
     let cloud: Cloud?
     /// A folder's size on disk, once measured (View › Folder Sizes, Disk usage).
     var folderSize: Int64?
@@ -121,7 +150,7 @@ final class FileItem {
 
     static let keys: [URLResourceKey] = [
         .isDirectoryKey, .isPackageKey, .isHiddenKey, .isAliasFileKey, .isSymbolicLinkKey,
-        .fileSizeKey, .contentModificationDateKey, .creationDateKey, .localizedTypeDescriptionKey,
+        .fileSizeKey, .contentModificationDateKey, .creationDateKey, .contentAccessDateKey, .localizedTypeDescriptionKey,
         // Tags are not in this list. Asked for alongside other keys, or
         // prefetched by a directory listing, they come back empty on macOS 27
         // (and .isUbiquitousItemKey empties them too), so they are read on
@@ -154,6 +183,7 @@ final class FileItem {
         size = directory ? nil : values?.fileSize.map(Int64.init)
         modified = values?.contentModificationDate
         created = values?.creationDate
+        accessed = values?.contentAccessDate
         kind = values?.localizedTypeDescription ?? (directory ? "Folder" : "Document")
         volume = nil
         if let status = values?.ubiquitousItemDownloadingStatus {
@@ -189,6 +219,7 @@ final class FileItem {
         size = nil
         modified = nil
         created = nil
+        accessed = nil
         cloud = nil
         let ejectable = (values?.volumeIsEjectable ?? false) || (values?.volumeIsRemovable ?? false)
         if url.key == "/" {
@@ -203,7 +234,7 @@ final class FileItem {
         let free = values?.volumeAvailableCapacityForImportantUsage ?? Int64(values?.volumeAvailableCapacity ?? 0)
         volume = Volume(total: Int64(values?.volumeTotalCapacity ?? 0), free: free, ejectable: ejectable)
         // Drives carry no tags; and a network drive that stopped answering mustn't be asked while drawing.
-        tags = []
+        readTags = []
     }
 
     /// Read alone and fresh; see the note on `keys`.
@@ -266,6 +297,18 @@ enum Folders {
 
 enum SortKey: String {
     case name, modified, kind, size, location
+    // The further choices of Windows' Sort menu.
+    case created, accessed, fileExtension = "extension", tags
+}
+
+extension FileItem {
+    /// The extension as Windows' File extension column writes it, ".pdf";
+    /// folders and drives have none.
+    var fileExtension: String {
+        guard !isFolder else { return "" }
+        let ext = url.pathExtension
+        return ext.isEmpty ? "" : "." + ext.lowercased()
+    }
 }
 
 struct SortSpec: Equatable {
@@ -285,26 +328,66 @@ struct SortSpec: Equatable {
     }
 }
 
-extension Array where Element == FileItem {
-    /// Folders stay together, as in Windows: on top going up, at the bottom going down.
-    func sorted(by spec: SortSpec) -> [FileItem] {
+extension SortSpec {
+    /// Whether `a` comes before `b`. Folders stay together, as in Windows:
+    /// on top going up, at the bottom going down.
+    func orders(_ a: FileItem, before b: FileItem) -> Bool {
         func order<T: Comparable>(_ a: T, _ b: T) -> ComparisonResult {
             a < b ? .orderedAscending : (a > b ? .orderedDescending : .orderedSame)
         }
-        return sorted { a, b in
-            if a.isFolder != b.isFolder { return spec.ascending ? a.isFolder : b.isFolder }
-            var r: ComparisonResult
-            switch spec.key {
-            case .name: r = a.name.localizedStandardCompare(b.name)
-            case .modified: r = order(a.modified ?? .distantPast, b.modified ?? .distantPast)
-            case .kind: r = a.kind.localizedStandardCompare(b.kind)
-            case .size: r = order(a.size ?? a.folderSize ?? a.volume?.total ?? 0, b.size ?? b.folderSize ?? b.volume?.total ?? 0)
-            case .location:
-                r = a.folderPath.localizedStandardCompare(b.folderPath)
+        /// Tag by tag; no tags at all comes first.
+        func orderTags(_ a: [String], _ b: [String]) -> ComparisonResult {
+            for (x, y) in zip(a, b) {
+                let r = x.localizedStandardCompare(y)
+                if r != .orderedSame { return r }
             }
-            if r == .orderedSame { r = a.name.localizedStandardCompare(b.name) }
-            return spec.ascending ? r == .orderedAscending : r == .orderedDescending
+            return order(a.count, b.count)
         }
+        if a.isFolder != b.isFolder { return ascending ? a.isFolder : b.isFolder }
+        var r: ComparisonResult
+        switch key {
+        case .name: r = a.name.localizedStandardCompare(b.name)
+        case .modified: r = order(a.modified ?? .distantPast, b.modified ?? .distantPast)
+        case .kind: r = a.kind.localizedStandardCompare(b.kind)
+        case .size: r = order(a.size ?? a.folderSize ?? a.volume?.total ?? 0, b.size ?? b.folderSize ?? b.volume?.total ?? 0)
+        case .location:
+            r = a.folderPath.localizedStandardCompare(b.folderPath)
+        case .created: r = order(a.created ?? .distantPast, b.created ?? .distantPast)
+        case .accessed: r = order(a.accessed ?? .distantPast, b.accessed ?? .distantPast)
+        case .fileExtension: r = a.fileExtension.localizedStandardCompare(b.fileExtension)
+        case .tags: r = orderTags(a.tags, b.tags)
+        }
+        if r == .orderedSame { r = a.name.localizedStandardCompare(b.name) }
+        return ascending ? r == .orderedAscending : r == .orderedDescending
+    }
+}
+
+extension Array where Element == FileItem {
+    func sorted(by spec: SortSpec) -> [FileItem] {
+        // Each file's tags are read once, here, rather than on every comparison.
+        if spec.key == .tags { forEach { _ = $0.tags } }
+        return sorted { spec.orders($0, before: $1) }
+    }
+
+    /// This list, already in `spec` order, with `others` put where they
+    /// belong; `inserted` is where they ended up, in the merged list.
+    func merged(with others: [FileItem], by spec: SortSpec) -> (merged: [FileItem], inserted: [Int]) {
+        let others = others.sorted(by: spec)
+        var merged: [FileItem] = []
+        merged.reserveCapacity(count + others.count)
+        var inserted: [Int] = []
+        inserted.reserveCapacity(others.count)
+        var i = startIndex
+        for item in others {
+            while i < endIndex && !spec.orders(item, before: self[i]) {
+                merged.append(self[i])
+                i += 1
+            }
+            inserted.append(merged.count)
+            merged.append(item)
+        }
+        merged.append(contentsOf: self[i...])
+        return (merged, inserted)
     }
 }
 
@@ -353,6 +436,29 @@ enum Prefs {
             UserDefaults.standard.set(newValue, forKey: "folderSizes")
             NotificationCenter.default.post(name: .explorerFolderSizesChanged, object: nil)
         }
+    }
+
+    /// The Details columns beyond the usual ones that are switched on: from
+    /// the column headers' right-click menu, or by sorting on one, as in Windows.
+    static var extraColumns: Set<String> {
+        get { Set(UserDefaults.standard.stringArray(forKey: "extraColumns") ?? []) }
+        set { UserDefaults.standard.set(newValue.sorted(), forKey: "extraColumns") }
+    }
+
+    /// The layout each folder was last shown in, as Windows remembers it per folder.
+    static func folderView(for url: URL) -> String? {
+        (UserDefaults.standard.dictionary(forKey: "folderViews") as? [String: String])?[url.key]
+    }
+
+    static func rememberFolderView(_ view: String, for url: URL) {
+        var views = UserDefaults.standard.dictionary(forKey: "folderViews") as? [String: String] ?? [:]
+        views[url.key] = nil
+        // A thousand folders is plenty; past that, some are forgotten to make room.
+        if views.count >= 1000 {
+            for key in Array(views.keys).shuffled().prefix(views.count - 999) { views[key] = nil }
+        }
+        views[url.key] = view
+        UserDefaults.standard.set(views, forKey: "folderViews")
     }
 
     /// The picture size in Large icons, 48–256 points.

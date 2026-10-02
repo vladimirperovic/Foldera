@@ -427,29 +427,42 @@ final class LocalPictures: NSObject, WKURLSchemeHandler {
         return real.hasPrefix(top == "/" ? "/" : top + "/") ? file : nil
     }
 
+    /// Tasks WebKit hasn't stopped; a stopped one must not be answered.
+    private var running = Set<ObjectIdentifier>()
+
     /// WebKit calls this on the main thread, where `serve` and `page` are set.
+    /// Pictures are read in the background: a big one, or one on a slow
+    /// drive, mustn't hold up the window.
     func webView(_ webView: WKWebView, start task: WKURLSchemeTask) {
         guard let url = task.request.url else { return }
-        let body: Data?
-        let type: String
         if url.path == pageURL.path {
-            body = page.data(using: .utf8)
-            type = "text/html"
-        } else if let file = file(for: url), let kind = UTType(filenameExtension: file.pathExtension), kind.conforms(to: .image) {
-            body = try? Data(contentsOf: file)
-            type = kind.preferredMIMEType ?? "application/octet-stream"
-        } else {
-            body = nil
-            type = ""
+            return answer(task, url: url, body: page.data(using: .utf8), type: "text/html")
         }
+        guard let file = file(for: url), let kind = UTType(filenameExtension: file.pathExtension), kind.conforms(to: .image) else {
+            return answer(task, url: url, body: nil, type: "")
+        }
+        let id = ObjectIdentifier(task)
+        running.insert(id)
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            let body = try? Data(contentsOf: file)
+            DispatchQueue.main.async {
+                guard let self, self.running.remove(id) != nil else { return }
+                self.answer(task, url: url, body: body, type: kind.preferredMIMEType ?? "application/octet-stream")
+            }
+        }
+    }
+
+    func webView(_ webView: WKWebView, stop task: WKURLSchemeTask) {
+        running.remove(ObjectIdentifier(task))
+    }
+
+    private func answer(_ task: WKURLSchemeTask, url: URL, body: Data?, type: String) {
         guard let body else { return task.didFailWithError(URLError(.fileDoesNotExist)) }
         task.didReceive(URLResponse(url: url, mimeType: type, expectedContentLength: body.count,
                                     textEncodingName: type == "text/html" ? "utf-8" : nil))
         task.didReceive(body)
         task.didFinish()
     }
-
-    func webView(_ webView: WKWebView, stop task: WKURLSchemeTask) {}
 }
 
 /// A plain text editor for Markdown: monospaced, no smart quotes or

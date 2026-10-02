@@ -165,6 +165,9 @@ final class Transfer {
     let plan: Plan
     let move: Bool
     private let cancelled = CancelFlag()
+    /// Set once the counting below isn't wanted any more: cancelled, or all done.
+    private let countingDone = CancelFlag()
+    private let totals = Totals()
     private let copier: TreeCopier
     // Touched only from the worker thread (copyfile calls back on it).
     private var progress = Progress()
@@ -186,7 +189,30 @@ final class Transfer {
         }
     }
 
-    func cancel() { cancelled.set() }
+    func cancel() {
+        cancelled.set()
+        countingDone.set()
+    }
+
+    /// The size of each step, counted on another thread while the copying
+    /// already runs: a folder of a hundred thousand small files takes a while
+    /// to count, and the copy needn't wait for that.
+    private final class Totals {
+        private let lock = NSLock()
+        private var sizes: [Int64]?
+
+        var counted: [Int64]? {
+            lock.lock()
+            defer { lock.unlock() }
+            return sizes
+        }
+
+        func set(_ value: [Int64]) {
+            lock.lock()
+            sizes = value
+            lock.unlock()
+        }
+    }
 
     func run(progress report: @escaping (Progress) -> Void, done: @escaping (Outcome) -> Void) {
         self.report = report
@@ -212,20 +238,34 @@ final class Transfer {
             return outcome
         }
 
-        // How much there is to copy. A move on one drive is a rename: nothing to count.
-        let sizes = plan.steps.map { step -> Int64 in
-            (move && sameVolume(step)) || cancelled.isSet ? 0 : Self.size(of: step.from, cancelled: cancelled)
+        // How much there is to copy, counted beside the copying (see `Totals`);
+        // the bar moves once that is known. A move on one drive is a rename:
+        // nothing to count.
+        let steps = plan.steps
+        let counts = steps.map { !(move && sameVolume($0)) }
+        let (totals, stop) = (self.totals, countingDone)
+        DispatchQueue.global(qos: .utility).async {
+            let sizes = zip(steps, counts).map { step, wanted -> Int64 in
+                wanted && !stop.isSet ? Self.size(of: step.from, cancelled: stop) : 0
+            }
+            if !stop.isSet { totals.set(sizes) }
         }
-        progress.bytesTotal = sizes.reduce(0, +)
+        defer { countingDone.set() }
         progress.itemsTotal = plan.steps.count
-        progress.preparing = false
         publish(force: true)
+        /// Bytes in the steps before each one, once counted.
+        var before: [Int64]?
+        func counted(upTo index: Int) -> Int64? {
+            if before == nil, let sizes = totals.counted { before = sizes.reduce(into: [Int64(0)]) { $0.append($0[$0.count - 1] + $1) } }
+            return before?[index]
+        }
 
         for (index, step) in plan.steps.enumerated() {
             if cancelled.isSet { outcome.cancelled = true; break }
             progress.itemsDone = index
             progress.current = step.from.lastPathComponent
-            stepBase = progress.bytesDone
+            stepBase = counted(upTo: index) ?? progress.bytesDone
+            progress.bytesDone = stepBase
             publish(force: true)
             do {
                 if step.replace && FileOps.exists(step.to) {
@@ -260,7 +300,7 @@ final class Transfer {
             } catch {
                 outcome.failures.append("“\(step.from.lastPathComponent)”: \(error.localizedDescription)")
             }
-            progress.bytesDone = stepBase + sizes[index]
+            if let done = counted(upTo: index + 1) { progress.bytesDone = done }
         }
 
         if move && !outcome.cancelled {
@@ -280,6 +320,10 @@ final class Transfer {
     }
 
     private func publish(force: Bool) {
+        if progress.preparing, let sizes = totals.counted {
+            progress.bytesTotal = sizes.reduce(0, +)
+            progress.preparing = false
+        }
         let now = Date()
         guard force || now.timeIntervalSince(lastPublished) > 0.1 else { return }
         lastPublished = now
@@ -570,7 +614,12 @@ final class ProgressWindow: NSWindowController {
             detail.stringValue = "Waiting for “\(progress.current)” to arrive…"
             return
         }
-        guard let fraction = progress.fraction else { return }
+        guard let fraction = progress.fraction else {
+            // The copying has begun while what there is to copy is still being counted.
+            if !progress.preparing || progress.current.isEmpty { return }
+            detail.stringValue = "\(min(progress.itemsDone + 1, progress.itemsTotal)) of \(progress.itemsTotal)  ·  \(progress.current)"
+            return
+        }
         if bar.isIndeterminate {
             bar.stopAnimation(nil)
             bar.isIndeterminate = false

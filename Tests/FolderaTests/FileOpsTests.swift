@@ -148,6 +148,34 @@ private final class Scratch {
         #expect(reversed == ["file10.txt", "file2.txt", "zeta", "Alpha"])
     }
 
+    @Test func windowsFurtherSortChoices() throws {
+        let s = try Scratch()
+        let old = s.file("b.txt")
+        s.file("a.PDF")
+        s.file("c")
+        try s.folder("Folder.d")
+        try FileManager.default.setAttributes([.creationDate: Date(timeIntervalSinceNow: -86_400)], ofItemAtPath: old.path)
+        let listed = try FileItem.contents(of: s.url, showHidden: false)
+        #expect(listed.first { $0.name == "a.PDF" }?.fileExtension == ".pdf")
+        #expect(listed.first { $0.name == "Folder.d" }?.fileExtension == "")
+        let byExtension = listed.sorted(by: SortSpec(key: .fileExtension, ascending: true)).map(\.name)
+        #expect(byExtension == ["Folder.d", "c", "a.PDF", "b.txt"])
+        let byCreated = listed.sorted(by: SortSpec(key: .created, ascending: true)).map(\.name)
+        #expect(byCreated.dropFirst().first == "b.txt")
+    }
+
+    @Test func laterResultsAreMergedInOrder() throws {
+        let s = try Scratch()
+        for name in ["a", "c", "e", "b", "d", "f"] { s.file(name) }
+        let all = try FileItem.contents(of: s.url, showHidden: false)
+        let spec = SortSpec(key: .name, ascending: true)
+        let first = all.filter { ["a", "c", "e"].contains($0.name) }.sorted(by: spec)
+        let later = all.filter { ["f", "b", "d"].contains($0.name) }
+        let (merged, inserted) = first.merged(with: later, by: spec)
+        #expect(merged.map(\.name) == ["a", "b", "c", "d", "e", "f"])
+        #expect(inserted == [1, 3, 5])
+    }
+
     @Test func hiddenFilesOnlyWhenAsked() throws {
         let s = try Scratch()
         s.file(".secret")

@@ -528,16 +528,25 @@ final class SyncWindow: NSWindowController, NSWindowDelegate, NSTableViewDataSou
             summary.textColor = .secondaryLabelColor
             return
         }
-        let rows = plan.rows
-        func copies(_ action: Sync.Action, _ way: String) -> String? {
-            let chosen = rows.filter { $0.action == action }
-            guard !chosen.isEmpty else { return nil }
-            return "Copy \(Format.count(Int64(chosen.count))) to the \(way) (\(Format.bytes(chosen.reduce(0) { $0 + $1.bytesToCopy })))"
+        // One pass over the rows, however many there are.
+        var toRight = (count: 0, bytes: Int64(0))
+        var toLeft = (count: 0, bytes: Int64(0))
+        var deletions = 0
+        var conflicts = 0
+        for row in plan.rows {
+            switch row.action {
+            case .toRight: toRight = (toRight.count + 1, toRight.bytes + row.bytesToCopy)
+            case .toLeft: toLeft = (toLeft.count + 1, toLeft.bytes + row.bytesToCopy)
+            case .deleteLeft, .deleteRight: deletions += 1
+            case .none: if row.conflict != nil { conflicts += 1 }
+            }
         }
-        var parts = [copies(.toRight, "right"), copies(.toLeft, "left")].compactMap { $0 }
-        let deletions = rows.filter { $0.action == .deleteLeft || $0.action == .deleteRight }.count
+        func copies(_ chosen: (count: Int, bytes: Int64), _ way: String) -> String? {
+            guard chosen.count > 0 else { return nil }
+            return "Copy \(Format.count(Int64(chosen.count))) to the \(way) (\(Format.bytes(chosen.bytes)))"
+        }
+        var parts = [copies(toRight, "right"), copies(toLeft, "left")].compactMap { $0 }
         if deletions > 0 { parts.append("Delete \(Format.count(Int64(deletions)))\(permanently ? " permanently" : "")") }
-        let conflicts = rows.filter { $0.action == .none && $0.conflict != nil }.count
         if conflicts > 0 { parts.append(conflicts == 1 ? "1 conflict" : "\(Format.count(Int64(conflicts))) conflicts") }
         let same = plan.equal == 1 ? "1 file the same" : "\(Format.count(Int64(plan.equal))) files the same"
         var text = parts.isEmpty ? "Nothing to sync. \(same)." : parts.joined(separator: "  ·  ") + "  ·  " + same

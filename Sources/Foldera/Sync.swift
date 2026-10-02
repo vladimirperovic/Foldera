@@ -153,7 +153,7 @@ enum Sync {
 
         func path(_ key: String) -> String { spelled[key] ?? key }
 
-        var files: Int { items.values.filter { !$0.folder }.count }
+        var files: Int { items.values.reduce(0) { $1.folder ? $0 : $0 + 1 } }
     }
 
     /// What a compare found.
@@ -271,8 +271,10 @@ enum Sync {
             }
         }
         if cancelled.isSet { throw CancellationError() }
+        let remembered = scan.memory
         scan.memory.remember(scan)
-        try? scan.memory.save()
+        // Written again only when it changed: a hundred thousand files make a file of megabytes.
+        if scan.memory != remembered { try? scan.memory.save() }
         return scan
     }
 
@@ -355,14 +357,22 @@ enum Sync {
 
     /// The SHA-256 of what a file holds; nil when it can't be read.
     static func hash(_ url: URL, cancelled: CancelFlag) -> String? {
+        digest(url, cancelled: cancelled)?.base64EncodedString()
+    }
+
+    /// The SHA-256 itself, read a megabyte at a time; `read` hears how far it got.
+    static func digest(_ url: URL, cancelled: CancelFlag, read: (Int64) -> Void = { _ in }) -> Data? {
         guard let file = FileHandle(forReadingAtPath: url.path) else { return nil }
         defer { try? file.close() }
         var sha = SHA256()
+        var done: Int64 = 0
         do {
             while !cancelled.isSet {
                 let chunk = try file.read(upToCount: 1 << 20) ?? Data()
-                if chunk.isEmpty { return Data(sha.finalize()).base64EncodedString() }
+                if chunk.isEmpty { return Data(sha.finalize()) }
                 sha.update(data: chunk)
+                done += Int64(chunk.count)
+                read(done)
             }
         } catch {}
         return nil
@@ -682,8 +692,8 @@ enum Sync {
     /// What both sides held when they were last found the same, path by path.
     /// One file per pair of folders, in ~/Library/Application Support/Foldera/Sync,
     /// of a few dozen bytes per item: some megabytes for a hundred thousand files.
-    struct Memory: Codable {
-        struct Pair: Codable {
+    struct Memory: Codable, Equatable {
+        struct Pair: Codable, Equatable {
             var left: Item
             var right: Item
 

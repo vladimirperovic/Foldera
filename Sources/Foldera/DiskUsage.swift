@@ -291,6 +291,7 @@ final class TreemapView: NSView {
             hovered = nil
             laidOut = .zero
             legend = root.map(Self.legend(of:)) ?? []
+            freeSpace = root.flatMap(Self.diskFreeSpace(at:))
             needsDisplay = true
         }
     }
@@ -307,7 +308,14 @@ final class TreemapView: NSView {
     private var blocks: [Block] = []
     private var laidOut = CGSize.zero
     private var legend: [(kind: SearchFilters.Kind?, size: Int64)] = []
+    /// Asked once per tree, not on every draw: resizing draws many times a
+    /// second, and a network drive can be slow to answer.
+    private var freeSpace: Int64?
     private static let headerHeight: CGFloat = 54
+
+    private static func diskFreeSpace(at node: UsageNode) -> Int64? {
+        try? node.url.resourceValues(forKeys: [.volumeAvailableCapacityForImportantUsageKey]).volumeAvailableCapacityForImportantUsage
+    }
 
     override var isFlipped: Bool { true }
     override var acceptsFirstResponder: Bool { true }
@@ -320,7 +328,10 @@ final class TreemapView: NSView {
 
     func relayout() {
         laidOut = .zero
-        if let root { legend = Self.legend(of: root) }
+        if let root {
+            legend = Self.legend(of: root)
+            freeSpace = Self.diskFreeSpace(at: root)
+        }
         needsDisplay = true
     }
 
@@ -458,9 +469,7 @@ final class TreemapView: NSView {
         var facts = "\(Format.bytes(root.size))  ·  \(Format.count(Int64(root.files))) files"
         if folders > 0 { facts += "  ·  \(Format.count(Int64(folders))) folders" }
         if root.unreadable > 0 { facts += "  ·  \(Format.count(Int64(root.unreadable))) couldn't be read" }
-        if let volume = try? root.url.resourceValues(forKeys: [.volumeAvailableCapacityForImportantUsageKey]).volumeAvailableCapacityForImportantUsage {
-            facts += "  ·  \(Format.bytes(volume)) free on the disk"
-        }
+        if let freeSpace { facts += "  ·  \(Format.bytes(freeSpace)) free on the disk" }
         NSAttributedString(string: facts, attributes: [
             .font: NSFont.monospacedDigitSystemFont(ofSize: 11, weight: .regular), .foregroundColor: NSColor.secondaryLabelColor,
         ]).draw(at: NSPoint(x: 14, y: 30))

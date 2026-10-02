@@ -341,6 +341,8 @@ extension ExplorerTab: NSMenuItemValidation {
 
     @objc func renameSelection(_ sender: Any?) {
         let chosen = selectedItems
+        // Several selected: they are renamed together, by a pattern.
+        if chosen.count > 1 { return renameMany(sender) }
         // F2 comes here without asking the menu; an opened archive is read-only.
         guard chosen.count == 1, let item = chosen.first, item.volume == nil, !isInArchive else { return }
         switch shownMode {
@@ -526,6 +528,60 @@ extension ExplorerTab: NSMenuItemValidation {
         selectionChanged()
     }
 
+    /// Total Commander's Num+ and Num−: names matching a pattern join the
+    /// selection, or leave it. `*` and `?` are wildcards; plain words match
+    /// anywhere in the name, as in the search box; `;` separates patterns.
+    @objc func selectByPattern(_ sender: Any?) { askForPattern(selecting: true) }
+    @objc func deselectByPattern(_ sender: Any?) { askForPattern(selecting: false) }
+
+    private func askForPattern(selecting: Bool) {
+        guard let window, !items.isEmpty, window.attachedSheet == nil else { return }
+        let alert = NSAlert()
+        alert.messageText = selecting ? "Select by Pattern" : "Deselect by Pattern"
+        alert.informativeText = "Names to \(selecting ? "add to" : "take out of") the selection: *.mp3, IMG_2026*, or several at once: *.jpg; *.png"
+        let field = NSTextField(string: UserDefaults.standard.string(forKey: "selectionPattern") ?? "*.*")
+        field.frame = NSRect(x: 0, y: 0, width: 300, height: 24)
+        alert.accessoryView = field
+        alert.addButton(withTitle: selecting ? "Select" : "Deselect")
+        alert.addButton(withTitle: "Cancel")
+        alert.window.initialFirstResponder = field
+        alert.beginSheetModal(for: window) { [weak self] response in
+            guard response == .alertFirstButtonReturn else { return }
+            UserDefaults.standard.set(field.stringValue, forKey: "selectionPattern")
+            self?.applyPattern(field.stringValue, selecting: selecting)
+        }
+    }
+
+    func applyPattern(_ pattern: String, selecting: Bool) {
+        let matching = Set(Self.matching(pattern, in: items).map(\.key))
+        var chosen = Set(selectedItems.map(\.key))
+        if selecting { chosen.formUnion(matching) } else { chosen.subtract(matching) }
+        select(keys: chosen)
+        selectionChanged()
+        focusList()
+    }
+
+    /// The items whose names match any of the patterns. `*.*`, as in
+    /// Windows, means every file, with or without an extension.
+    static func matching(_ pattern: String, in items: [FileItem]) -> [FileItem] {
+        let patterns = pattern.split(separator: ";").map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty }
+        let matchers = patterns.map { text -> (String) -> Bool in
+            if text == "*.*" { return { _ in true } }
+            return FolderSearch.matcher(for: text)
+        }
+        guard !matchers.isEmpty else { return [] }
+        return items.filter { item in matchers.contains { $0(item.name) } }
+    }
+
+    /// Ctrl+B in Total Commander: the files of this folder and every folder
+    /// inside it, in one list, with the folder each is in.
+    @objc func toggleFlatView(_ sender: Any?) {
+        guard flatView || location.url != nil else { return }
+        flatView.toggle()
+        if isSearching { runSearch() } else { endSearch() }
+        focusList()
+    }
+
     // MARK: View
 
     @objc func setDetailsView(_ sender: Any?) { setViewMode(.details) }
@@ -674,6 +730,16 @@ extension ExplorerTab: NSMenuItemValidation {
         return menu
     }
 
+    private func checksumMenu() -> NSMenu {
+        let menu = NSMenu()
+        menu.addItem(item("Copy SHA-256", nil, #selector(copyChecksum(_:))))
+        menu.addItem(item("Create checksum file", nil, #selector(createChecksumFile(_:))))
+        if selectedFiles.contains(where: Checksum.isChecksumFile) {
+            menu.addItem(item("Verify checksums", nil, #selector(verifyChecksums(_:))))
+        }
+        return menu
+    }
+
     private func tagsMenu() -> NSMenu {
         let menu = NSMenu()
         var names = Tags.favourites
@@ -699,6 +765,7 @@ extension ExplorerTab: NSMenuItemValidation {
     func applySort(_ spec: SortSpec) {
         sort = spec
         spec.save()
+        showColumn(for: spec.key)
         table.sortDescriptors = [NSSortDescriptor(key: spec.key.rawValue, ascending: spec.ascending)]
         resort()
     }
@@ -707,9 +774,10 @@ extension ExplorerTab: NSMenuItemValidation {
         pendingSelection = Set(selectedItems.map(\.key))
         sortGeneration += 1
         if searchRunning { searchSorted = true }
-        // A big folder takes a moment to sort by name; do it off the main
-        // thread, as loading does. Search results keep arriving, so they sort here.
-        guard items.count > 2000, !isSearching else {
+        // A big folder takes a moment to sort by name, and sorting by tags
+        // reads every file's; do it off the main thread, as loading does.
+        // Search results keep arriving, so they sort here.
+        guard items.count > 2000 || sort.key == .tags, !isSearching else {
             items = items.sorted(by: sort)
             return showItems()
         }
@@ -747,7 +815,11 @@ extension ExplorerTab: NSMenuItemValidation {
 
     private func sortMenu() -> NSMenu {
         let menu = NSMenu()
-        var keys: [(String, SortKey)] = [("Name", .name), ("Date modified", .modified), ("Type", .kind), ("Size", .size)]
+        // Windows' choices, in its order.
+        var keys: [(String, SortKey)] = [
+            ("Name", .name), ("Date modified", .modified), ("Type", .kind), ("Size", .size),
+            ("Date created", .created), ("Date accessed", .accessed), ("File extension", .fileExtension), ("Tags", .tags),
+        ]
         if isSearching { keys.append(("Folder", .location)) }
         for (title, key) in keys { menu.addItem(item(title, nil, #selector(sortBy(_:)), object: key.rawValue)) }
         menu.addItem(.separator())
@@ -764,6 +836,10 @@ extension ExplorerTab: NSMenuItemValidation {
         menu.addItem(item("Disk usage", "square.split.2x2", #selector(setUsageView(_:)), key: "4"))
         menu.addItem(.separator())
         menu.addItem(item("Folder sizes", "internaldrive", #selector(toggleFolderSizes(_:))))
+        menu.addItem(item("Files in all subfolders", "list.bullet.indent", #selector(toggleFlatView(_:)), key: "b", mods: .control))
+        menu.addItem(.separator())
+        menu.addItem(item("One pane", "rectangle", #selector(setOnePane(_:)), key: "1", mods: [.command, .option]))
+        menu.addItem(item("Two panes", "rectangle.split.2x1", #selector(setTwoPanes(_:)), key: "2", mods: [.command, .option]))
         menu.addItem(.separator())
         menu.addItem(item("Details pane", "sidebar.right", #selector(togglePreviewPane(_:)), key: "p", mods: [.command, .shift]))
         menu.addItem(item("Hidden items", "eye", #selector(toggleHidden(_:)), key: ".", mods: [.command, .shift]))
@@ -775,6 +851,8 @@ extension ExplorerTab: NSMenuItemValidation {
         menu.addItem(item("Select all", "checkmark.circle", #selector(selectAllItems(_:)), key: "a"))
         menu.addItem(item("Select none", "circle", #selector(selectNone(_:))))
         menu.addItem(item("Invert selection", "circle.lefthalf.filled", #selector(invertSelection(_:))))
+        menu.addItem(item("Select by pattern…", "plus.circle", #selector(selectByPattern(_:)), key: "a", mods: [.command, .option]))
+        menu.addItem(item("Deselect by pattern…", "minus.circle", #selector(deselectByPattern(_:))))
         menu.addItem(.separator())
         menu.addItem(item("Copy as path", "link", #selector(copyPath(_:)), key: "c", mods: [.command, .shift]))
         menu.addItem(item("Open in Terminal", "terminal", #selector(openInTerminal(_:))))
@@ -865,8 +943,12 @@ extension ExplorerTab: NSMenuItemValidation {
             menu.addItem(item("Copy text from image", "text.viewfinder", #selector(copyTextFromImage(_:))))
         }
         menu.addItem(item("AirDrop", "airplayaudio", #selector(airDrop(_:))))
+        if host?.otherPane(of: self) != nil {
+            menu.addItem(item("Copy to other pane", "doc.on.doc", #selector(copyToOtherPane(_:))))
+            menu.addItem(item("Move to other pane", "arrow.right.doc.on.clipboard", #selector(moveToOtherPane(_:))))
+        }
         menu.addItem(.separator())
-        menu.addItem(item("Rename", "character.cursor.ibeam", #selector(renameSelection(_:))))
+        menu.addItem(item(chosen.count > 1 ? "Rename…" : "Rename", "character.cursor.ibeam", #selector(renameSelection(_:))))
         menu.addItem(item("Move to Trash", "trash", #selector(delete(_:)), key: "\u{8}"))
         if archiveToExtract != nil {
             menu.addItem(item("Extract All", "archivebox", #selector(extract(_:))))
@@ -880,6 +962,15 @@ extension ExplorerTab: NSMenuItemValidation {
         tags.image = NSImage(systemSymbolName: "tag", accessibilityDescription: nil)
         tags.submenu = tagsMenu()
         menu.addItem(tags)
+        if !selectedFiles.isEmpty {
+            let checksum = NSMenuItem(title: "Checksum", action: nil, keyEquivalent: "")
+            checksum.image = NSImage(systemSymbolName: "number", accessibilityDescription: nil)
+            checksum.submenu = checksumMenu()
+            menu.addItem(checksum)
+        }
+        if filesToCompare != nil {
+            menu.addItem(item("Compare files", "equal.square", #selector(compareFiles(_:))))
+        }
         if chosen.contains(where: { $0.cloud == .cloudOnly }) {
             menu.addItem(item("Download Now", "icloud.and.arrow.down", #selector(downloadNow(_:))))
         }
@@ -922,7 +1013,7 @@ extension ExplorerTab: NSMenuItemValidation {
         case #selector(paste(_:)), #selector(pasteMove(_:)):
             return !editing && currentFolder != nil && FileClipboard.shared.hasFiles
         case #selector(renameSelection(_:)):
-            return !editing && changeable && chosen.count == 1
+            return !editing && changeable
         case #selector(newFolder(_:)), #selector(newTextDocument(_:)):
             return currentFolder != nil
         case #selector(openSelection(_:)), #selector(quickLook(_:)), #selector(openFileLocation(_:)):
@@ -996,6 +1087,39 @@ extension ExplorerTab: NSMenuItemValidation {
         case #selector(sortDescending(_:)):
             menuItem.state = sort.ascending ? .off : .on
             return true
+        case #selector(toggleColumn(_:)):
+            menuItem.state = Prefs.extraColumns.contains(menuItem.representedObject as? String ?? "") ? .on : .off
+            return true
+        case #selector(selectByPattern(_:)), #selector(deselectByPattern(_:)):
+            return !items.isEmpty && shownMode != .usage
+        case #selector(toggleFlatView(_:)):
+            menuItem.state = flatView ? .on : .off
+            return flatView || location.url != nil
+        case #selector(copyChecksum(_:)):
+            return !editing && !selectedFiles.isEmpty
+        case #selector(createChecksumFile(_:)):
+            let files = selectedFiles
+            return !editing && !files.isEmpty && !isInArchive && Set(files.map { $0.deletingLastPathComponent().key }).count == 1
+        case #selector(verifyChecksums(_:)):
+            return !editing && selectedFiles.contains(where: Checksum.isChecksumFile)
+        case #selector(compareFiles(_:)):
+            return !editing && filesToCompare != nil
+        case #selector(renameMany(_:)):
+            return !editing && changeable && chosen.count > 1
+        case #selector(setOnePane(_:)):
+            menuItem.state = host?.partner == nil ? .on : .off
+            return host != nil
+        case #selector(setTwoPanes(_:)):
+            menuItem.state = host?.partner != nil ? .on : .off
+            return host != nil
+        case #selector(copyToOtherPane(_:)), #selector(moveToOtherPane(_:)):
+            let target = host?.otherPane(of: self)?.currentFolder
+            return !editing && files && target != nil && target?.key != currentFolder?.key
+                && (menuItem.action == #selector(copyToOtherPane(_:)) || changeable)
+        case #selector(sameFolderInOtherPane(_:)), #selector(swapPanes(_:)), #selector(comparePanes(_:)):
+            return host?.otherPane(of: self) != nil
+        case #selector(syncPanes(_:)):
+            return host?.otherPane(of: self)?.location.url != nil && location.url != nil && !isInArchive
         default:
             return true
         }
@@ -1007,7 +1131,7 @@ extension ExplorerTab: NSMenuItemValidation {
     /// F2 renames, F5 refreshes, Alt+arrows move around. Anything typed
     /// into a text field is left alone.
     func handleKey(_ event: NSEvent) -> Bool {
-        guard let window, event.window === window, host?.selected === self else { return false }
+        guard let window, event.window === window, host?.active === self else { return false }
         let responder = window.firstResponder
         if responder is NSText {
             typeSelection.reset()
@@ -1015,6 +1139,16 @@ extension ExplorerTab: NSMenuItemValidation {
         }
         let mods = event.modifierFlags.intersection([.command, .option, .control, .shift])
         let listFocused = (responder as? NSView)?.isDescendant(of: activeList) == true
+        // Total Commander's keypad keys, before typing a name could take them:
+        // + selects by pattern, − deselects, * inverts.
+        if listFocused && mods.isEmpty && event.modifierFlags.contains(.numericPad) {
+            switch event.keyCode {
+            case 69: selectByPattern(nil); return true
+            case 78: deselectByPattern(nil); return true
+            case 67: invertSelection(nil); return true
+            default: break
+            }
+        }
         if listFocused && handleTypeSelection(event) { return true }
         typeSelection.reset()
         switch event.keyCode {
@@ -1022,6 +1156,11 @@ extension ExplorerTab: NSMenuItemValidation {
             if listFocused && mods.isEmpty { openSelection(nil); return true }
             if listFocused && mods == .option { showProperties(nil); return true }
             if listFocused && mods == .command { openInNewTab(nil); return true }
+        case 48: // Tab: to the other pane, as in Total Commander
+            if listFocused && mods.isEmpty, let other = host?.otherPane(of: self) {
+                host?.activate(other, focus: true)
+                return true
+            }
         case 51: // Backspace
             if mods.isEmpty { goBack(nil); return true }
         case 117: // Forward delete
@@ -1047,9 +1186,10 @@ extension ExplorerTab: NSMenuItemValidation {
             if mods == .option { focusAddress(nil); return true }
         case 35: // P: Alt+P in Windows shows the preview pane
             if mods == .option { togglePreviewPane(nil); return true }
-        case 53: // Esc: the words first, then the search options
+        case 53: // Esc: the words first, then the search options, then the flat view
             if !searchQuery.isEmpty { endSearch(); return true }
             if filters.isActive { filtersChanged(SearchFilters()); return true }
+            if flatView { toggleFlatView(nil); return true }
             if FileClipboard.shared.isCut { FileClipboard.shared.clearCut(); return true }
         default:
             break

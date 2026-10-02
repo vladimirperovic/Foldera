@@ -142,7 +142,9 @@ final class FolderSearch {
         current = nil
     }
 
+    /// `filesOnly`: folders are walked into but not listed, as Total Commander's branch view has it.
     func start(in root: URL, for query: String, filters: SearchFilters = SearchFilters(), showHidden: Bool,
+               filesOnly: Bool = false,
                found: @escaping ([FileItem]) -> Void,
                finished: @escaping (_ truncated: Bool, _ unreadable: Int) -> Void) {
         cancel()
@@ -170,7 +172,7 @@ final class FolderSearch {
                 }
                 if matches(url.lastPathComponent) {
                     let item = FileItem(url: url)
-                    guard filters.matches(item) else { continue }
+                    guard filters.matches(item), !(filesOnly && item.isFolder) else { continue }
                     batch.append(item)
                     total += 1
                     if total >= Self.limit {

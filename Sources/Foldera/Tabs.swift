@@ -4,11 +4,19 @@ import AppKit
 /// bar, about 220 points (4–5 cm on a MacBook) each, and a + right after the
 /// last one. Every tab is an ExplorerTab with its own place and history;
 /// the ones not on screen keep their state but draw nothing.
-final class ExplorerWindow: NSWindowController, NSWindowDelegate {
+final class ExplorerWindow: NSWindowController, NSWindowDelegate, NSSplitViewDelegate {
     private(set) var tabs: [ExplorerTab] = []
     private(set) weak var selected: ExplorerTab?
     let strip = TabStrip()
     private let container = NSView()
+    /// The tab on screen on the left and, with two panes, the second pane on the right.
+    private let panes = NSSplitView()
+    private let firstPane = NSView()
+    /// The second pane, as Total Commander has it: a place of its own beside
+    /// the tab on screen, which stays while the tabs change.
+    private(set) var partner: ExplorerTab?
+    /// The second pane was the one last worked in.
+    private var partnerActive = false
     private lazy var stripHeight = strip.heightAnchor.constraint(equalToConstant: 40)
     private var keyMonitor: Any?
     private var quickOpenController: QuickOpenController?
@@ -44,6 +52,18 @@ final class ExplorerWindow: NSWindowController, NSWindowDelegate {
                 container.bottomAnchor.constraint(equalTo: content.bottomAnchor),
             ])
         }
+        panes.isVertical = true
+        panes.dividerStyle = .thin
+        panes.delegate = self
+        panes.translatesAutoresizingMaskIntoConstraints = false
+        container.addSubview(panes)
+        NSLayoutConstraint.activate([
+            panes.leadingAnchor.constraint(equalTo: container.leadingAnchor),
+            panes.trailingAnchor.constraint(equalTo: container.trailingAnchor),
+            panes.topAnchor.constraint(equalTo: container.topAnchor),
+            panes.bottomAnchor.constraint(equalTo: container.bottomAnchor),
+        ])
+        panes.addArrangedSubview(firstPane)
         add(first)
         // ⌃⇥ and ⌃⇧⇥ walk the tabs, as in every tabbed app.
         keyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
@@ -80,20 +100,113 @@ final class ExplorerWindow: NSWindowController, NSWindowDelegate {
         selected = tab
         let view = tab.view
         view.translatesAutoresizingMaskIntoConstraints = false
-        container.addSubview(view)
+        firstPane.addSubview(view)
         NSLayoutConstraint.activate([
-            view.leadingAnchor.constraint(equalTo: container.leadingAnchor),
-            view.trailingAnchor.constraint(equalTo: container.trailingAnchor),
-            view.topAnchor.constraint(equalTo: container.topAnchor),
-            view.bottomAnchor.constraint(equalTo: container.bottomAnchor),
+            view.leadingAnchor.constraint(equalTo: firstPane.leadingAnchor),
+            view.trailingAnchor.constraint(equalTo: firstPane.trailingAnchor),
+            view.topAnchor.constraint(equalTo: firstPane.topAnchor),
+            view.bottomAnchor.constraint(equalTo: firstPane.bottomAnchor),
         ])
         // Menu commands find the tab through the responder chain: view → tab → container.
         view.nextResponder = tab
         tab.nextResponder = container
+        partnerActive = false
         tab.didAttach()
         tab.focusList()
         tab.updateCommandStates()
+        markPanes()
         tabDidChange(tab)
+    }
+
+    // MARK: Two panes
+
+    /// Every pane in the window: the tabs, and the second pane.
+    var allPanes: [ExplorerTab] { tabs + (partner.map { [$0] } ?? []) }
+
+    /// Where commands and keys go: the pane holding the keyboard focus, or else the one last used.
+    var active: ExplorerTab? {
+        guard let partner else { return selected }
+        if let responder = window?.firstResponder as? NSView {
+            if responder.isDescendant(of: partner.view) { return partner }
+            if let selected, responder.isDescendant(of: selected.view) { return selected }
+        }
+        return partnerActive ? partner : selected
+    }
+
+    /// The pane across from `tab`, when there are two.
+    func otherPane(of tab: ExplorerTab) -> ExplorerTab? {
+        guard let partner, let selected else { return nil }
+        if tab === partner { return selected }
+        return tab === selected ? partner : nil
+    }
+
+    /// A pane was clicked, or Tab moved to it: it takes the commands from now on.
+    func activate(_ tab: ExplorerTab, focus: Bool = false) {
+        guard partner != nil, tab === partner || tab === selected else { return }
+        partnerActive = tab === partner
+        if focus { tab.focusList() }
+        markPanes()
+        tab.updateCommandStates()
+    }
+
+    private func markPanes() {
+        guard let partner else {
+            selected?.markActive(nil)
+            return
+        }
+        partner.markActive(partnerActive)
+        selected?.markActive(!partnerActive)
+    }
+
+    /// One pane with tabs, or two panes side by side. The second opens where
+    /// it was last left, and the choice holds for new windows too.
+    func showTwoPanes(_ on: Bool) {
+        guard on != (partner != nil), let window else { return }
+        if on {
+            let saved = UserDefaults.standard.string(forKey: "secondPaneFolder").map { URL(fileURLWithPath: $0) }
+            let start = saved.flatMap { FileOps.isFolder($0) ? Location.folder($0) : nil } ?? selected?.location ?? .thisMac
+            let pane = ExplorerTab(location: start, secondPane: true)
+            pane.host = self
+            partner = pane
+            window.minSize = NSSize(width: 860, height: 420)
+            if window.frame.width < 1100, !window.styleMask.contains(.fullScreen), let screen = window.screen?.visibleFrame {
+                var frame = window.frame
+                frame.size.width = min(1100, screen.width)
+                frame.origin.x = max(min(frame.origin.x, screen.maxX - frame.width), screen.minX)
+                window.setFrame(frame, display: true)
+            }
+            pane.view.translatesAutoresizingMaskIntoConstraints = true
+            panes.addArrangedSubview(pane.view)
+            pane.view.nextResponder = pane
+            pane.nextResponder = container
+            panes.layoutSubtreeIfNeeded()
+            panes.setPosition((panes.bounds.width / 2).rounded(), ofDividerAt: 0)
+            pane.didAttach()
+        } else if let pane = partner {
+            if let url = pane.location.url, !ArchiveFolders.isInside(url) {
+                UserDefaults.standard.set(url.path, forKey: "secondPaneFolder")
+            }
+            pane.tearDown()
+            panes.removeArrangedSubview(pane.view)
+            pane.view.removeFromSuperview()
+            partner = nil
+            partnerActive = false
+            window.minSize = NSSize(width: 640, height: 420)
+            selected?.focusList()
+        }
+        UserDefaults.standard.set(on, forKey: "twoPanes")
+        markPanes()
+        allPanes.forEach { $0.updatePaneSwitch() }
+        selected?.updateCommandStates()
+    }
+
+    /// Neither pane gets narrower than its controls need.
+    func splitView(_ splitView: NSSplitView, constrainMinCoordinate proposed: CGFloat, ofSubviewAt index: Int) -> CGFloat {
+        max(proposed, 380)
+    }
+
+    func splitView(_ splitView: NSSplitView, constrainMaxCoordinate proposed: CGFloat, ofSubviewAt index: Int) -> CGFloat {
+        min(proposed, splitView.bounds.width - 380)
     }
 
     func close(_ tab: ExplorerTab) {
@@ -142,8 +255,8 @@ final class ExplorerWindow: NSWindowController, NSWindowDelegate {
     // MARK: Commands
 
     func showQuickOpen(scope: QuickOpenController.Scope, query: String = "") {
-        guard let selected, let window, window.attachedSheet == nil else { return }
-        let controller = QuickOpenController(tab: selected, scope: scope)
+        guard let active, let window, window.attachedSheet == nil else { return }
+        let controller = QuickOpenController(tab: active, scope: scope)
         controller.setQuery(query)
         quickOpenController = controller
         controller.present(in: window) { [weak self] in self?.quickOpenController = nil }
@@ -189,22 +302,25 @@ final class ExplorerWindow: NSWindowController, NSWindowDelegate {
     /// Anything the window can't do, the tab on screen may: menu commands
     /// still reach it when nothing inside it has the keyboard focus.
     override func supplementalTarget(forAction action: Selector, sender: Any?) -> Any? {
-        if let selected, selected.responds(to: action) { return selected }
+        if let active, active.responds(to: action) { return active }
         return super.supplementalTarget(forAction: action, sender: sender)
     }
 
     // MARK: Window
 
     func windowWillReturnUndoManager(_ window: NSWindow) -> UndoManager? {
-        selected?.undoManager(in: window) ?? FileUndo.manager
+        active?.undoManager(in: window) ?? FileUndo.manager
     }
 
     func windowDidBecomeKey(_ notification: Notification) {
-        selected?.updateCommandStates()
+        active?.updateCommandStates()
     }
 
     func windowWillClose(_ notification: Notification) {
-        tabs.forEach { $0.tearDown() }
+        if let url = partner?.location.url, !ArchiveFolders.isInside(url) {
+            UserDefaults.standard.set(url.path, forKey: "secondPaneFolder")
+        }
+        allPanes.forEach { $0.tearDown() }
         if let keyMonitor { NSEvent.removeMonitor(keyMonitor) }
         keyMonitor = nil
         onClose?()

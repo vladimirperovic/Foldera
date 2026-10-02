@@ -7,6 +7,11 @@ final class ColumnNode {
     /// Stands in for the contents of a folder that couldn't be read, so it doesn't pass for empty.
     let problem: String?
     var children: [ColumnNode]?
+    /// Being read in the background (see `Columns.children(of:)`), and what waits for that.
+    var loading = false
+    var whenLoaded: [() -> Void] = []
+    /// Stands in for the contents while they are read.
+    lazy var loadingRow = ColumnNode(url: url, item: nil, problem: "Loading…")
 
     init(url: URL, item: FileItem?, problem: String? = nil) {
         self.url = url
@@ -19,15 +24,19 @@ final class ColumnNode {
     /// A folder that can't be read shows why, until F5 reads it again.
     func loadChildren(sort: SortSpec) -> [ColumnNode] {
         if let children { return children }
-        let target = item?.isSymlink == true ? url.resolvingSymlinksInPath() : url
-        let made: [ColumnNode]
-        do {
-            made = try FileItem.contents(of: target, showHidden: Prefs.showHidden).sorted(by: sort).map { ColumnNode(url: $0.url, item: $0) }
-        } catch {
-            made = [ColumnNode(url: url, item: nil, problem: "Couldn't be read: \(error.localizedDescription)")]
-        }
+        let made = Self.read(url, item: item, sort: sort, showHidden: Prefs.showHidden)
         children = made
         return made
+    }
+
+    /// What is inside, in order, or why it couldn't be read. On any thread.
+    static func read(_ url: URL, item: FileItem?, sort: SortSpec, showHidden: Bool) -> [ColumnNode] {
+        let target = item?.isSymlink == true ? url.resolvingSymlinksInPath() : url
+        do {
+            return try FileItem.contents(of: target, showHidden: showHidden).sorted(by: sort).map { ColumnNode(url: $0.url, item: $0) }
+        } catch {
+            return [ColumnNode(url: url, item: nil, problem: "Couldn't be read: \(error.localizedDescription)")]
+        }
     }
 }
 
@@ -87,7 +96,7 @@ final class Columns: NSObject, NSBrowserDelegate {
         node.children = items.map { ColumnNode(url: $0.url, item: $0) }
         root = node
         browser.loadColumnZero()
-        reopen(keep)
+        reopen(keep[...])
     }
 
     /// The item selected in each column, left to right.
@@ -102,11 +111,55 @@ final class Columns: NSObject, NSBrowserDelegate {
         return path
     }
 
-    private func reopen(_ path: [String]) {
-        for (column, key) in path.enumerated() {
-            guard let parent = browser.parentForItems(inColumn: column) as? ColumnNode,
-                  let row = parent.loadChildren(sort: sort).firstIndex(where: { $0.url.key == key }) else { return }
-            browser.selectRow(row, inColumn: column)
+    /// Selects the path again, column by column; a column still being read
+    /// carries on once it is, unless something else was chosen meanwhile.
+    private func reopen(_ path: ArraySlice<String>, column: Int = 0) {
+        guard let key = path.first, column <= browser.lastColumn,
+              let parent = browser.parentForItems(inColumn: column) as? ColumnNode else { return }
+        guard let children = parent.children else {
+            parent.whenLoaded.append { [weak self, weak parent] in
+                guard let self, let parent, column <= self.browser.lastColumn,
+                      (self.browser.parentForItems(inColumn: column) as? ColumnNode) === parent else { return }
+                self.reopen(path, column: column)
+            }
+            return
+        }
+        guard let row = children.firstIndex(where: { $0.url.key == key }) else { return }
+        browser.selectRow(row, inColumn: column)
+        reopen(path.dropFirst(), column: column + 1)
+    }
+
+    /// A folder's contents, for the browser. The first time they are read in
+    /// the background, so a slow network drive doesn't stop the window; the
+    /// column says "Loading…" until then.
+    private func children(of node: ColumnNode) -> [ColumnNode] {
+        if let children = node.children { return children }
+        if !node.loading {
+            node.loading = true
+            let (url, item, order, hidden) = (node.url, node.item, self.sort, Prefs.showHidden)
+            DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+                let made = ColumnNode.read(url, item: item, sort: order, showHidden: hidden)
+                DispatchQueue.main.async {
+                    node.loading = false
+                    node.children = made
+                    self?.loaded(node)
+                    let waiting = node.whenLoaded
+                    node.whenLoaded = []
+                    waiting.forEach { $0() }
+                }
+            }
+        }
+        return [node.loadingRow]
+    }
+
+    /// Puts what was read in place of "Loading…", if that folder is still on screen.
+    private func loaded(_ node: ColumnNode) {
+        guard browser.lastColumn >= 0 else { return }
+        for column in 0...browser.lastColumn where (browser.parentForItems(inColumn: column) as? ColumnNode) === node {
+            let selectedHere = browser.selectedColumn == column
+            browser.reloadColumn(column)
+            if selectedHere { onSelect?() }
+            return
         }
     }
 
@@ -149,12 +202,12 @@ final class Columns: NSObject, NSBrowserDelegate {
     func rootItem(for browser: NSBrowser) -> Any? { root }
 
     func browser(_ browser: NSBrowser, numberOfChildrenOfItem item: Any?) -> Int {
-        node(item)?.loadChildren(sort: sort).count ?? 0
+        node(item).map { children(of: $0).count } ?? 0
     }
 
     func browser(_ browser: NSBrowser, child index: Int, ofItem item: Any?) -> Any {
         // Only rows numberOfChildrenOfItem counted are asked for, from the same kept listing.
-        guard let children = node(item)?.loadChildren(sort: sort), children.indices.contains(index) else {
+        guard let children = node(item).map(self.children(of:)), children.indices.contains(index) else {
             return ColumnNode(url: root?.url ?? URL(fileURLWithPath: "/"), item: nil, problem: "")
         }
         return children[index]

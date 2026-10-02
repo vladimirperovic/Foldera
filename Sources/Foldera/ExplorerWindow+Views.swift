@@ -7,6 +7,7 @@ extension ExplorerTab: NSTableViewDataSource, NSTableViewDelegate {
     func tableView(_ tableView: NSTableView, viewFor tableColumn: NSTableColumn?, row: Int) -> NSView? {
         guard let column = tableColumn?.identifier, row < items.count else { return nil }
         let item = items[row]
+        if (column == .nameColumn || column == .tagsColumn) && item.knownTags == nil { readTags(row: row) }
         if column == .nameColumn {
             let cell = tableView.makeView(withIdentifier: .nameCell, owner: self) as? NameCell ?? NameCell()
             cell.configure(item, dimmed: FileClipboard.shared.isCut(item.key))
@@ -15,6 +16,11 @@ extension ExplorerTab: NSTableViewDataSource, NSTableViewDelegate {
         if column == .statusColumn {
             let cell = tableView.makeView(withIdentifier: StatusCell.id, owner: self) as? StatusCell ?? StatusCell()
             cell.configure(item.cloud)
+            return cell
+        }
+        if column == .freeColumn, let volume = item.volume {
+            let cell = tableView.makeView(withIdentifier: DriveUsageCell.id, owner: self) as? DriveUsageCell ?? DriveUsageCell()
+            cell.configure(volume)
             return cell
         }
         let cell = tableView.makeView(withIdentifier: .textCell, owner: self) as? TextCell ?? TextCell()
@@ -33,6 +39,10 @@ extension ExplorerTab: NSTableViewDataSource, NSTableViewDelegate {
             if let volume = item.volume { return Format.bytes(volume.total) }
             return (item.size ?? item.folderSize).map(Format.kilobytes) ?? ""
         case .freeColumn: return item.volume.map { Format.bytes($0.free) } ?? ""
+        case .createdColumn: return item.created.map(Format.date.string(from:)) ?? ""
+        case .accessedColumn: return item.accessed.map(Format.date.string(from:)) ?? ""
+        case .extensionColumn: return item.fileExtension
+        case .tagsColumn: return item.shownTags.joined(separator: ", ")
         default: return ""
         }
     }
@@ -97,6 +107,13 @@ extension ExplorerTab: NSCollectionViewDataSource, NSCollectionViewDelegate {
             tile.configure(item, dimmed: FileClipboard.shared.isCut(item.key))
         }
         return tile
+    }
+
+    func collectionView(_ collectionView: NSCollectionView, didEndDisplaying item: NSCollectionViewItem,
+                        forRepresentedObjectAt indexPath: IndexPath) {
+        // Unless it is already shown again elsewhere, with a picture of its own coming.
+        guard collectionView.indexPath(for: item) == nil else { return }
+        (item as? IconItem)?.stopThumbnail()
     }
 
     func collectionView(_ collectionView: NSCollectionView, didSelectItemsAt indexPaths: Set<IndexPath>) {

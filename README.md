@@ -78,6 +78,9 @@ yourself, see [Building](#building).
   - Details shows Name, Date modified, Type and Size (in KB, as Windows
     does), with folders first. A **Status** column appears for iCloud Drive
     items.
+  - **Sort ▾** also offers Date created, Date accessed, File extension and
+    Tags, as Windows does. Sorting by one of them adds its column;
+    right-click the column headers to show or hide those columns.
   - Finder tags show as coloured dots after the name.
 - **Details pane** (⇧⌘P or ⌥P, Alt+P in Windows) on the right:
   - a Quick Look preview of the selected file;
@@ -103,6 +106,17 @@ yourself, see [Building](#building).
   - drag tabs to reorder them; right-click a tab for Duplicate, Move to New
     Window, and Close Others.
 
+- **One pane or two**: the switch at the right of the command bar (▭ ◫,
+  or ⌥⌘1 / ⌥⌘2) puts a second pane beside the tab on screen, as Total
+  Commander has it. Tabs keep working in the first pane; the second keeps
+  its own folder and opens where it was last left. The pane at work has a
+  coloured line along its top; click a pane or press Tab to change.
+  - **Copy to other pane** (⌥F5; F5 still refreshes) and **Move to other
+    pane** (F6), also in the right-click menu.
+  - **Swap panes** (⌘U), **Same folder in other pane**, **Compare panes**
+    (selects, on each side, what the other lacks or has an older copy of)
+    and **Sync panes…** (the two folders in Sync Folders), in the View menu.
+
 When the window gets narrow, the file list gives way first, then the
 details pane, then the navigation pane. Each keeps a usable width, and each
 gets back the width you dragged it to once there is room again.
@@ -122,6 +136,8 @@ gets back the width you dragged it to once there is room again.
 | Ctrl+Shift+N new folder · Alt+Enter properties | ⇧⌘N · ⌥↩ (or ⌘I) |
 | Alt+P preview pane | ⌥P or ⇧⌘P |
 | — | Space: Quick Look · ⇧⌘. hidden files · ⌘K connect to server |
+| Total Commander: Num+ / Num− / Num* | select by pattern (also ⌥⌘A) / deselect / invert |
+| Total Commander: Ctrl+B · Ctrl+M · Tab | ⌃B files in all subfolders · ⌃M rename many (or F2 with several selected) · Tab other pane |
 
 **Quick Open** (⌘P, Go menu) searches pinned folders, the last 50 successfully
 visited folders, open tabs across all windows, and Foldera's commands. Type part
@@ -274,6 +290,29 @@ The archive support is the libarchive that macOS ships (the one behind
 `/usr/bin/tar`), called directly. An opened archive is unpacked once into
 `~/Library/Caches/Foldera/Archives`, which is emptied when Foldera
 starts and quits.
+
+## Tools from Total Commander
+
+- **Select by pattern** (Num+, ⌥⌘A, Edit menu): `*.mp3`, `IMG_2026*`, or
+  several at once, `*.jpg; *.png`. Num− takes matching names out of the
+  selection, Num* inverts it.
+- **Files in all subfolders** (⌃B, View menu): every file of the folder and
+  the folders inside it in one list, with the folder each is in, as Total
+  Commander's branch view. Esc goes back.
+- **Rename many** (⌃M, or F2 with several selected): a pattern made of text
+  and `[N]` name, `[E]` extension, `[C]` counter (start, step, digits),
+  `[D]` date modified and `[P]` folder; find and replace (or a regular
+  expression); lowercase, UPPERCASE or Title Case. Every new name shows
+  before anything is renamed, and nothing is renamed while one would
+  clash. Names can be swapped. ⌘Z undoes all of it.
+- **Checksum** (right-click): copy the SHA-256, write a `.sha256` file in
+  the format `shasum -a 256 -c` checks, or verify the files a `.sha256`
+  file lists.
+- **Compare files**: two selected files (or one in each pane), byte by
+  byte; it says where they first differ.
+- **Drives** in This Mac show a bar of how full they are, red past 90%.
+- **Each folder remembers its layout** (Details, Large icons, Columns), as
+  in Windows; a folder never set opens in the layout on screen.
 
 ## More
 

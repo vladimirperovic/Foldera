@@ -135,6 +135,38 @@ enum Sync {
         ".VolumeIcon.icns", ".apdisk",
     ]
 
+    /// Names a pair never syncs, as its Exclude field lists them, `;` between:
+    /// `node_modules; *.tmp; .git`. A name matches whole, ignoring case; `*`
+    /// and `?` are wildcards. What is excluded is left alone on both sides:
+    /// not compared, copied or deleted, and a folder holding any of it is
+    /// never deleted or replaced as a whole.
+    struct Exclusion {
+        let text: String
+        private let matchers: [(String) -> Bool]
+
+        static let none = Exclusion("")
+
+        init(_ text: String) {
+            self.text = text
+            matchers = text.split(whereSeparator: { $0 == ";" || $0.isNewline })
+                .map { $0.trimmingCharacters(in: .whitespaces) }
+                .filter { !$0.isEmpty }
+                .map(Self.matcher(for:))
+        }
+
+        var isEmpty: Bool { matchers.isEmpty }
+
+        func excludes(_ name: String) -> Bool { matchers.contains { $0(name) } }
+
+        private static func matcher(for pattern: String) -> (String) -> Bool {
+            if pattern.contains("*") || pattern.contains("?") {
+                let predicate = NSPredicate(format: "SELF LIKE[c] %@", pattern)
+                return { predicate.evaluate(with: $0) }
+            }
+            return { $0.caseInsensitiveCompare(pattern) == .orderedSame }
+        }
+    }
+
     // MARK: Reading both sides
 
     /// One folder, read to the bottom.
@@ -149,6 +181,8 @@ enum Sync {
         var targets: [String: String] = [:]
         /// Folders whose contents couldn't be read, and items that couldn't be looked at.
         var unreadable: Set<String> = []
+        /// Items left out by the pair's Exclusion (not what is inside them).
+        var excluded: Set<String> = []
         var problems: [String] = []
 
         func path(_ key: String) -> String { spelled[key] ?? key }
@@ -163,6 +197,8 @@ enum Sync {
         let comparison: Comparison
         /// Names compared ignoring case (see `caseSensitive`).
         var ignoreCase = false
+        /// What the pair leaves alone; the sync and its checks leave it alone too.
+        var exclusion = Exclusion.none
         var leftSide = Listing()
         var rightSide = Listing()
         /// Files of equal size read byte by byte (Content only): key → the same.
@@ -208,8 +244,8 @@ enum Sync {
 
     /// Reads both folders (and for Content, the files that may be the same),
     /// then remembers what is the same on both sides. On any thread.
-    static func compare(_ left: URL, _ right: URL, by comparison: Comparison, cancelled: CancelFlag,
-                        progress: @escaping (String) -> Void = { _ in }) throws -> Scan {
+    static func compare(_ left: URL, _ right: URL, by comparison: Comparison, excluding exclusion: Exclusion = .none,
+                        cancelled: CancelFlag, progress: @escaping (String) -> Void = { _ in }) throws -> Scan {
         // A folder chosen through a symbolic link is read, and synced, where it really is.
         let left = realPath(left).map { URL(fileURLWithPath: $0, isDirectory: true) } ?? left
         let right = realPath(right).map { URL(fileURLWithPath: $0, isDirectory: true) } ?? right
@@ -220,13 +256,13 @@ enum Sync {
             last = Date()
             progress(text())
         }
-        var scan = Scan(left: left, right: right, comparison: comparison, ignoreCase: ignoreCase)
+        var scan = Scan(left: left, right: right, comparison: comparison, ignoreCase: ignoreCase, exclusion: exclusion)
         scan.leftIdentity = identity(of: left)
         scan.rightIdentity = identity(of: right)
-        scan.leftSide = try list(left, ignoreCase: ignoreCase, cancelled: cancelled) {
+        scan.leftSide = try list(left, ignoreCase: ignoreCase, excluding: exclusion, cancelled: cancelled) {
             report("Reading “\(left.lastPathComponent)”… \(Format.items($0))")
         }
-        scan.rightSide = try list(right, ignoreCase: ignoreCase, cancelled: cancelled) {
+        scan.rightSide = try list(right, ignoreCase: ignoreCase, excluding: exclusion, cancelled: cancelled) {
             report("Reading “\(right.lastPathComponent)”… \(Format.items($0))")
         }
         scan.memory = Memory.load(left, right)
@@ -279,8 +315,8 @@ enum Sync {
     }
 
     /// `top`: `root` is one of the two folders synced, where a drive's own folders may be.
-    static func list(_ root: URL, ignoreCase: Bool, top: Bool = true, cancelled: CancelFlag,
-                     found: (Int) -> Void = { _ in }) throws -> Listing {
+    static func list(_ root: URL, ignoreCase: Bool, top: Bool = true, excluding exclusion: Exclusion = .none,
+                     cancelled: CancelFlag, found: (Int) -> Void = { _ in }) throws -> Listing {
         // An unreadable folder must not look empty: that would read as everything deleted.
         _ = try FileManager.default.contentsOfDirectory(atPath: root.path)
         var listing = Listing()
@@ -306,6 +342,11 @@ enum Sync {
                 continue
             }
             let key = ignoreCase ? path.lowercased() : path
+            if exclusion.excludes(url.lastPathComponent) {
+                listing.excluded.insert(key)
+                walker?.skipDescendants()
+                continue
+            }
             guard let values = try? url.resourceValues(forKeys: keySet) else {
                 listing.unreadable.insert(key)
                 listing.problems.append("“\(path)” couldn't be looked at.")
@@ -495,6 +536,14 @@ enum Sync {
             key.lastIndex(of: "/").map { String(key[..<$0]) } ?? ""
         }
 
+        // Folders holding something excluded, however deep: never deleted or
+        // replaced whole, or what is excluded would go with them.
+        var shielded = Set<String>()
+        for key in lefts.excluded.union(rights.excluded) {
+            var above = parent(key)
+            while !above.isEmpty, shielded.insert(above).inserted { above = parent(above) }
+        }
+
         func newer(_ l: Item, _ r: Item) -> Action? {
             if l.modified > r.modified + tolerance { return .toRight }
             if r.modified > l.modified + tolerance { return .toLeft }
@@ -586,9 +635,12 @@ enum Sync {
                 wanted = was.map { (onLeft ? $0.left : $0.right).folder } == true && !inside.actions.contains(copy) ? delete : copy
             }
             if wanted == .none { return (.none, nil, "Only on the right") }
-            if wanted == delete && (inside.unreadable || !inside.actions.isSubset(of: [delete])) {
+            let holdsExcluded = shielded.contains(key)
+            if wanted == delete && (inside.unreadable || holdsExcluded || !inside.actions.isSubset(of: [delete])) {
                 // Something inside stays, so the folder does too.
-                return inside.actions.contains(copy) ? (copy, nil, nil) : (.none, nil, "Some of what is inside stays")
+                if inside.actions.contains(copy) { return (copy, nil, nil) }
+                let onlyExcluded = holdsExcluded && !inside.unreadable && inside.actions.isSubset(of: [delete])
+                return (.none, nil, onlyExcluded ? "Holds excluded items" : "Some of what is inside stays")
             }
             return (wanted, nil, nil)
         }
@@ -619,6 +671,10 @@ enum Sync {
                 // A folder replaced as a whole must hold nothing unread.
                 if let l, let r, l.folder != r.folder, inside.unreadable, decision.action != .none {
                     decision = (.none, nil, "Part of it couldn't be read")
+                }
+                // Nor may a file take the place of a folder holding something excluded.
+                if let l, let r, l.folder != r.folder, shielded.contains(key), decision.action == (l.folder ? Action.toLeft : .toRight) {
+                    decision = (.none, nil, "Holds excluded items")
                 }
             }
             decided[key] = decision
@@ -662,9 +718,11 @@ enum Sync {
             }
             var choices: [Action] = []
             if !unreadable && !(facing && inside.unreadable) {
-                if l != nil { choices.append(.toRight) }
-                if r != nil { choices.append(.toLeft) }
-                let deletable = !inside.unreadable && (whole || l?.folder != true && r?.folder != true)
+                // What would remove a folder holding something excluded isn't offered.
+                let keeps = shielded.contains(key)
+                if l != nil && !(facing && keeps && r?.folder == true) { choices.append(.toRight) }
+                if r != nil && !(facing && keeps && l?.folder == true) { choices.append(.toLeft) }
+                let deletable = !inside.unreadable && !keeps && (whole || l?.folder != true && r?.folder != true)
                 if deletable && r == nil { choices.append(.deleteLeft) }
                 if deletable && l == nil { choices.append(.deleteRight) }
             }
@@ -822,7 +880,8 @@ enum Sync {
                 self.publish(force: true)
             }
             // What the compare left out stays out of a folder copied whole.
-            copier.skips = { Sync.isIgnored($0, atTop: false) }
+            let exclusion = scan.exclusion
+            copier.skips = { Sync.isIgnored($0, atTop: false) || exclusion.excludes($0) }
         }
 
         func cancel() { cancelled.set() }
@@ -885,7 +944,8 @@ enum Sync {
             if !cancelled.isSet {
                 progress.current = "Checking the result…"
                 publish(force: true)
-                outcome.scan = try? Sync.compare(left, right, by: scan.comparison, cancelled: cancelled) { [unowned self] text in
+                outcome.scan = try? Sync.compare(left, right, by: scan.comparison, excluding: scan.exclusion,
+                                                 cancelled: cancelled) { [unowned self] text in
                     self.progress.current = text
                     self.publish(force: false)
                 }
@@ -991,13 +1051,15 @@ enum Sync {
             guard now.folder else { return false }
             let found: Listing
             do {
-                found = try Sync.list(url, ignoreCase: scan.ignoreCase, top: false, cancelled: cancelled)
+                found = try Sync.list(url, ignoreCase: scan.ignoreCase, top: false, excluding: scan.exclusion, cancelled: cancelled)
             } catch is CancellationError {
                 throw CancellationError()
             } catch {
                 return false
             }
-            guard found.unreadable.isEmpty, found.items.count == (onLeft ? row.leftEntries : row.rightEntries) else { return false }
+            // Something excluded put in it since would go with it: then it stays.
+            guard found.unreadable.isEmpty, found.excluded.isEmpty,
+                  found.items.count == (onLeft ? row.leftEntries : row.rightEntries) else { return false }
             return found.items.allSatisfy { key, item in
                 let whole = row.key + "/" + key
                 guard let was = side.items[whole] else { return false }

@@ -213,6 +213,11 @@ before, with their settings.
 
 **Compare** (Enter, ⌘R) lists what would happen; nothing changes until
 **Synchronize**.
+- **Exclude** names that should never sync, with `;` between them:
+  `node_modules; *.tmp; .git`. A name matches whole, ignoring case; `*` and
+  `?` are wildcards. What is excluded is left alone on both sides, and a
+  folder holding any of it is never deleted or replaced as a whole. Each
+  pair remembers its own list.
 - Right-click rows to change them: copy either way, delete, or don't sync.
   Double-click one to see it in Foldera.
 - A folder on one side only is a single row, with what it holds.
@@ -260,8 +265,8 @@ through to the moment between the last look and the change itself, but
 can't close it: don't sync folders that other programs are busy writing to.
 
 What Two way remembers is kept in `~/Library/Application Support/Foldera/Sync`,
-one file per pair, a few dozen bytes per item. There are no filters, no
-detection of moved files and no scheduled syncs yet.
+one file per pair, a few dozen bytes per item. There is no detection of
+moved files and no scheduled syncs yet.
 
 ## Archives: zip, RAR, 7z, tar
 

@@ -604,4 +604,77 @@ private extension Sync.Plan {
         let leftovers = try FileManager.default.contentsOfDirectory(atPath: p.right.path)
         #expect(leftovers == ["a.txt"])
     }
+
+    // MARK: Exclusions
+
+    /// Compare with an Exclude field, then Synchronize.
+    private func sync(_ p: Pair, _ mode: Sync.Mode, excluding text: String) throws -> Sync.Job.Outcome {
+        let scan = try Sync.compare(p.left, p.right, by: .dateAndSize, excluding: Sync.Exclusion(text), cancelled: CancelFlag())
+        return Sync.Job(scan, rows: Sync.plan(scan, mode: mode).rows, permanently: true).perform()
+    }
+
+    @Test func exclusionsMatchWholeNamesAndWildcards() {
+        let exclusion = Sync.Exclusion("node_modules; *.tmp ;git\n.DS_Store")
+        #expect(exclusion.excludes("node_modules") && exclusion.excludes("NODE_MODULES"))
+        #expect(!exclusion.excludes("node_modules2"))
+        #expect(exclusion.excludes("build.TMP") && !exclusion.excludes("tmp"))
+        #expect(exclusion.excludes("git") && !exclusion.excludes("digital"))
+        #expect(Sync.Exclusion(" ; ").isEmpty && !Sync.Exclusion.none.excludes("anything"))
+    }
+
+    @Test func excludedNamesAreLeftAloneOnBothSides() throws {
+        let p = try Pair()
+        try p.file("L/a.txt", "a")
+        try p.file("L/node_modules/left.js")
+        try p.file("R/node_modules/right.js")
+        try p.file("R/cache.tmp")
+        let outcome = try sync(p, .mirror, excluding: "node_modules; *.tmp")
+        #expect(outcome.failures.isEmpty)
+        #expect(p.text("R/a.txt") == "a")
+        #expect(p.exists("R/node_modules/right.js") && !p.exists("R/node_modules/left.js"))
+        #expect(p.exists("R/cache.tmp"))
+    }
+
+    @Test func aFolderHoldingSomethingExcludedIsNotDeletedWhole() throws {
+        let p = try Pair()
+        try p.file("R/Old/a.txt")
+        try p.file("R/Old/cache.tmp")
+        try p.file("R/Only excluded/b.tmp")
+        let outcome = try sync(p, .mirror, excluding: "*.tmp")
+        #expect(outcome.failures.isEmpty)
+        #expect(!p.exists("R/Old/a.txt"))
+        #expect(p.exists("R/Old/cache.tmp") && p.exists("R/Only excluded/b.tmp"))
+    }
+
+    @Test func aFolderCopiedWholeLeavesExcludedNamesOut() throws {
+        let p = try Pair()
+        try p.file("L/Project/src.txt", "src")
+        try p.file("L/Project/node_modules/lib.js")
+        try p.file("L/Project/deep/node_modules/other.js")
+        let outcome = try sync(p, .mirror, excluding: "node_modules")
+        #expect(outcome.failures.isEmpty)
+        #expect(p.text("R/Project/src.txt") == "src")
+        #expect(!p.exists("R/Project/node_modules") && !p.exists("R/Project/deep/node_modules"))
+    }
+
+    @Test func aFileDoesNotReplaceAFolderHoldingSomethingExcluded() throws {
+        let p = try Pair()
+        try p.file("L/thing", "a file")
+        try p.file("R/thing/keep.tmp")
+        let scan = try Sync.compare(p.left, p.right, by: .dateAndSize, excluding: Sync.Exclusion("*.tmp"), cancelled: CancelFlag())
+        let row = Sync.plan(scan, mode: .mirror).row("thing")
+        #expect(row?.action == Sync.Action.none)
+        #expect(row?.choices.contains(.toRight) == false)
+        _ = try sync(p, .mirror, excluding: "*.tmp")
+        #expect(p.exists("R/thing/keep.tmp"))
+    }
+
+    @Test func syncSetupsSavedBeforeExclusionsStillLoad() throws {
+        let json = #"[{"left":"/a","right":"/b","mode":"mirror","comparison":"content","permanently":true}]"#
+        let setups = try JSONDecoder().decode([SyncWindow.Setup].self, from: Data(json.utf8))
+        #expect(setups.count == 1 && setups[0].mode == .mirror && setups[0].permanently && setups[0].excludes.isEmpty)
+        let again = try JSONDecoder().decode([SyncWindow.Setup].self, from: try JSONEncoder().encode(
+            [SyncWindow.Setup(left: "/a", right: "/b", excludes: "*.tmp")]))
+        #expect(again[0].excludes == "*.tmp")
+    }
 }

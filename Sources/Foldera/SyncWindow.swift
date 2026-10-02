@@ -13,6 +13,8 @@ final class SyncWindow: NSWindowController, NSWindowDelegate, NSTableViewDataSou
         var mode = Sync.Mode.twoWay
         var comparison = Sync.Comparison.dateAndSize
         var permanently = false
+        /// Names never synced (see `Sync.Exclusion`).
+        var excludes = ""
 
         /// The same two folders, whichever side each is on.
         func isPair(_ other: Setup) -> Bool {
@@ -44,6 +46,7 @@ final class SyncWindow: NSWindowController, NSWindowDelegate, NSTableViewDataSou
     private let explanation = NSTextField(labelWithString: "")
     private let comparePopup = NSPopUpButton()
     private let removalPopup = NSPopUpButton()
+    private let excludeField = NSTextField()
     private let table = NSTableView()
     private let emptyLabel = NSTextField(labelWithString: "")
     private let summary = NSTextField(labelWithString: "")
@@ -172,6 +175,17 @@ final class SyncWindow: NSWindowController, NSWindowDelegate, NSTableViewDataSou
         options.setViews([modeControl], in: .leading)
         options.setViews([comparePopup, removalPopup], in: .trailing)
 
+        excludeField.placeholderString = "node_modules; *.tmp; .git"
+        excludeField.toolTip = "Names never synced, with ; between them. * and ? are wildcards. "
+            + "What is excluded is left alone on both sides, and a folder holding any of it is never deleted whole."
+        excludeField.delegate = self
+        excludeField.cell?.usesSingleLineMode = true
+        excludeField.lineBreakMode = .byTruncatingTail
+        excludeField.setContentHuggingPriority(.defaultLow, for: .horizontal)
+        let excludeLabel = NSTextField(labelWithString: "Exclude:")
+        let filters = NSStackView(views: [excludeLabel, excludeField])
+        filters.spacing = 8
+
         explanation.font = .systemFont(ofSize: NSFont.smallSystemFontSize)
         explanation.textColor = .secondaryLabelColor
         explanation.lineBreakMode = .byTruncatingTail
@@ -225,11 +239,11 @@ final class SyncWindow: NSWindowController, NSWindowDelegate, NSTableViewDataSou
         bottom.setViews([summary], in: .leading)
         bottom.setViews([spinner, compareButton, syncButton], in: .trailing)
 
-        let stack = NSStackView(views: [paths, options, explanation, scroll, bottom])
+        let stack = NSStackView(views: [paths, options, filters, explanation, scroll, bottom])
         stack.orientation = .vertical
         stack.alignment = .leading
         stack.spacing = 10
-        stack.setCustomSpacing(6, after: options)
+        stack.setCustomSpacing(6, after: filters)
         stack.edgeInsets = NSEdgeInsets(top: 16, left: 20, bottom: 16, right: 20)
         stack.translatesAutoresizingMaskIntoConstraints = false
         content.addSubview(stack)
@@ -245,7 +259,7 @@ final class SyncWindow: NSWindowController, NSWindowDelegate, NSTableViewDataSou
             emptyLabel.centerYAnchor.constraint(equalTo: scroll.centerYAnchor),
             emptyLabel.widthAnchor.constraint(lessThanOrEqualTo: scroll.widthAnchor, constant: -40),
         ]
-        for view in [paths, options, explanation, scroll, bottom] {
+        for view in [paths, options, filters, explanation, scroll, bottom] {
             constraints.append(view.widthAnchor.constraint(equalTo: stack.widthAnchor, constant: -40))
         }
         NSLayoutConstraint.activate(constraints)
@@ -259,12 +273,15 @@ final class SyncWindow: NSWindowController, NSWindowDelegate, NSTableViewDataSou
 
     private var setup: Setup {
         Setup(left: leftField.url?.key ?? "", right: rightField.url?.key ?? "",
-              mode: mode, comparison: comparison, permanently: permanently)
+              mode: mode, comparison: comparison, permanently: permanently, excludes: excludeField.stringValue)
     }
+
+    private var exclusion: Sync.Exclusion { Sync.Exclusion(excludeField.stringValue) }
 
     private func apply(_ setup: Setup) {
         leftField.url = setup.left.isEmpty ? nil : URL(fileURLWithPath: setup.left)
         rightField.url = setup.right.isEmpty ? nil : URL(fileURLWithPath: setup.right)
+        excludeField.stringValue = setup.excludes
         modeControl.selectedSegment = Sync.Mode.allCases.firstIndex(of: setup.mode) ?? 0
         comparePopup.selectItem(at: Sync.Comparison.allCases.firstIndex(of: setup.comparison) ?? 0)
         removalPopup.selectItem(at: setup.permanently ? 1 : 0)
@@ -391,10 +408,10 @@ final class SyncWindow: NSWindowController, NSWindowDelegate, NSTableViewDataSou
         guard !syncing, let (left, right) = pair() else { return }
         Setup.remember(setup)
         result = nil
-        runCompare(left, right, by: comparison)
+        runCompare(left, right, by: comparison, excluding: exclusion)
     }
 
-    private func runCompare(_ left: URL, _ right: URL, by comparison: Sync.Comparison) {
+    private func runCompare(_ left: URL, _ right: URL, by comparison: Sync.Comparison, excluding exclusion: Sync.Exclusion) {
         let flag = CancelFlag()
         comparing = flag
         scan = nil
@@ -404,7 +421,7 @@ final class SyncWindow: NSWindowController, NSWindowDelegate, NSTableViewDataSou
         updateControls()
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             let found = Result {
-                try Sync.compare(left, right, by: comparison, cancelled: flag) { text in
+                try Sync.compare(left, right, by: comparison, excluding: exclusion, cancelled: flag) { text in
                     DispatchQueue.main.async {
                         guard let self, self.comparing === flag else { return }
                         self.summary.stringValue = text
@@ -497,7 +514,7 @@ final class SyncWindow: NSWindowController, NSWindowDelegate, NSTableViewDataSou
                 self.table.reloadData()
                 self.updateSummary()
             } else {
-                self.runCompare(scan.left, scan.right, by: scan.comparison)
+                self.runCompare(scan.left, scan.right, by: scan.comparison, excluding: scan.exclusion)
             }
             self.updateControls()
         })
@@ -562,7 +579,7 @@ final class SyncWindow: NSWindowController, NSWindowDelegate, NSTableViewDataSou
         compareButton.isEnabled = !syncing && (comparing != nil || (leftField.url != nil && rightField.url != nil))
         syncButton.isEnabled = idle && scan != nil && planShown == planWanted && plan.rows.contains { $0.action != .none }
         // While a sync runs, the window shows the settings it runs with.
-        for control in [leftField, rightField, chooseLeft, chooseRight, swapButton, recentButton, comparePopup,
+        for control in [leftField, rightField, chooseLeft, chooseRight, swapButton, recentButton, comparePopup, excludeField,
                         modeControl, removalPopup] as [NSControl] {
             control.isEnabled = idle
         }
@@ -761,6 +778,20 @@ final class SyncWindow: NSWindowController, NSWindowDelegate, NSTableViewDataSou
         comparing?.set()
         comparing = nil
         Self.open.removeAll { $0 === self }
+    }
+}
+
+extension SyncWindow.Setup {
+    /// Pairs saved before a setting existed keep the rest of theirs.
+    init(from decoder: Decoder) throws {
+        let values = try decoder.container(keyedBy: CodingKeys.self)
+        self.init()
+        left = try values.decodeIfPresent(String.self, forKey: .left) ?? left
+        right = try values.decodeIfPresent(String.self, forKey: .right) ?? right
+        mode = try values.decodeIfPresent(Sync.Mode.self, forKey: .mode) ?? mode
+        comparison = try values.decodeIfPresent(Sync.Comparison.self, forKey: .comparison) ?? comparison
+        permanently = try values.decodeIfPresent(Bool.self, forKey: .permanently) ?? permanently
+        excludes = try values.decodeIfPresent(String.self, forKey: .excludes) ?? excludes
     }
 }
 

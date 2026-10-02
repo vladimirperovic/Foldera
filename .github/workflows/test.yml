@@ -17,6 +17,27 @@ jobs:
           sudo xcode-select -s "$(ls -d /Applications/Xcode_*.app | sort -V | tail -1)"
           swift --version
       - name: Build
-        run: swift build
+        run: swift build --build-tests
       - name: Test
-        run: ./test.sh
+        # A test that hangs shouldn't hold the run for half an hour: after ten
+        # minutes the test process's threads are printed, and it is stopped.
+        run: |
+          ./test.sh > test.log 2>&1 &
+          pid=$!
+          for _ in $(seq 1 120); do
+            sleep 5
+            kill -0 "$pid" 2>/dev/null || break
+          done
+          if kill -0 "$pid" 2>/dev/null; then
+            cat test.log
+            echo "::error::The tests were still running after ten minutes."
+            for p in $(pgrep -f "PackageTests|swiftpm-testing-helper|xctest"); do
+              echo "===== $p: $(ps -o command= -p "$p")"
+              sample "$p" 2 2>/dev/null | head -400
+            done
+            kill "$pid"
+            exit 1
+          fi
+          wait "$pid" && status=0 || status=$?
+          cat test.log
+          exit "$status"

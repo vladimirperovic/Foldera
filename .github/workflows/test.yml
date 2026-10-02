@@ -23,6 +23,12 @@ jobs:
           swift --version
       - name: Build
         run: swift build --build-tests
+      - name: A second, case-sensitive volume
+        # For the tests that move across drives and rename on a drive that tells case apart.
+        run: |
+          hdiutil create -size 512m -fs "Case-sensitive APFS" -volname FolderaTest "$RUNNER_TEMP/foldera-test.dmg"
+          hdiutil attach "$RUNNER_TEMP/foldera-test.dmg"
+          echo "FOLDERA_TEST_VOLUME=/Volumes/FolderaTest" >> "$GITHUB_ENV"
       - name: Test
         # A test that hangs shouldn't hold the run for half an hour: after ten
         # minutes the test process's threads are printed, and it is stopped.

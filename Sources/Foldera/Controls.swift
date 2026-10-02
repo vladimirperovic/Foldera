@@ -17,7 +17,9 @@ func tinted(_ image: NSImage, _ color: NSColor) -> NSImage {
 /// A flat button in the Windows 11 manner: an icon and/or a word, with a soft
 /// highlight only while the pointer is over it.
 final class ToolButton: NSView {
-    var target: AnyObject?
+    /// Weak, as NSControl's is: the target owns the view the button is in,
+    /// and a strong one kept every closed tab alive.
+    weak var target: AnyObject?
     var action: Selector?
     var index = 0
     var isEnabled = true { didSet { if oldValue != isEnabled { needsDisplay = true } } }

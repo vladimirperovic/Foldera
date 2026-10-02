@@ -1,4 +1,4 @@
-import Foundation
+import AppKit
 import Testing
 @testable import Foldera
 
@@ -30,6 +30,17 @@ private final class Bench {
 }
 
 @Suite @MainActor struct Tools {
+    @Test func aClosedTabIsFreed() {
+        _ = NSApplication.shared
+        weak var freed: ExplorerTab?
+        autoreleasepool {
+            let tab = ExplorerTab(location: .thisMac)
+            freed = tab
+            tab.tearDown()
+        }
+        #expect(freed == nil)
+    }
+
     @Test func patternsSelectByWildcardsAndWords() throws {
         let p = try Bench()
         for name in ["song.mp3", "Song2.MP3", "photo.jpg", "notes"] { try p.file(name) }

@@ -385,6 +385,20 @@ final class TreeCopier {
             throw OpError("There is already an item named “\(to.lastPathComponent)”.")
         }
         try whileReading(from) { try copyNow($0, to: to) }
+        removeSkipped(in: to)
+    }
+
+    /// copyfile leaves out a file it is told to skip, but a folder it is told
+    /// to skip may still be made. What the copy left of one is taken out
+    /// again; all of it is new, since the copy made `folder` itself.
+    private func removeSkipped(in folder: URL) {
+        guard let skips, (try? folder.resourceValues(forKeys: [.isDirectoryKey]))?.isDirectory == true else { return }
+        let walker = FileManager.default.enumerator(at: folder, includingPropertiesForKeys: nil, options: [])
+        while let url = walker?.nextObject() as? URL {
+            guard skips(url.lastPathComponent) else { continue }
+            walker?.skipDescendants()
+            try? FileManager.default.removeItem(at: url)
+        }
     }
 
     /// Runs `body` on this thread as a coordinated reader of `url`, the way

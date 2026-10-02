@@ -421,7 +421,13 @@ final class LocalPictures: NSObject, WKURLSchemeHandler {
 
     /// The file an address in the page stands for, if it is inside what is served.
     func file(for url: URL) -> URL? {
-        let file = root.appendingPathComponent(String(url.path.drop { $0 == "/" })).standardizedFileURL
+        // `..` past the top stays at the top, as a browser's address would;
+        // older macOS keeps such a `..` in the URL's path.
+        var parts: [Substring] = []
+        for part in url.path.split(separator: "/") where part != "." {
+            if part == ".." { _ = parts.popLast() } else { parts.append(part) }
+        }
+        let file = root.appendingPathComponent(parts.joined(separator: "/")).standardizedFileURL
         let top = root.resolvingSymlinksInPath().path
         // A name that isn't there resolves no links on older macOS (/var stays
         // /var, not /private/var); its folder, which is there, does.

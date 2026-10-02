@@ -102,6 +102,9 @@ enum FileUndo {
 
     private static func isSlow(_ change: Change) -> Bool {
         guard case let .moved(from, to) = change else { return false }
+        // A rename within one folder never copies, even when one of its names
+        // is only there at another step (Rename Many goes by temporary names).
+        if from.deletingLastPathComponent().key == to.deletingLastPathComponent().key { return false }
         return !DragOps.sameVolume(to, from.deletingLastPathComponent())
     }
 

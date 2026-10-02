@@ -146,6 +146,12 @@ enum FileOps {
 
     static func report(_ failures: [String]) {
         guard !failures.isEmpty else { return }
+        // Without a running app (the tests) there is nobody to press OK, and
+        // a modal alert would wait forever.
+        guard NSApplication.shared.isRunning else {
+            failures.forEach { FileHandle.standardError.write(Data(("Foldera: " + $0 + "\n").utf8)) }
+            return
+        }
         let alert = NSAlert()
         alert.alertStyle = .warning
         alert.messageText = failures.count == 1 ? "An item couldn't be processed." : "\(failures.count) items couldn't be processed."

@@ -423,7 +423,11 @@ final class LocalPictures: NSObject, WKURLSchemeHandler {
     func file(for url: URL) -> URL? {
         let file = root.appendingPathComponent(String(url.path.drop { $0 == "/" })).standardizedFileURL
         let top = root.resolvingSymlinksInPath().path
-        let real = file.resolvingSymlinksInPath().path
+        // A name that isn't there resolves no links on older macOS (/var stays
+        // /var, not /private/var); its folder, which is there, does.
+        let real = FileOps.exists(file)
+            ? file.resolvingSymlinksInPath().path
+            : file.deletingLastPathComponent().resolvingSymlinksInPath().appendingPathComponent(file.lastPathComponent).path
         return real.hasPrefix(top == "/" ? "/" : top + "/") ? file : nil
     }
 

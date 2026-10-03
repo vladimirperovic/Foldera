@@ -31,6 +31,7 @@ private final class SyncFixture {
     }
 }
 
+extension SyncTestIsolation {
 @Suite(.serialized) struct SyncAutomation {
     @Test func twoWayConflictAfterACompletedSyncIsLoggedUntilManuallyResolved() throws {
         let p = try SyncFixture()
@@ -89,6 +90,7 @@ private final class SyncFixture {
         profile.setup.comparison = .content
         profile.setup.mode = .mirror
         profile.setup.permanently = true
+        profile.setup.excludes = "*.tmp; node_modules"
         let saved = try SyncLibrary.save(profile)
         #expect(try SyncLibrary.profiles() == [saved])
         var renamed = saved
@@ -133,6 +135,27 @@ private final class SyncFixture {
         #expect(try SyncLibrary.profiles().first?.nextRun ?? .distantPast > now)
         try SyncScheduler.runDue(now: now)
         #expect(try SyncLibrary.records().count == 1)
+    }
+
+    @Test func scheduledSyncUsesTheSavedExclusionsInEitherDirection() throws {
+        for towardLeft in [false, true] {
+            let p = try SyncFixture()
+            var profile = p.profile()
+            profile.setup.towardLeft = towardLeft
+            profile.setup.excludes = "*.tmp; node_modules"
+            let source = towardLeft ? p.right : p.left
+            let target = towardLeft ? p.left : p.right
+            try p.file(source, "copy.txt", "copy")
+            try p.file(source, "skip.tmp", "skip")
+            try FileManager.default.createDirectory(at: source.appendingPathComponent("node_modules"), withIntermediateDirectories: true)
+            try p.file(source.appendingPathComponent("node_modules"), "skip.js")
+            try SyncLibrary.save(profile)
+            try SyncScheduler.runDue()
+            #expect(try String(contentsOf: target.appendingPathComponent("copy.txt"), encoding: .utf8) == "copy")
+            #expect(!FileOps.exists(target.appendingPathComponent("skip.tmp")))
+            #expect(!FileOps.exists(target.appendingPathComponent("node_modules")))
+            #expect(try SyncLibrary.records().first?.status == .success)
+        }
     }
 
     @Test func disabledFutureOrDeletedProfilesDoNotRun() throws {
@@ -226,8 +249,11 @@ private final class SyncFixture {
         try p.file(p.left, "new.txt")
         try SyncLibrary.save(p.profile())
         let package = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+        let configuration = _isDebugAssertConfiguration() ? "Debug" : "Release"
         let candidates = Bundle.allBundles.map { $0.bundleURL.deletingLastPathComponent().appendingPathComponent("Foldera") }
-            + [package.appendingPathComponent(".build/native-pane-tests/debug/Foldera"), package.appendingPathComponent(".build/debug/Foldera")]
+            + [package.appendingPathComponent(".build/native-pane-tests/\(configuration.lowercased())/Foldera"),
+               package.appendingPathComponent(".build/\(configuration.lowercased())/Foldera"),
+               package.appendingPathComponent(".build/out/Products/\(configuration)/Foldera")]
         let binary = try #require(candidates.first { FileManager.default.isExecutableFile(atPath: $0.path) })
         func run() throws {
             let process = Process()
@@ -275,4 +301,6 @@ private final class SyncFixture {
         #expect(try SyncLibrary.records().first?.status == .failed)
         #expect(!FileManager.default.fileExists(atPath: p.right.appendingPathComponent("changed.txt").path))
     }
+}
+
 }

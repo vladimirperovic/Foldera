@@ -32,6 +32,14 @@ private final class Place {
 }
 
 @Suite(.serialized) @MainActor struct AuditFixes {
+    @Test func quittingNeverTerminatesUnfinishedWorkAtTheCancellationDeadline() {
+        #expect(AppDelegate.quitReply(working: true, elapsed: 29.9) == nil)
+        #expect(AppDelegate.quitReply(working: true, elapsed: 30) == false)
+        #expect(AppDelegate.quitReply(working: true, elapsed: 120) == false)
+        #expect(AppDelegate.quitReply(working: false, elapsed: 0) == true)
+        #expect(AppDelegate.quitReply(working: false, elapsed: 120) == true)
+    }
+
     @Test func aFailedArchiveNeverRemovesAFileItDidntMake() throws {
         let p = try Place()
         let source = try p.file("document.txt", "source")

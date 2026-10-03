@@ -18,7 +18,8 @@ enum SyncScheduler {
                                             setup: profile.setup, started: Date(), automatic: true)
             do {
                 let (left, right) = try folders(profile.setup)
-                let scan = try Sync.compare(left, right, by: profile.setup.comparison, cancelled: cancelled)
+                let scan = try Sync.compare(left, right, by: profile.setup.comparison,
+                                            excluding: Sync.Exclusion(profile.setup.excludes), cancelled: cancelled)
                 let plan = Sync.plan(scan, mode: profile.setup.mode, towardLeft: profile.setup.towardLeft ?? false)
                 record.conflicts = plan.rows.filter { $0.action == .none && $0.conflict != nil }.count
                 var reasons = scan.problems + plan.worries(scan)

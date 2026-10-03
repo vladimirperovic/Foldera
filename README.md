@@ -4,7 +4,7 @@
 
 <p align="center">
 A small file manager for the Mac that works like Windows Explorer.<br>
-Native Swift and AppKit, no dependencies, about 1.5 MB.
+Native Swift and AppKit, no dependencies, about 2.3 MB.
 </p>
 
 > [!WARNING]
@@ -254,6 +254,11 @@ only when a schedule is enabled. No schedule is enabled by default.
 
 **Compare** (Enter, ⌘R) lists what would happen; nothing changes until
 **Synchronize**.
+- **Exclude** names that should never sync, with `;` between them:
+  `node_modules; *.tmp; .git`. A name matches whole, ignoring case; `*` and
+  `?` are wildcards. What is excluded is left alone on both sides, and a
+  folder holding any of it is never deleted or replaced as a whole. Each
+  pair remembers its own list.
 - Right-click rows to change them: copy either way, delete, or don't sync.
   Double-click one to see it in Foldera.
 - A folder on one side only is a single row, with what it holds.
@@ -263,6 +268,9 @@ only when a schedule is enabled. No schedule is enabled by default.
   for big folders.
 - A symbolic link is the same as another when it points to the same place,
   whichever comparison; a link and a file are never the same.
+  Two way remembers the link's destination, so changing it is detected even
+  when the size and date stay the same. Older history without that destination
+  shows a conflict until the two links are compared equal again.
 - By date and size, a file edited without its size or date changing looks
   unchanged, as in FreeFileSync. *Compare content* remembers what the files
   held (a SHA-256 of each), so Two way sees such an edit too. Where it has
@@ -294,15 +302,16 @@ What keeps it careful:
   `.Spotlight-V100`…) are never synced, also inside a folder copied whole.
   Symbolic links are copied as links.
 - Quitting while a sync, copy or archive is still going asks first, stops
-  it and lets it clean up.
+  it and lets it clean up. If stopping takes more than 30 seconds, quitting
+  is cancelled so the unfinished work can finish safely.
 
 The checks shrink the time in which another program's change could slip
 through to the moment between the last look and the change itself, but
 can't close it: don't sync folders that other programs are busy writing to.
 
 What Two way remembers is kept in `~/Library/Application Support/Foldera/Sync`,
-one file per pair, a few dozen bytes per item. Custom exclusion rules and
-detection of moved files are not supported yet.
+one file per pair, a few dozen bytes per item. Detection of moved files
+is not supported yet.
 
 ## Archives: zip, RAR, 7z, tar
 
@@ -440,8 +449,10 @@ Protected folders (Desktop, Documents, Downloads) ask for permission the
 first time. Every new build gets a new ad-hoc signature, so macOS asks
 again after each rebuild. Full Disk Access for Foldera stops the prompts.
 
-`Foldera --snapshot <folder|image> out.png [--icons|--columns] [--pane]
+`Foldera --snapshot <folder|thismac|image> out.png [--icons|--columns|--usage] [--pane]
 [--light|--dark] [--size WxH] [--tabs count] [--search text] [--select name] [--press keys]
+[--iconsize points] [--act newfolder|cut|properties|quickopen|commands] [--query text]
+[--press-delay seconds] [--wait seconds] [--capture properties|viewer|sheet]
 [--two-panes other-folder]
 [--right-tabs count]
 [--sync other-folder [--mode twoWay|mirror|update] [--sync-left] [--sync-empty]]

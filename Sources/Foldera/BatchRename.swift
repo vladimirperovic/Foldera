@@ -146,7 +146,9 @@ enum BatchRename {
     /// the batch is giving up, every item goes by way of a temporary name,
     /// so swaps work. An item whose second step fails gets its old name back.
     static func perform(_ rows: [Row]) -> (changes: [Change], failures: [String]) {
-        let moving = rows.filter { $0.changes && $0.problem == nil }
+        let problems = rows.compactMap { row in row.problem.map { "“\(row.item.name)”: \($0)" } }
+        guard problems.isEmpty else { return ([], problems) }
+        let moving = rows.filter { $0.changes }
         let sources = Set(moving.map { $0.item.key.lowercased() })
         let viaTemporary = moving.contains {
             let key = $0.target.key.lowercased()

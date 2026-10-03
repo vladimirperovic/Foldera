@@ -1,4 +1,4 @@
-import Foundation
+import AppKit
 import Testing
 @testable import Foldera
 
@@ -30,6 +30,17 @@ private final class Bench {
 }
 
 @Suite @MainActor struct Tools {
+    @Test func aClosedTabIsFreed() {
+        _ = NSApplication.shared
+        weak var freed: ExplorerTab?
+        autoreleasepool {
+            let tab = ExplorerTab(location: .thisMac)
+            freed = tab
+            tab.tearDown()
+        }
+        #expect(freed == nil)
+    }
+
     @Test func patternsSelectByWildcardsAndWords() throws {
         let p = try Bench()
         for name in ["song.mp3", "Song2.MP3", "photo.jpg", "notes"] { try p.file(name) }
@@ -145,6 +156,18 @@ private final class Bench {
         undo.endUndoGrouping()
         undo.undo()
         #expect(p.text("a.txt") == "A" && p.text("b.txt") == "B")
+    }
+
+    @Test func renamingManyRejectsTheWholeBatchWhenOneRowHasAProblem() throws {
+        let p = try Bench()
+        try p.file("a.txt", "A")
+        try p.file("b.txt", "B")
+        let items = try p.items()
+        let rows = [BatchRename.Row(item: items[0], newName: "renamed.txt"),
+                    BatchRename.Row(item: items[1], newName: "a.txt", problem: "Another selected item keeps this name")]
+        let (changes, failures) = BatchRename.perform(rows)
+        #expect(changes.isEmpty && failures.count == 1)
+        #expect(p.text("a.txt") == "A" && p.text("b.txt") == "B" && p.text("renamed.txt") == nil)
     }
 
     @Test func renamingManyRefusesNamesThatClash() throws {

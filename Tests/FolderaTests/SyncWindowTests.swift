@@ -2,6 +2,7 @@ import AppKit
 import Testing
 @testable import Foldera
 
+extension SyncTestIsolation {
 @Suite(.serialized) @MainActor struct SyncScreen {
     private func waitUntil(_ condition: () -> Bool) async throws {
         for _ in 0..<250 {
@@ -98,7 +99,8 @@ import Testing
         let prefs = UserDefaults.standard
         let recent = prefs.object(forKey: "syncRecent")
         let frame = prefs.object(forKey: "NSWindow Frame SyncWindow")
-        let setup = SyncWindow.Setup(left: left.path, right: right.path, mode: .update, towardLeft: true)
+        try "excluded".write(to: right.appendingPathComponent("skip.tmp"), atomically: false, encoding: .utf8)
+        let setup = SyncWindow.Setup(left: left.path, right: right.path, mode: .update, towardLeft: true, excludes: "*.tmp")
         var profile = SyncLibrary.Profile(name: "Test backup", setup: setup, schedule: .init(frequency: .daily), pausedReason: "Review the previous run")
         profile = try SyncLibrary.save(profile)
         let sync = SyncWindow(.init())
@@ -120,6 +122,7 @@ import Testing
         sync.synchronize(nil)
         try await waitUntil { !sync.isSynchronizing && !sync.canSynchronize }
         #expect(try String(contentsOf: left.appendingPathComponent("right.txt"), encoding: .utf8) == "right")
+        #expect(!fm.fileExists(atPath: left.appendingPathComponent("skip.tmp").path))
         #expect(try SyncLibrary.profiles().first?.pausedReason == nil)
         #expect(try SyncLibrary.profiles().first?.nextRun != nil)
         #expect(try SyncLibrary.records().first?.profileID == profile.id)
@@ -166,4 +169,6 @@ import Testing
         let syncMenu = try #require(MainMenu.build().item(withTitle: "Sync")?.submenu)
         #expect(syncMenu.items.first?.action == #selector(ExplorerTab.openSync(_:)))
     }
+}
+
 }

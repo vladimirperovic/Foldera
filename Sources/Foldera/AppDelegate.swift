@@ -72,14 +72,27 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         return .terminateLater
     }
 
-    /// Quits once the stopped work has wound down (or, should something
-    /// hang, after half a minute anyway).
+    /// A stalled cancellation must not force the process to exit mid-operation.
     private func quitWhenIdle(since start: Date) {
-        if (ProgressWindow.anyRunning || FileUndo.manager.isBusy) && Date().timeIntervalSince(start) < 30 {
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) { self.quitWhenIdle(since: start) }
+        let working = ProgressWindow.anyRunning || FileUndo.manager.isBusy
+        if let reply = Self.quitReply(working: working, elapsed: Date().timeIntervalSince(start)) {
+            NSApp.reply(toApplicationShouldTerminate: reply)
+            if !reply {
+                let alert = NSAlert()
+                alert.messageText = "Foldera is still stopping work on files."
+                alert.informativeText = "Quitting was cancelled so unfinished work can finish safely. Try quitting again once it stops."
+                alert.addButton(withTitle: "OK")
+                alert.runModal()
+            }
         } else {
-            NSApp.reply(toApplicationShouldTerminate: true)
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) { self.quitWhenIdle(since: start) }
         }
+    }
+
+    /// nil waits, true finishes quitting, false keeps unfinished work alive.
+    static func quitReply(working: Bool, elapsed: TimeInterval) -> Bool? {
+        guard working else { return true }
+        return elapsed < 30 ? nil : false
     }
 
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
@@ -283,9 +296,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
 
     // MARK: Screenshots for development
 
-    /// `Foldera --snapshot <folder|thismac|image> <out.png> [--icons|--columns] [--pane] [--dark|--light] [--search text]
-    /// [--select name] [--tabs count] [--act newfolder|cut|properties|quickopen|commands] [--query text]
-    /// [--press token,token…] [--press-delay seconds] [--capture properties|viewer|sheet]`
+    /// See README for `Foldera --snapshot <folder|thismac|image> <out.png>` options.
     /// renders one window to a PNG and quits. `--press` sends real key events
     /// through the event queue, the way typing would: a number is a key code,
     /// anything else is typed as characters. An image as the target opens the viewer.

@@ -108,9 +108,13 @@ yourself, see [Building](#building).
 
 - **One pane or two**: the switch at the right of the command bar (▭ ◫,
   or ⌥⌘1 / ⌥⌘2) puts a second pane beside the tab on screen, as Total
-  Commander has it. Tabs keep working in the first pane; the second keeps
-  its own folder and opens where it was last left. The pane at work has a
+  Commander has it. Each pane has its own tabs and folder tree; the second
+  opens where it was last left. The pane at work has a
   coloured line along its top; click a pane or press Tab to change.
+  - The **Sync** icon in the command bar and **Sync › Sync Folders…**
+    (⌥⌘S) open a separate sync window with the two displayed folders.
+    Each side lists its relative paths, sizes and dates, with planned actions
+    between them. Browsing stays available while the Sync window is open.
   - **Copy to other pane** (⌥F5; F5 still refreshes) and **Move to other
     pane** (F6), also in the right-click menu.
   - **Swap panes** (⌘U), **Same folder in other pane**, **Compare panes**
@@ -192,11 +196,48 @@ For animated or multi-frame images it reads the first frame.
 
 ## Sync folders
 
-**File › Sync Folders…** keeps two folders in step, as
+The **Sync** toolbar icon, **Sync › Sync Folders…** (⌥⌘S), and
+**File › Sync Folders…** open a separate window to keep two folders in step, as
 [FreeFileSync](https://freefilesync.org) does. Right-click a folder →
 *Sync with…*, or two selected folders → *Sync these folders…*, to start
 from those. The clock button at the top right brings back pairs synced
-before, with their settings.
+before, with their settings. Choose or drop each folder at the top.
+**Compare** and **Synchronize** sit above the folder paths; the dropdown
+beside Synchronize chooses **Mirror**, **Update** or **Two way**.
+The centre arrow reverses Mirror and Update without swapping the folders.
+The table keeps both sides and their actions aligned while scrolling.
+
+**Profiles and schedules**
+
+- **Save Profile…** gives the current folder pair and settings a name. Pick
+  it in the top-left dropdown or **Sync › Saved Profiles** to open it again.
+  **Save Changes** updates the selected profile; choose *Current folders
+  (unsaved)* to save another. The dropdown also offers rename and delete.
+- **Schedule…** runs a saved profile every hour, daily at a chosen local time,
+  or weekly on a chosen day. Save changed settings before editing a schedule.
+  Choose **Off** to stop it. A paused schedule can be resumed by saving its
+  schedule again, or by resolving the issue with a successful manual sync.
+- Schedules use a user LaunchAgent and run even when Foldera is closed,
+  while the user is logged in. The scheduler checks once a minute. After
+  sleep or login it runs overdue profiles once, without replaying a backlog.
+  Unavailable folders produce a history entry and are retried at the next
+  scheduled time. Conflicts, unreadable items, large replacements/deletions,
+  and permanent removals pause the schedule for manual review. Manual and
+  scheduled runs cannot overlap.
+- The preview filters show **Copy**, **Replace**, **Delete**, **Conflicts**
+  or **Skipped** rows. They change the view only: Synchronize still uses the
+  entire plan. The displayed count makes this explicit.
+- **History…**, also under **Sync › Sync History…**, shows the 200 most recent
+  manual and scheduled runs. Select a run for its folders, settings, times,
+  copied/deleted items and errors. **Open Sync** opens those settings for
+  review; **Refresh** picks up new background runs.
+  A manual run that leaves unresolved conflicts is marked **Needs review**,
+  with the conflict count and the actions that finished.
+
+Profiles and full history are stored in
+`~/Library/Application Support/Foldera/SyncLibrary`.
+The background service is `com.vladimirperovic.foldera.sync`, registered
+only when a schedule is enabled. No schedule is enabled by default.
 
 - **Two way** (⇄): what changed on either side is copied to the other,
   deletions included. Foldera remembers what both sides held when they were
@@ -260,8 +301,8 @@ through to the moment between the last look and the change itself, but
 can't close it: don't sync folders that other programs are busy writing to.
 
 What Two way remembers is kept in `~/Library/Application Support/Foldera/Sync`,
-one file per pair, a few dozen bytes per item. There are no filters, no
-detection of moved files and no scheduled syncs yet.
+one file per pair, a few dozen bytes per item. Custom exclusion rules and
+detection of moved files are not supported yet.
 
 ## Archives: zip, RAR, 7z, tar
 
@@ -401,7 +442,10 @@ again after each rebuild. Full Disk Access for Foldera stops the prompts.
 
 `Foldera --snapshot <folder|image> out.png [--icons|--columns] [--pane]
 [--light|--dark] [--size WxH] [--tabs count] [--search text] [--select name] [--press keys]
-[--sync other-folder [--mode twoWay|mirror|update]]`
+[--two-panes other-folder]
+[--right-tabs count]
+[--sync other-folder [--mode twoWay|mirror|update] [--sync-left] [--sync-empty]]
+[--sync-library folder] [--sync-profile UUID] [--sync-filter all|copies|replacements|deletions|conflicts|skipped]`
 renders a window to a PNG. It is used during development to check the
 interface without clicking (the screenshots above were made this way, of a
 made-up folder). It leaves your settings as they were.

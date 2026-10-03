@@ -80,6 +80,29 @@ private final class Bench {
         #expect(Set(theirs.map { URL(fileURLWithPath: $0).lastPathComponent }) == ["only-right.txt"])
     }
 
+    @Test func paneSyncUsesChosenDirectionInsteadOfRememberedDirection() {
+        let left = URL(fileURLWithPath: "/tmp/Foldera-left")
+        let right = URL(fileURLWithPath: "/tmp/Foldera-right")
+        let saved = SyncWindow.Setup(left: right.key, right: left.key, mode: .twoWay, comparison: .content)
+        let forward = SyncWindow.Setup.forFolders([left, right], mode: .mirror, recent: [saved])
+        #expect(forward.left == left.key && forward.right == right.key)
+        #expect(forward.mode == .mirror && forward.comparison == .content)
+        #expect(forward.towardLeft == false)
+        let reverse = SyncWindow.Setup.forFolders([right, left], mode: .update, recent: [forward])
+        #expect(reverse.left == right.key && reverse.right == left.key)
+        #expect(reverse.mode == .update)
+        #expect(SyncWindow.Setup.forFolders([left, right], mode: nil, recent: [saved]) == saved)
+    }
+
+    @Test func oldSyncSetupsStillDecodeAndNewOnesRememberDirection() throws {
+        let old = Data(#"{"left":"/tmp/left","right":"/tmp/right","mode":"mirror","comparison":"dateAndSize","permanently":false}"#.utf8)
+        let decoded = try JSONDecoder().decode(SyncWindow.Setup.self, from: old)
+        #expect(decoded.towardLeft == nil)
+        var reverse = decoded
+        reverse.towardLeft = true
+        #expect(try JSONDecoder().decode(SyncWindow.Setup.self, from: JSONEncoder().encode(reverse)) == reverse)
+    }
+
     @Test func renamePatternsFillTokensCountAndReplace() throws {
         let p = try Bench()
         try p.file("IMG_001.JPG")

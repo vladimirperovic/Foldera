@@ -140,8 +140,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
     /// (in the background when `activate` is false, as a middle-click does).
     @discardableResult
     func openWindow(_ location: Location, select: [URL] = [], tabbedWith parent: NSWindow? = nil, activate: Bool = true) -> ExplorerTab {
-        let tab = ExplorerTab(location: location, select: select)
-        if let host = parent?.windowController as? ExplorerWindow {
+        let host = parent?.windowController as? ExplorerWindow
+        let tab = ExplorerTab(location: location, select: select, secondPane: host?.active?.isSecondPane == true)
+        if let host {
             host.add(tab, select: activate)
         } else {
             adopt(tab)
@@ -179,6 +180,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
     @objc func newWindow(_ sender: Any?) {
         openWindow(frontTab?.location ?? .folder(FileManager.default.homeDirectoryForCurrentUser))
     }
+
+    @objc func openSync(_ sender: Any?) {
+        if let tab = frontTab { tab.openSync(sender) } else { SyncWindow.show([]) }
+    }
+
+    @objc func showSyncHistory(_ sender: Any?) { SyncHistoryWindow.show() }
 
     /// File › Sync Folders… with no file list in front: the pair synced last.
     @objc func syncFolders(_ sender: Any?) {
@@ -305,6 +312,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
             guard let i = args.firstIndex(of: flag), i + 1 < args.count else { return nil }
             return args[i + 1]
         }
+        SyncLibrary.folder = value("--sync-library").map { URL(fileURLWithPath: $0) }
+            ?? FileManager.default.temporaryDirectory.appendingPathComponent("FolderaSnapshotLibrary-\(UUID().uuidString)")
         let path = URL(fileURLWithPath: (args[0] as NSString).expandingTildeInPath)
         var controller: ExplorerTab?
         var capture = value("--capture")
@@ -314,7 +323,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
             let size = value("--size")?.split(separator: "x").compactMap { Double($0) } ?? []
             SyncWindow.showCompared(path, URL(fileURLWithPath: (other as NSString).expandingTildeInPath),
                                     mode: value("--mode").flatMap(Sync.Mode.init(rawValue:)),
-                                    size: size.count == 2 ? NSSize(width: size[0], height: size[1]) : nil)
+                                    size: size.count == 2 ? NSSize(width: size[0], height: size[1]) : nil,
+                                    compare: !args.contains("--sync-empty"), towardLeft: args.contains("--sync-left"))
             capture = "sync"
         } else if args[0] != "thismac" && ImageFiles.isImage(path) {
             open(path, reveal: false)
@@ -333,6 +343,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
             if let side = value("--iconsize").flatMap(Double.init) { c.setViewSize(CGFloat(side)) }
             let size = value("--size")?.split(separator: "x").compactMap { Double($0) } ?? []
             c.window?.setContentSize(size.count == 2 ? NSSize(width: size[0], height: size[1]) : NSSize(width: 1100, height: 660))
+            if let other = value("--two-panes") {
+                c.host?.showTwoPanes(true)
+                c.host?.partner?.navigate(to: .folder(URL(fileURLWithPath: (other as NSString).expandingTildeInPath)))
+                if let count = value("--right-tabs").flatMap(Int.init), count > 1, let host = c.host {
+                    for _ in 1..<min(count, 100) {
+                        host.add(ExplorerTab(location: host.partner?.location ?? c.location, secondPane: true), select: false)
+                    }
+                }
+                if size.count == 2 { c.window?.setContentSize(NSSize(width: size[0], height: size[1])) }
+            }
             if let query = value("--search") {
                 c.searchField.stringValue = query
                 c.searchChanged(c.searchField)
@@ -344,7 +364,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
             case "viewer": return NSApp.windows.first { $0 is ViewerWindow }
             case "properties": return NSApp.windows.first { $0 is EscWindow && $0.isVisible }
             case "sync": return NSApp.windows.first { $0.windowController is SyncWindow }
-            case "sheet": return controller?.window?.attachedSheet
+            case "history": return NSApp.windows.first { $0.windowController is SyncHistoryWindow }
+            case "sheet": return controller?.window?.attachedSheet ?? NSApp.windows.first { $0.windowController is SyncWindow }?.attachedSheet
             default: return controller?.window
             }
         }
@@ -360,6 +381,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
             case "properties": controller?.showProperties(nil)
             case "filters": controller?.filtersChanged(SearchFilters(kind: .images))
             case "sync": (captured()?.windowController as? SyncWindow)?.synchronize(nil)
+            case "synchistory": SyncHistoryWindow.show(); capture = "history"
+            case "schedule": (captured()?.windowController as? SyncWindow)?.editSchedule(nil); capture = "sheet"
             case "quickopen": controller?.host?.showQuickOpen(scope: .all, query: value("--query") ?? "")
             case "commands": controller?.host?.showQuickOpen(scope: .commands, query: value("--query") ?? "")
             case "tabs":

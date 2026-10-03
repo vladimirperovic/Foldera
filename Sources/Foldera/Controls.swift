@@ -25,7 +25,7 @@ final class ToolButton: NSView {
     var label: String? { didSet { invalidateIntrinsicContentSize(); needsDisplay = true } }
     var font = NSFont.systemFont(ofSize: 13) { didSet { invalidateIntrinsicContentSize() } }
 
-    private let image: NSImage?
+    private var image: NSImage?
     private let tint: NSColor?
     private let dropdown: Bool
     private let height: CGFloat
@@ -52,6 +52,13 @@ final class ToolButton: NSView {
     }
 
     required init?(coder: NSCoder) { fatalError("not used") }
+
+    func setSymbol(_ symbol: String, iconSize: CGFloat = 15) {
+        image = NSImage(systemSymbolName: symbol, accessibilityDescription: toolTip ?? label)?
+            .withSymbolConfiguration(.init(pointSize: iconSize, weight: .regular))
+        invalidateIntrinsicContentSize()
+        needsDisplay = true
+    }
 
     private var hasLabel: Bool { !(label ?? "").isEmpty }
     private var labelWidth: CGFloat {

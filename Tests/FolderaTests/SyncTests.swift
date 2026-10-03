@@ -7,6 +7,7 @@ private final class Pair {
     let root: URL
     let left: URL
     let right: URL
+    private let oldMemory = Sync.Memory.folder
 
     init() throws {
         root = FileManager.default.temporaryDirectory.appendingPathComponent("FolderaSync-\(UUID().uuidString)")
@@ -59,7 +60,10 @@ private final class Pair {
         return Sync.Job(scan, rows: plan.rows, permanently: true).perform()
     }
 
-    deinit { try? FileManager.default.removeItem(at: root) }
+    deinit {
+        Sync.Memory.folder = oldMemory
+        try? FileManager.default.removeItem(at: root)
+    }
 }
 
 private extension Sync.Plan {
@@ -69,6 +73,78 @@ private extension Sync.Plan {
 
 /// One after another: they share where Sync keeps its memory.
 @Suite(.serialized) struct SyncFolders {
+    @Test(arguments: Sync.Mode.allCases)
+    func repeatedSyncsOfTwelveHundredFilesMatchEveryExpectedFile(mode: Sync.Mode) throws {
+        let p = try Pair()
+        let fm = FileManager.default
+        func path(_ i: Int) -> String { "Projekti čć/Group-\(i / 50)/File-\(i).txt" }
+        func contents(_ side: URL) throws -> [String: Data] {
+            var result: [String: Data] = [:]
+            var folders: [(URL, String)] = [(side, "")]
+            while let (folder, prefix) = folders.popLast() {
+                for url in try fm.contentsOfDirectory(at: folder, includingPropertiesForKeys: [.isDirectoryKey, .isRegularFileKey]) {
+                    let relative = prefix + url.lastPathComponent
+                    let values = try url.resourceValues(forKeys: [.isDirectoryKey, .isRegularFileKey])
+                    if values.isDirectory == true { folders.append((url, relative + "/")) }
+                    else if values.isRegularFile == true { result[relative] = try Data(contentsOf: url) }
+                }
+            }
+            return result
+        }
+        func check(_ actual: [String: Data], _ expected: [String: Data]) {
+            let different = Set(actual.keys).union(expected.keys).filter { actual[$0] != expected[$0] }.sorted()
+            let matches = different.isEmpty
+            #expect(matches, "Mismatched paths: \(different.prefix(5)) (\(actual.count) actual, \(expected.count) expected)")
+        }
+        for i in 0..<1200 { try p.file("L/" + path(i), "Original \(i)", age: 7200) }
+        let initial = try p.sync(mode)
+        #expect(initial.failures.isEmpty && !initial.cancelled)
+        check(try contents(p.left), try contents(p.right))
+        #expect(try contents(p.right).count == 1200)
+
+        for i in 0..<10 { try p.file("L/" + path(i), "Left edit \(i)", age: 60) }
+        for i in 10..<20 { try p.file("R/" + path(i), "Right edit \(i)", age: 60) }
+        for i in 20..<30 { try fm.removeItem(at: p.url("L/" + path(i))) }
+        for i in 30..<40 { try fm.removeItem(at: p.url("R/" + path(i))) }
+        try p.file("L/New folder/新增.txt", "new on left")
+        try p.file("R/Right only/čuvaj.txt", "new on right")
+        let leftBefore = try contents(p.left)
+        let rightBefore = try contents(p.right)
+        let plan = try p.plan(mode)
+        #expect(plan.action(path(0)) == .toRight)
+        #expect(plan.action(path(10)) == (mode == .twoWay ? .toLeft : mode == .mirror ? .toRight : Sync.Action.none))
+        #expect(plan.action(path(20)) == (mode == .update ? Sync.Action.none : .deleteRight))
+        #expect(plan.action(path(30)) == (mode == .twoWay ? .deleteLeft : .toRight))
+        #expect(plan.rows.allSatisfy { $0.conflict == nil })
+        let outcome = try p.sync(mode)
+        #expect(outcome.failures.isEmpty && !outcome.cancelled)
+        #expect(outcome.events.count == outcome.copied + outcome.deleted)
+
+        var expectedLeft = leftBefore
+        var expectedRight = rightBefore
+        switch mode {
+        case .mirror:
+            expectedRight = leftBefore
+        case .update:
+            let newerOnRight = Set((10..<20).map(path))
+            for (path, data) in leftBefore where !newerOnRight.contains(path) {
+                expectedRight[path] = data
+            }
+        case .twoWay:
+            for i in 0..<10 { expectedRight[path(i)] = leftBefore[path(i)] }
+            for i in 10..<20 { expectedLeft[path(i)] = rightBefore[path(i)] }
+            for i in 20..<40 { expectedLeft.removeValue(forKey: path(i)); expectedRight.removeValue(forKey: path(i)) }
+            expectedLeft["Right only/čuvaj.txt"] = rightBefore["Right only/čuvaj.txt"]
+            expectedRight["New folder/新增.txt"] = leftBefore["New folder/新增.txt"]
+        }
+        check(try contents(p.left), expectedLeft)
+        check(try contents(p.right), expectedRight)
+        let repeated = try p.sync(mode)
+        #expect(repeated.failures.isEmpty && repeated.copied == 0 && repeated.deleted == 0 && repeated.events.isEmpty)
+        check(try contents(p.left), expectedLeft)
+        check(try contents(p.right), expectedRight)
+    }
+
     @Test func mirrorMakesTheRightAnExactCopy() throws {
         let p = try Pair()
         try p.file("L/new.txt", "new")
@@ -87,6 +163,63 @@ private extension Sync.Plan {
         #expect(!p.exists("R/Old stuff"))
         #expect(p.text("L/changed.txt") == "left version")
         #expect(try p.plan(.mirror).rows.isEmpty)
+    }
+
+    @Test func reverseMirrorMakesTheLeftAnExactCopyWithoutChangingTheRight() throws {
+        let p = try Pair()
+        try p.file("R/Photos/nested/a.txt", "source")
+        try p.file("R/shared.txt", "right source", age: 7200)
+        try p.file("L/shared.txt", "newer left", age: 60)
+        try p.file("L/extra.txt", "remove")
+        try p.file("L/Old/a.txt", "old")
+        let scan = try p.compare()
+        let plan = Sync.plan(scan, mode: .mirror, towardLeft: true)
+        let photos = try #require(plan.row("Photos"))
+        #expect(photos.action == .toLeft && photos.whole)
+        #expect(photos.left == nil && photos.right != nil)
+        #expect(photos.rightFiles == 1 && photos.rightBytes == 6 && photos.leftFiles == 0)
+        #expect(plan.action("extra.txt") == .deleteLeft)
+        #expect(plan.action("Old") == .deleteLeft)
+        let outcome = Sync.Job(scan, rows: plan.rows, permanently: true).perform()
+        #expect(outcome.failures.isEmpty)
+        #expect(p.text("L/Photos/nested/a.txt") == "source")
+        #expect(p.text("L/shared.txt") == "right source")
+        #expect(!p.exists("L/extra.txt") && !p.exists("L/Old"))
+        #expect(p.text("R/shared.txt") == "right source")
+        #expect(p.text("R/Photos/nested/a.txt") == "source")
+        #expect(try Sync.plan(p.compare(), mode: .mirror, towardLeft: true).rows.isEmpty)
+    }
+
+    @Test func reverseUpdatePreservesNewerLeftFilesAndDeletesNothing() throws {
+        let p = try Pair()
+        try p.file("R/new.txt", "new")
+        try p.file("R/shared.txt", "older right", age: 7200)
+        try p.file("L/shared.txt", "newer left", age: 60)
+        try p.file("L/only-left.txt", "keep")
+        let scan = try p.compare()
+        let plan = Sync.plan(scan, mode: .update, towardLeft: true)
+        #expect(plan.action("new.txt") == .toLeft)
+        #expect(plan.row("shared.txt")?.note == "Newer on the left")
+        #expect(plan.action("only-left.txt") == Sync.Action.none)
+        let outcome = Sync.Job(scan, rows: plan.rows, permanently: true).perform()
+        #expect(outcome.failures.isEmpty)
+        #expect(p.text("L/new.txt") == "new")
+        #expect(p.text("L/shared.txt") == "newer left")
+        #expect(p.text("L/only-left.txt") == "keep")
+        #expect(p.text("R/shared.txt") == "older right")
+        #expect(!p.exists("R/only-left.txt"))
+    }
+
+    @Test func twoWayUsesBothDirectionsRegardlessOfTheDirectionButton() throws {
+        let p = try Pair()
+        try p.file("L/left.txt")
+        try p.file("R/right.txt")
+        let scan = try p.compare()
+        let forward = Sync.plan(scan, mode: .twoWay)
+        let reverse = Sync.plan(scan, mode: .twoWay, towardLeft: true)
+        #expect(forward.rows.map(\.action) == reverse.rows.map(\.action))
+        #expect(reverse.action("left.txt") == .toRight)
+        #expect(reverse.action("right.txt") == .toLeft)
     }
 
     @Test func aFileAnotherAppFillsInOnlyWhenReadIsSyncedWhole() throws {

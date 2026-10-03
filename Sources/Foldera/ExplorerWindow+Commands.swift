@@ -453,6 +453,15 @@ extension ExplorerTab: NSMenuItemValidation {
         if let folder = terminalFolder { FileOps.openTerminal(at: folder) }
     }
 
+    /// The Sync toolbar/menu opens with the displayed folders, in their physical order.
+    @objc func openSync(_ sender: Any?) {
+        if let host, let left = host.selected?.location.url, let right = host.partner?.location.url {
+            SyncWindow.show([left, right], preserveSides: true)
+        } else {
+            SyncWindow.show(location.url.map { [$0] } ?? [])
+        }
+    }
+
     /// Sync Folders: the one or two folders selected (a single one with the
     /// folder it was last synced with); with none, the pair synced last.
     @objc func syncFolders(_ sender: Any?) {
@@ -848,6 +857,15 @@ extension ExplorerTab: NSMenuItemValidation {
 
     private func moreMenu() -> NSMenu {
         let menu = NSMenu()
+        if host?.partner != nil {
+            menu.addItem(item("Cut", "scissors", #selector(cut(_:)), key: "x"))
+            menu.addItem(item("Copy", "doc.on.doc", #selector(copy(_:)), key: "c"))
+            menu.addItem(item("Paste", "doc.on.clipboard", #selector(paste(_:)), key: "v"))
+            menu.addItem(item("Rename", "character.cursor.ibeam", #selector(renameSelection(_:))))
+            menu.addItem(item("Share", "square.and.arrow.up", #selector(share(_:))))
+            menu.addItem(item("Delete", "trash", #selector(delete(_:))))
+            menu.addItem(.separator())
+        }
         menu.addItem(item("Select all", "checkmark.circle", #selector(selectAllItems(_:)), key: "a"))
         menu.addItem(item("Select none", "circle", #selector(selectNone(_:))))
         menu.addItem(item("Invert selection", "circle.lefthalf.filled", #selector(invertSelection(_:))))

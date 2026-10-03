@@ -168,7 +168,7 @@ final class QuickOpenController: NSWindowController, NSWindowDelegate, NSTableVi
         let hosts = ([tab.host].compactMap { $0 } + NSApp.windows.compactMap { $0.windowController as? ExplorerWindow })
         var seen = Set<ObjectIdentifier>()
         for host in hosts where seen.insert(ObjectIdentifier(host)).inserted {
-            for openTab in host.tabs {
+            for openTab in host.allPanes {
                 items.append(QuickOpenItem(title: openTab.tabTitle,
                                           detail: "Open tab · " + (openTab.location.url.map(Format.path) ?? "This Mac"),
                                           kind: .tab, destination: .tab(openTab)))
@@ -321,7 +321,7 @@ final class QuickOpenController: NSWindowController, NSWindowDelegate, NSTableVi
             source.navigate(to: .folder(url))
             source.focusList()
         case .tab(let tab):
-            guard let host = tab.host, host.tabs.contains(where: { $0 === tab }) else { return }
+            guard let host = tab.host, host.allPanes.contains(where: { $0 === tab }) else { return }
             host.select(tab)
             host.window?.makeKeyAndOrderFront(nil)
             tab.focusList()

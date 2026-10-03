@@ -6,18 +6,24 @@ import AppKit
 /// the ones not on screen keep their state but draw nothing.
 final class ExplorerWindow: NSWindowController, NSWindowDelegate, NSSplitViewDelegate {
     private(set) var tabs: [ExplorerTab] = []
+    private(set) var rightTabs: [ExplorerTab] = []
     private(set) weak var selected: ExplorerTab?
     let strip = TabStrip()
+    private let rightStrip = TabStrip()
+    private var fullStripWidth: NSLayoutConstraint!
+    private var halfStripWidth: NSLayoutConstraint!
     private let container = NSView()
     /// The tab on screen on the left and, with two panes, the second pane on the right.
     private let panes = NSSplitView()
     private let firstPane = NSView()
+    private let secondPane = NSView()
     /// The second pane, as Total Commander has it: a place of its own beside
     /// the tab on screen, which stays while the tabs change.
     private(set) var partner: ExplorerTab?
     /// The second pane was the one last worked in.
     private var partnerActive = false
     private lazy var stripHeight = strip.heightAnchor.constraint(equalToConstant: 40)
+    private var normalStripHeight: CGFloat = 40
     private var keyMonitor: Any?
     private var quickOpenController: QuickOpenController?
     var onClose: (() -> Void)?
@@ -37,15 +43,25 @@ final class ExplorerWindow: NSWindowController, NSWindowDelegate, NSSplitViewDel
         window.delegate = self
         if let content = window.contentView {
             strip.host = self
-            for v in [strip, container] as [NSView] {
+            rightStrip.host = self
+            rightStrip.isRightPane = true
+            rightStrip.leadingInset = 14
+            rightStrip.isHidden = true
+            for v in [strip, rightStrip, container] as [NSView] {
                 v.translatesAutoresizingMaskIntoConstraints = false
                 content.addSubview(v)
             }
+            fullStripWidth = strip.trailingAnchor.constraint(equalTo: content.trailingAnchor)
+            halfStripWidth = strip.trailingAnchor.constraint(equalTo: content.centerXAnchor)
             NSLayoutConstraint.activate([
                 strip.topAnchor.constraint(equalTo: content.topAnchor),
                 strip.leadingAnchor.constraint(equalTo: content.leadingAnchor),
-                strip.trailingAnchor.constraint(equalTo: content.trailingAnchor),
+                fullStripWidth,
                 stripHeight,
+                rightStrip.topAnchor.constraint(equalTo: strip.topAnchor),
+                rightStrip.heightAnchor.constraint(equalTo: strip.heightAnchor),
+                rightStrip.leadingAnchor.constraint(equalTo: strip.trailingAnchor),
+                rightStrip.trailingAnchor.constraint(equalTo: content.trailingAnchor),
                 container.topAnchor.constraint(equalTo: strip.bottomAnchor),
                 container.leadingAnchor.constraint(equalTo: content.leadingAnchor),
                 container.trailingAnchor.constraint(equalTo: content.trailingAnchor),
@@ -83,18 +99,22 @@ final class ExplorerWindow: NSWindowController, NSWindowDelegate, NSSplitViewDel
         let frame = bar.convert(zoom.frame, to: nil)
         strip.leadingInset = frame.maxX + 14
         let centre = window.frame.height - frame.midY
-        stripHeight.constant = max(36, (centre + TabStrip.tabHeight / 2).rounded())
+        normalStripHeight = max(36, (centre + TabStrip.tabHeight / 2).rounded())
+        stripHeight.constant = normalStripHeight
     }
 
     // MARK: Tabs
 
     func add(_ tab: ExplorerTab, select: Bool = true) {
+        if tab.isSecondPane { return addRight(tab, select: select) }
         tab.host = self
         tabs.append(tab)
         if select || selected == nil { self.select(tab) } else { strip.reload(tabs, selected: selected) }
     }
 
     func select(_ tab: ExplorerTab) {
+        if rightTabs.contains(where: { $0 === tab }) { return selectRight(tab) }
+        if selected === tab { activate(tab, focus: true); return }
         guard selected !== tab, tabs.contains(where: { $0 === tab }) else { return }
         selected?.view.removeFromSuperview()
         selected = tab
@@ -120,8 +140,38 @@ final class ExplorerWindow: NSWindowController, NSWindowDelegate, NSSplitViewDel
 
     // MARK: Two panes
 
+    private func addRight(_ tab: ExplorerTab, select: Bool = true) {
+        guard partner != nil || rightTabs.isEmpty else { return }
+        tab.host = self
+        rightTabs.append(tab)
+        if select || partner == nil { selectRight(tab) }
+        else { rightStrip.reload(rightTabs, selected: partner) }
+    }
+
+    private func selectRight(_ tab: ExplorerTab) {
+        guard rightTabs.contains(where: { $0 === tab }) else { return }
+        if partner !== tab {
+            partner?.view.removeFromSuperview()
+            partner = tab
+            let view = tab.view
+            view.translatesAutoresizingMaskIntoConstraints = false
+            secondPane.addSubview(view)
+            NSLayoutConstraint.activate([
+                view.leadingAnchor.constraint(equalTo: secondPane.leadingAnchor),
+                view.trailingAnchor.constraint(equalTo: secondPane.trailingAnchor),
+                view.topAnchor.constraint(equalTo: secondPane.topAnchor),
+                view.bottomAnchor.constraint(equalTo: secondPane.bottomAnchor),
+            ])
+            view.nextResponder = tab
+            tab.nextResponder = container
+            tab.didAttach()
+        }
+        activate(tab, focus: true)
+        tabDidChange(tab)
+    }
+
     /// Every pane in the window: the tabs, and the second pane.
-    var allPanes: [ExplorerTab] { tabs + (partner.map { [$0] } ?? []) }
+    var allPanes: [ExplorerTab] { tabs + rightTabs }
 
     /// Where commands and keys go: the pane holding the keyboard focus, or else the one last used.
     var active: ExplorerTab? {
@@ -166,35 +216,41 @@ final class ExplorerWindow: NSWindowController, NSWindowDelegate, NSSplitViewDel
             let saved = UserDefaults.standard.string(forKey: "secondPaneFolder").map { URL(fileURLWithPath: $0) }
             let start = saved.flatMap { FileOps.isFolder($0) ? Location.folder($0) : nil } ?? selected?.location ?? .thisMac
             let pane = ExplorerTab(location: start, secondPane: true)
-            pane.host = self
-            partner = pane
-            window.minSize = NSSize(width: 860, height: 420)
-            if window.frame.width < 1100, !window.styleMask.contains(.fullScreen), let screen = window.screen?.visibleFrame {
+            window.minSize = NSSize(width: 1080, height: 420)
+            if window.frame.width < 1440, !window.styleMask.contains(.fullScreen), let screen = window.screen?.visibleFrame {
                 var frame = window.frame
-                frame.size.width = min(1100, screen.width)
+                frame.size.width = min(1440, screen.width)
                 frame.origin.x = max(min(frame.origin.x, screen.maxX - frame.width), screen.minX)
                 window.setFrame(frame, display: true)
             }
-            pane.view.translatesAutoresizingMaskIntoConstraints = true
-            panes.addArrangedSubview(pane.view)
-            pane.view.nextResponder = pane
-            pane.nextResponder = container
+            stripHeight.constant = normalStripHeight
+            fullStripWidth.isActive = false
+            halfStripWidth.isActive = true
+            rightStrip.isHidden = false
+            panes.addArrangedSubview(secondPane)
+            addRight(pane)
             panes.layoutSubtreeIfNeeded()
             panes.setPosition((panes.bounds.width / 2).rounded(), ofDividerAt: 0)
-            pane.didAttach()
         } else if let pane = partner {
             if let url = pane.location.url, !ArchiveFolders.isInside(url) {
                 UserDefaults.standard.set(url.path, forKey: "secondPaneFolder")
             }
-            pane.tearDown()
-            panes.removeArrangedSubview(pane.view)
-            pane.view.removeFromSuperview()
+            rightTabs.forEach { $0.tearDown(); $0.view.removeFromSuperview() }
+            rightTabs.removeAll()
+            panes.removeArrangedSubview(secondPane)
+            secondPane.removeFromSuperview()
+            stripHeight.constant = normalStripHeight
             partner = nil
+            rightStrip.reload([], selected: nil)
+            rightStrip.isHidden = true
+            halfStripWidth.isActive = false
+            fullStripWidth.isActive = true
             partnerActive = false
             window.minSize = NSSize(width: 640, height: 420)
             selected?.focusList()
         }
         UserDefaults.standard.set(on, forKey: "twoPanes")
+        if on, let selected { activate(selected, focus: true) }
         markPanes()
         allPanes.forEach { $0.updatePaneSwitch() }
         selected?.updateCommandStates()
@@ -202,14 +258,25 @@ final class ExplorerWindow: NSWindowController, NSWindowDelegate, NSSplitViewDel
 
     /// Neither pane gets narrower than its controls need.
     func splitView(_ splitView: NSSplitView, constrainMinCoordinate proposed: CGFloat, ofSubviewAt index: Int) -> CGFloat {
-        max(proposed, 380)
+        return max(proposed, 460)
     }
 
     func splitView(_ splitView: NSSplitView, constrainMaxCoordinate proposed: CGFloat, ofSubviewAt index: Int) -> CGFloat {
-        min(proposed, splitView.bounds.width - 380)
+        return min(proposed, splitView.bounds.width - 460)
     }
 
     func close(_ tab: ExplorerTab) {
+        if let index = rightTabs.firstIndex(where: { $0 === tab }) {
+            guard rightTabs.count > 1 else { return showTwoPanes(false) }
+            tab.tearDown()
+            rightTabs.remove(at: index)
+            if partner === tab {
+                tab.view.removeFromSuperview()
+                partner = nil
+                selectRight(rightTabs[min(index, rightTabs.count - 1)])
+            } else { rightStrip.reload(rightTabs, selected: partner) }
+            return
+        }
         guard let index = tabs.firstIndex(where: { $0 === tab }) else { return }
         guard tabs.count > 1 else {
             window?.performClose(nil)
@@ -239,7 +306,12 @@ final class ExplorerWindow: NSWindowController, NSWindowDelegate, NSSplitViewDel
         }
     }
 
-    func moveTab(from: Int, to: Int) {
+    func moveTab(from: Int, to: Int, onRight: Bool = false) {
+        if onRight {
+            guard rightTabs.indices.contains(from), rightTabs.indices.contains(to) else { return }
+            rightTabs.insert(rightTabs.remove(at: from), at: to)
+            return
+        }
         guard tabs.indices.contains(from), tabs.indices.contains(to) else { return }
         tabs.insert(tabs.remove(at: from), at: to)
     }
@@ -247,7 +319,8 @@ final class ExplorerWindow: NSWindowController, NSWindowDelegate, NSSplitViewDel
     /// A tab went somewhere new: its title and icon, and the window's.
     func tabDidChange(_ tab: ExplorerTab) {
         strip.reload(tabs, selected: selected)
-        guard tab === selected, let window else { return }
+        rightStrip.reload(rightTabs, selected: partner)
+        guard tab === active, let window else { return }
         window.title = tab.tabTitle
         window.representedURL = tab.representedURL
     }
@@ -263,37 +336,49 @@ final class ExplorerWindow: NSWindowController, NSWindowDelegate, NSSplitViewDel
     }
 
     @objc func newTab(_ sender: Any?) {
-        add(ExplorerTab(location: .folder(FileManager.default.homeDirectoryForCurrentUser)))
+        newTab(onRight: active?.isSecondPane == true)
+    }
+
+    func newTab(onRight: Bool) {
+        add(ExplorerTab(location: .folder(FileManager.default.homeDirectoryForCurrentUser), secondPane: onRight))
     }
 
     override func newWindowForTab(_ sender: Any?) { newTab(sender) }
 
     @objc func closeTab(_ sender: Any?) {
-        if let selected { close(selected) }
+        if let active { close(active) }
     }
 
     @objc func selectNextTab(_ sender: Any?) { step(1) }
     @objc func selectPreviousTab(_ sender: Any?) { step(-1) }
 
     private func step(_ delta: Int) {
-        guard tabs.count > 1, let current = tabs.firstIndex(where: { $0 === selected }) else { return }
-        select(tabs[(current + delta + tabs.count) % tabs.count])
+        let group = active?.isSecondPane == true ? rightTabs : tabs
+        guard group.count > 1, let current = group.firstIndex(where: { $0 === active }) else { return }
+        select(group[(current + delta + group.count) % group.count])
     }
 
     func duplicate(_ tab: ExplorerTab) {
-        add(ExplorerTab(location: tab.location, select: tab.selectedURLs))
+        add(ExplorerTab(location: tab.location, select: tab.selectedURLs, secondPane: tab.isSecondPane))
     }
 
     func closeOthers(_ tab: ExplorerTab) {
-        for other in tabs where other !== tab { close(other) }
+        for other in (tab.isSecondPane ? rightTabs : tabs) where other !== tab { close(other) }
     }
 
     func closeToTheRight(of tab: ExplorerTab) {
-        guard let index = tabs.firstIndex(where: { $0 === tab }) else { return }
-        for other in tabs[(index + 1)...] { close(other) }
+        let group = tab.isSecondPane ? rightTabs : tabs
+        guard let index = group.firstIndex(where: { $0 === tab }) else { return }
+        for other in group[(index + 1)...] { close(other) }
     }
 
     func moveToNewWindow(_ tab: ExplorerTab) {
+        if tab.isSecondPane {
+            let moved = ExplorerTab(location: tab.location, select: tab.selectedURLs)
+            close(tab)
+            (NSApp.delegate as? AppDelegate)?.adopt(moved)
+            return
+        }
         guard tabs.count > 1 else { return }
         detach(tab)
         (NSApp.delegate as? AppDelegate)?.adopt(tab)
@@ -331,6 +416,7 @@ final class ExplorerWindow: NSWindowController, NSWindowDelegate, NSSplitViewDel
 /// a double-click there zooms it, as the title bar would.
 final class TabStrip: NSView {
     weak var host: ExplorerWindow?
+    var isRightPane = false
     /// About 4–5 cm on a MacBook screen; tabs shrink below it only when many are open.
     static let tabWidth: CGFloat = 220
     static let minimumTabWidth: CGFloat = 32
@@ -416,7 +502,7 @@ final class TabStrip: NSView {
         NSRect(x: 0, y: 0, width: bounds.width, height: 1).fill()
     }
 
-    @objc private func newTab(_ sender: Any?) { host?.newTab(sender) }
+    @objc private func newTab(_ sender: Any?) { host?.newTab(onRight: isRightPane) }
 
     /// Dragging a tab along the row: the others make room as it passes them.
     func drag(_ button: TabButton, to x: CGFloat) {
@@ -428,7 +514,7 @@ final class TabStrip: NSView {
         let slot = min(max(Int(button.frame.midX / width), 0), buttons.count - 1)
         if let from = buttons.firstIndex(where: { $0 === button }), from != slot {
             buttons.insert(buttons.remove(at: from), at: slot)
-            host?.moveTab(from: from, to: slot)
+            host?.moveTab(from: from, to: slot, onRight: isRightPane)
             NSAnimationContext.runAnimationGroup { context in
                 context.duration = 0.15
                 context.allowsImplicitAnimation = true
@@ -611,7 +697,7 @@ final class TabButton: NSView {
         return menu
     }
 
-    @objc private func newTab(_ sender: Any?) { strip?.host?.newTab(sender) }
+    @objc private func newTab(_ sender: Any?) { strip?.host?.newTab(onRight: strip?.isRightPane == true) }
     @objc private func duplicate(_ sender: Any?) { if let tab { strip?.host?.duplicate(tab) } }
     @objc private func moveToNewWindow(_ sender: Any?) { if let tab { strip?.host?.moveToNewWindow(tab) } }
     @objc private func closeTab(_ sender: Any?) { if let tab { strip?.host?.close(tab) } }

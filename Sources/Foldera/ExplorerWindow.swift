@@ -86,13 +86,15 @@ final class ExplorerTab: NSViewController, NSSplitViewDelegate {
     let deleteButton = ToolButton(symbol: "trash", tip: "Move to Trash (Delete)")
     let sortButton = ToolButton(symbol: "arrow.up.arrow.down", label: "Sort", tip: "Sort", dropdown: true)
     let viewButton = ToolButton(symbol: "rectangle.grid.1x2", label: "View", tip: "Layout and hidden items", dropdown: true)
+    let syncButton = ToolButton(symbol: "arrow.triangle.2.circlepath", tip: "Sync folders…", iconSize: 16)
     let moreButton = ToolButton(symbol: "ellipsis", tip: "See more")
     let paneButton = ToolButton(symbol: "sidebar.right", label: "Details", tip: "Preview and details pane (⇧⌘P)")
     let extractButton = ToolButton(symbol: "archivebox", label: "Extract all", tip: "Unpack this archive into a folder beside it")
     // The switch between one pane with tabs and two panes side by side.
     let onePaneButton = ToolButton(symbol: "rectangle", tip: "One pane, with tabs (⌥⌘1)", iconSize: 16)
     let twoPanesButton = ToolButton(symbol: "rectangle.split.2x1", tip: "Two panes side by side, as in Total Commander (⌥⌘2)", iconSize: 16)
-    /// The second of two panes: no navigation pane and no details pane of its own.
+    private var fileCommandDividers: [NSBox] = []
+    /// The second of two panes has its own navigation tree.
     let isSecondPane: Bool
     /// With two panes, a line in the accent colour along the top of the one at work.
     let activeMark = NSBox()
@@ -155,7 +157,7 @@ final class ExplorerTab: NSViewController, NSSplitViewDelegate {
             (copyButton, #selector(copy(_:))), (pasteButton, #selector(paste(_:))),
             (renameButton, #selector(renameSelection(_:))), (shareButton, #selector(share(_:))),
             (deleteButton, #selector(delete(_:))), (sortButton, #selector(showSortMenu(_:))),
-            (viewButton, #selector(showViewMenu(_:))), (moreButton, #selector(showMoreMenu(_:))),
+            (viewButton, #selector(showViewMenu(_:))), (syncButton, #selector(openSync(_:))), (moreButton, #selector(showMoreMenu(_:))),
             (detailsToggle, #selector(setDetailsView(_:))), (iconsToggle, #selector(setIconsView(_:))),
             (columnsToggle, #selector(setColumnsView(_:))), (paneButton, #selector(togglePreviewPane(_:))),
             (usageToggle, #selector(setUsageView(_:))),
@@ -189,9 +191,10 @@ final class ExplorerTab: NSViewController, NSSplitViewDelegate {
         nav.setCustomSpacing(8, after: refreshButton)
         nav.setCustomSpacing(8, after: addressBar)
 
+        fileCommandDividers = [divider(), divider()]
         let commandViews: [NSView] = [
-            newButton, divider(), cutButton, copyButton, pasteButton, renameButton, shareButton, deleteButton,
-            divider(), sortButton, viewButton, divider(), moreButton,
+            newButton, fileCommandDividers[0], cutButton, copyButton, pasteButton, renameButton, shareButton, deleteButton,
+            fileCommandDividers[1], sortButton, viewButton, divider(), syncButton, moreButton,
         ]
         let command = NSStackView(views: commandViews)
         command.orientation = .horizontal
@@ -260,8 +263,6 @@ final class ExplorerTab: NSViewController, NSSplitViewDelegate {
         split.addArrangedSubview(contents)
         if Prefs.previewPane && !isSecondPane { split.addArrangedSubview(previewPane) }
         paneButton.isOn = Prefs.previewPane
-        // The pane beside the first has the room the navigation pane would take.
-        sideBackground.isHidden = isSecondPane
 
         statusLabel.font = .systemFont(ofSize: 12)
         statusLabel.textColor = .secondaryLabelColor
@@ -335,7 +336,16 @@ final class ExplorerTab: NSViewController, NSSplitViewDelegate {
         let two = host?.partner != nil
         onePaneButton.isOn = !two
         twoPanesButton.isOn = two
+        // Keep navigation, layout, overflow and the pane switch reachable in
+        // each half of the window. File commands stay in menus and shortcuts.
+        for button in [cutButton, copyButton, pasteButton, renameButton, shareButton, deleteButton] {
+            button.isHidden = two
+        }
+        fileCommandDividers.forEach { $0.isHidden = two }
+        paneButton.label = two ? nil : "Details"
     }
+
+    private var sidebarWidthKey: String { isSecondPane ? "secondSidebarWidth" : "sidebarWidth" }
 
     private var placed = false
 
@@ -345,10 +355,9 @@ final class ExplorerTab: NSViewController, NSSplitViewDelegate {
         guard !placed else { return }
         placed = true
         view.layoutSubtreeIfNeeded()
-        guard !isSecondPane else { return split.resizeSubviews(withOldSize: split.bounds.size) }
-        let sidebarWidth = UserDefaults.standard.double(forKey: "sidebarWidth")
+        let sidebarWidth = UserDefaults.standard.double(forKey: sidebarWidthKey)
         split.setPosition(sidebarWidth >= 150 ? sidebarWidth : 220, ofDividerAt: 0)
-        if Prefs.previewPane { placePreviewPane() }
+        if Prefs.previewPane && !isSecondPane { placePreviewPane() }
     }
 
     var tabTitle: String { location.title }
@@ -1477,13 +1486,13 @@ final class ExplorerTab: NSViewController, NSSplitViewDelegate {
         guard views.count >= 2 else { return splitView.adjustSubviews() }
         let (sideMin, listMin, paneMin): (CGFloat, CGFloat, CGFloat) = (150, 260, 180)
         let thickness = splitView.dividerThickness
+        guard splitView.bounds.width >= thickness else { return splitView.adjustSubviews() }
         let height = splitView.bounds.height
         let hasPane = views.count == 3
-        let sideWanted = max(UserDefaults.standard.double(forKey: "sidebarWidth"), 0) >= sideMin
-            ? UserDefaults.standard.double(forKey: "sidebarWidth") : 220
+        let sideWanted = max(UserDefaults.standard.double(forKey: sidebarWidthKey), 0) >= sideMin
+            ? UserDefaults.standard.double(forKey: sidebarWidthKey) : 220
         let paneWanted = UserDefaults.standard.double(forKey: "previewWidth") >= paneMin
             ? UserDefaults.standard.double(forKey: "previewWidth") : 300
-        // The second of two panes has no navigation pane, nor a divider for it.
         let sideShown = !views[0].isHidden
         var side = sideShown ? views[0].frame.width : 0
         var pane = hasPane ? views[2].frame.width : 0
@@ -1531,7 +1540,7 @@ final class ExplorerTab: NSViewController, NSSplitViewDelegate {
               NSApp.currentEvent?.type == .leftMouseDragged else { return }
         let views = split.arrangedSubviews
         if divider == 0, views[0].frame.width >= 150 {
-            UserDefaults.standard.set(Double(views[0].frame.width), forKey: "sidebarWidth")
+            UserDefaults.standard.set(Double(views[0].frame.width), forKey: sidebarWidthKey)
         }
         if divider == 1, views.count == 3, views[2].frame.width >= 180 {
             UserDefaults.standard.set(Double(views[2].frame.width), forKey: "previewWidth")

@@ -135,6 +135,15 @@ enum MainMenu {
             item.representedObject = [SortKey.name, .modified, .kind, .size, .created, .accessed, .fileExtension, .tags][index].rawValue
         }
 
+        let savedProfiles = NSMenuItem(title: "Saved Profiles", action: nil, keyEquivalent: "")
+        savedProfiles.submenu = NSMenu(title: "Saved Profiles")
+        savedProfiles.submenu?.delegate = SyncProfilesMenu.shared
+        _ = menu("Sync", [
+            item("Sync Folders…", #selector(W.openSync(_:)), "s", [.command, .option]),
+            savedProfiles,
+            item("Sync History…", #selector(AppDelegate.showSyncHistory(_:))),
+        ])
+
         _ = menu("Go", [
             item("Quick Open…", #selector(W.quickOpen(_:)), "p"),
             item("Find Command…", #selector(W.findCommand(_:)), "p", [.command, .option]),

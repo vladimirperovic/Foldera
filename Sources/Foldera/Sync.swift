@@ -380,7 +380,18 @@ enum Sync {
 
     // MARK: Deciding
 
-    enum Action { case none, toRight, toLeft, deleteLeft, deleteRight }
+    enum Action {
+        case none, toRight, toLeft, deleteLeft, deleteRight
+        var reversed: Action {
+            switch self {
+            case .toRight: return .toLeft
+            case .toLeft: return .toRight
+            case .deleteLeft: return .deleteRight
+            case .deleteRight: return .deleteLeft
+            case .none: return .none
+            }
+        }
+    }
 
     /// One line of the comparison: a path, and what Synchronize does about it.
     struct Row {
@@ -482,7 +493,26 @@ enum Sync {
         var unreadable = false
     }
 
-    static func plan(_ scan: Scan, mode: Mode) -> Plan {
+    /// Reverse one-way sync without moving the folders displayed on screen.
+    static func plan(_ scan: Scan, mode: Mode, towardLeft: Bool = false) -> Plan {
+        if towardLeft && mode != .twoWay {
+            var reversed = Scan(left: scan.right, right: scan.left, comparison: scan.comparison)
+            reversed.ignoreCase = scan.ignoreCase
+            reversed.leftSide = scan.rightSide
+            reversed.rightSide = scan.leftSide
+            reversed.sameContent = scan.sameContent
+            let planned = plan(reversed, mode: mode)
+            let rows = planned.rows.map { row in
+                Row(key: row.key, leftPath: row.rightPath, rightPath: row.leftPath,
+                    left: row.right, right: row.left, action: row.action.reversed, conflict: row.conflict,
+                    note: row.note?.replacingOccurrences(of: "on the right", with: "on the left"),
+                    whole: row.whole, leftFiles: row.rightFiles, rightFiles: row.leftFiles,
+                    leftBytes: row.rightBytes, rightBytes: row.leftBytes,
+                    leftEntries: row.rightEntries, rightEntries: row.leftEntries,
+                    choices: row.choices.map(\.reversed))
+            }
+            return Plan(rows: rows, equal: planned.equal)
+        }
         let lefts = scan.leftSide
         let rights = scan.rightSide
         // Folder by folder: everything inside a folder comes right after it.
@@ -784,6 +814,7 @@ enum Sync {
     final class Job {
         struct Outcome {
             var changes: [Change] = []
+            var events: [SyncLibrary.Event] = []
             var failures: [String] = []
             var copied = 0
             var deleted = 0
@@ -859,14 +890,18 @@ enum Sync {
                 progress.current = row.name
                 base = progress.bytesDone
                 publish(force: true)
+                let failuresBefore = outcome.failures.count
                 do {
                     try work(row)
                 } catch is CancellationError {
+                    outcome.events.append(SyncLibrary.Event(row, error: "Stopped before this action finished."))
                     outcome.cancelled = true
                     return false
                 } catch {
                     outcome.failures.append("“\(row.name)”: \(error.localizedDescription)")
                 }
+                let errors = outcome.failures.dropFirst(failuresBefore).joined(separator: "\n")
+                outcome.events.append(SyncLibrary.Event(row, error: errors.isEmpty ? nil : errors))
                 progress.bytesDone = base + row.bytesToCopy
                 progress.itemsDone += 1
                 return true

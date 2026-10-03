@@ -22,6 +22,10 @@ final class AddressBar: NSView, NSTextFieldDelegate {
 
     override init(frame: NSRect) {
         super.init(frame: frame)
+        // The last breadcrumb can be wider than a narrow pane's address bar.
+        // Keep it inside the bar instead of drawing over the search field.
+        wantsLayer = true
+        layer?.masksToBounds = true
         icon.imageScaling = .scaleProportionallyUpOrDown
         crumbs.orientation = .horizontal
         crumbs.spacing = 0

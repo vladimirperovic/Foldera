@@ -31,6 +31,7 @@ extension ExplorerTab: NSMenuItemValidation {
     }
 
     @objc func refresh(_ sender: Any?) {
+        sidebar.refresh()
         if shownMode == .usage { return showUsage(force: true) }
         if Prefs.folderSizes, let url = location.url { UsageCache.forget(url) }
         reload()

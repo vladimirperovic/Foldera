@@ -36,6 +36,8 @@ final class PreviewPane: NSView {
     private var markdownSaved = ""
     /// The file's date when it was read or last saved here, to notice another app's changes.
     private var markdownVersion: Date?
+    private static let markdownReads = BackgroundTask.queue("Foldera.markdown-files")
+    private let markdownRead = BackgroundTask(queue: PreviewPane.markdownReads)
     private var editing = false
     private var editorButton: NSButton?
 
@@ -152,6 +154,8 @@ final class PreviewPane: NSView {
     /// Waits a moment, so holding an arrow key through a list doesn't preview every file on the way.
     func show(_ selection: [FileItem], in location: Location, count: Int) {
         pending?.cancel()
+        markdownRead.cancel()
+        if markdownBuilt { markdownView.cancel() }
         let work = DispatchWorkItem { [weak self] in self?.render(selection, location, count) }
         pending = work
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.1, execute: work)
@@ -161,6 +165,9 @@ final class PreviewPane: NSView {
     func clear() {
         pending?.cancel()
         finishEditing(movingOn: true)
+        markdownRead.cancel()
+        if markdownBuilt { markdownView.cancel() }
+        generation += 1
         quickLook?.previewItem = nil
         previewed = nil
     }
@@ -244,24 +251,29 @@ final class PreviewPane: NSView {
             finishEditing(movingOn: true)
             markdownFile = url
             markdownName.stringValue = url.lastPathComponent
-            if !loadMarkdown(url) {
-                markdownSaved = ""
-                markdownVersion = nil
-                markdownView.show("Foldera couldn't read this file.", file: url)
-            }
-        } else if !editing, TextFile.version(of: url) != markdownVersion {
-            // Changed by another app since it was shown.
-            loadMarkdown(url)
+            markdownSaved = ""
+            markdownVersion = nil
+            markdownView.show("Loading…", file: url)
         }
         // What is inside an opened archive is shown, not edited: the archive itself wouldn't change.
         let readOnly = ArchiveFolders.isInside(url)
-        editButton.isEnabled = !readOnly
+        editButton.isEnabled = !readOnly && editing
         editorButton?.isEnabled = !readOnly
         scroll.isHidden = true
         markdownBox.isHidden = false
+        if !editing {
+            markdownRead.run({ (TextFile.read(url), TextFile.version(of: url)) }) { [weak self] text, version in
+                guard let self, self.markdownFile?.key == url.key, !self.editing else { return }
+                self.markdownSaved = text ?? ""
+                self.markdownVersion = version
+                self.editButton.isEnabled = !readOnly && text != nil
+                self.markdownView.show(text ?? "Foldera couldn't read this file.", file: url)
+            }
+        }
     }
 
     @discardableResult private func loadMarkdown(_ url: URL) -> Bool {
+        markdownRead.cancel()
         guard let text = TextFile.read(url) else { return false }
         markdownVersion = TextFile.version(of: url)
         markdownSaved = text
@@ -272,6 +284,8 @@ final class PreviewPane: NSView {
     private func hideMarkdown() {
         guard markdownFile != nil else { return }
         finishEditing(movingOn: true)
+        markdownRead.cancel()
+        markdownView.cancel()
         markdownFile = nil
         markdownBox.isHidden = true
         scroll.isHidden = false

@@ -1560,6 +1560,7 @@ final class ExplorerTab: NSViewController, NSSplitViewDelegate {
         searchDelay?.cancel()
         search.cancel()
         watcher.stop()
+        sidebar.stop()
         cloudRefresh?.cancel()
         iconReload?.cancel()
         usageScanner?.cancel()

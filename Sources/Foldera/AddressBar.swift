@@ -19,6 +19,9 @@ final class AddressBar: NSView, NSTextFieldDelegate {
     private let field = NSTextField()
     private var parts: [(title: String, location: Location)] = []
     private var firstVisible = 0
+    private static let reads = BackgroundTask.queue("Foldera.address-bar")
+    private let completion = BackgroundTask(queue: AddressBar.reads)
+    private let menuRead = BackgroundTask(queue: AddressBar.reads)
 
     override init(frame: NSRect) {
         super.init(frame: frame)
@@ -117,6 +120,8 @@ final class AddressBar: NSView, NSTextFieldDelegate {
     }
 
     private func rebuild() {
+        completion.cancel()
+        menuRead.cancel()
         crumbs.arrangedSubviews.forEach { $0.removeFromSuperview() }
         parts = Self.parts(for: location)
         icon.image = location.icon
@@ -184,13 +189,26 @@ final class AddressBar: NSView, NSTextFieldDelegate {
 
     @objc private func chevronClicked(_ sender: ToolButton) {
         let place = parts[sender.index].location
-        let children: [Location]
-        switch place {
-        case .thisMac: children = FileItem.volumes().map { .folder($0.url) }
-        case .folder(let url): children = Folders.subfolders(of: url).map { .folder($0) }
-        }
-        let menu = NSMenu()
         let next = sender.index + 1 < parts.count ? parts[sender.index + 1].location : nil
+        let menu = NSMenu()
+        let loading = NSMenuItem(title: "Loading…", action: nil, keyEquivalent: "")
+        loading.isEnabled = false
+        menu.addItem(loading)
+        menuRead.run({ () -> [Location] in
+            switch place {
+            case .thisMac: return FileItem.volumes().map { .folder($0.url) }
+            case .folder(let url): return Folders.subfolders(of: url).map { .folder($0) }
+            }
+        }) { [weak self, weak menu] children in
+            guard let self, let menu else { return }
+            menu.removeAllItems()
+            self.fill(menu, with: children, next: next)
+        }
+        sender.popUp(menu)
+        menuRead.cancel()
+    }
+
+    private func fill(_ menu: NSMenu, with children: [Location], next: Location?) {
         for child in children {
             let item = menuItem(child)
             if child == next { item.state = .on }
@@ -201,7 +219,6 @@ final class AddressBar: NSView, NSTextFieldDelegate {
             empty.isEnabled = false
             menu.addItem(empty)
         }
-        sender.popUp(menu)
     }
 
     @objc private func showOverflow(_ sender: ToolButton) {
@@ -225,6 +242,7 @@ final class AddressBar: NSView, NSTextFieldDelegate {
     }
 
     func beginEditing() {
+        menuRead.cancel()
         if !isEditing {
             isEditing = true
             field.stringValue = editingText
@@ -237,6 +255,7 @@ final class AddressBar: NSView, NSTextFieldDelegate {
     }
 
     func endEditing() {
+        completion.cancel()
         guard isEditing else { return }
         isEditing = false
         field.isHidden = true
@@ -246,6 +265,7 @@ final class AddressBar: NSView, NSTextFieldDelegate {
     }
 
     func controlTextDidEndEditing(_ obj: Notification) { endEditing() }
+    func controlTextDidChange(_ obj: Notification) { completion.cancel() }
 
     func control(_ control: NSControl, textView: NSTextView, doCommandBy selector: Selector) -> Bool {
         switch selector {
@@ -267,22 +287,31 @@ final class AddressBar: NSView, NSTextFieldDelegate {
 
     /// Tab finishes a folder name, as far as it is unambiguous.
     private func complete(_ textView: NSTextView) -> Bool {
-        let typed = (field.stringValue as NSString).expandingTildeInPath
+        let original = field.stringValue
+        let typed = (original as NSString).expandingTildeInPath
         guard typed.hasPrefix("/") else { return false }
+        completion.run({ Self.completedPath(typed) }) { [weak self, weak textView] completed in
+            guard let self, let textView, self.isEditing, self.field.currentEditor() === textView,
+                  self.field.stringValue == original, let completed else { return }
+            self.field.stringValue = completed
+            textView.selectedRange = NSRange(location: (completed as NSString).length, length: 0)
+        }
+        return true
+    }
+
+    static func completedPath(_ typed: String) -> String? {
         let folder = typed.hasSuffix("/") ? typed : (typed as NSString).deletingLastPathComponent
         let prefix = typed.hasSuffix("/") ? "" : (typed as NSString).lastPathComponent
         let names = Folders.subfolders(of: URL(fileURLWithPath: folder))
             .map(\.lastPathComponent)
             .filter { $0.lowercased().hasPrefix(prefix.lowercased()) }
-        guard let first = names.first else { return true }
+        guard let first = names.first else { return nil }
         var common = first
         for name in names.dropFirst() {
             while !name.lowercased().hasPrefix(common.lowercased()) { common.removeLast() }
         }
         var completed = (folder as NSString).appendingPathComponent(common.count >= prefix.count ? common : prefix)
         if names.count == 1 { completed += "/" }
-        field.stringValue = completed
-        textView.selectedRange = NSRange(location: (completed as NSString).length, length: 0)
-        return true
+        return completed
     }
 }

@@ -8,6 +8,37 @@ struct OpError: LocalizedError {
 /// Everything that changes files. Names and questions follow Windows:
 /// "New folder (2)", "report - Copy.txt", Replace / Keep both / Skip.
 enum FileOps {
+    static let stagingSuffix = ".foldera-transfer"
+
+    /// A private directory on the destination volume. Only its contents may
+    /// be removed when a copy fails; the requested destination may belong to
+    /// another writer by then.
+    static func stagingFolder(beside target: URL) throws -> URL {
+        let folder = target.deletingLastPathComponent()
+            .appendingPathComponent(".\(UUID().uuidString)\(stagingSuffix)", isDirectory: true)
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: false,
+                                                attributes: [.posixPermissions: 0o700])
+        return folder
+    }
+
+    struct Revision: Equatable {
+        let device: Int32
+        let inode: UInt64
+        let size: Int64
+        let modified: Int
+        let modifiedNanos: Int
+        let changed: Int
+        let changedNanos: Int
+    }
+
+    static func revision(of url: URL) -> Revision? {
+        var value = stat()
+        guard lstat(url.path, &value) == 0 else { return nil }
+        return Revision(device: value.st_dev, inode: value.st_ino, size: value.st_size,
+                        modified: value.st_mtimespec.tv_sec, modifiedNanos: value.st_mtimespec.tv_nsec,
+                        changed: value.st_ctimespec.tv_sec, changedNanos: value.st_ctimespec.tv_nsec)
+    }
+
     /// Like fileExists, but a broken symbolic link still counts as being there.
     static func exists(_ url: URL) -> Bool {
         (try? FileManager.default.attributesOfItem(atPath: url.path)) != nil

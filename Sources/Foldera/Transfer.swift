@@ -10,7 +10,7 @@ final class Transfer {
     struct Step {
         let from: URL
         let to: URL
-        /// Whatever is at `to` goes to the Trash first.
+        /// The old destination goes to the Trash once the new copy is ready.
         let replace: Bool
     }
 
@@ -66,7 +66,8 @@ final class Transfer {
         }
 
         func visit(_ source: URL, into folder: URL, topLevel: Bool) -> Bool {
-            if topLevel && source.deletingLastPathComponent().key == folder.key {
+            let parent = source.deletingLastPathComponent()
+            if topLevel && (parent.key == folder.key || FileOps.isSameItem(parent.resolvingSymlinksInPath(), folder.resolvingSymlinksInPath())) {
                 // Already here: moving does nothing, copying makes "name - Copy".
                 if !move { add(Step(from: source, to: FileOps.copyName(for: source, in: folder, taken: planned), replace: false)) }
                 return true
@@ -268,12 +269,12 @@ final class Transfer {
             progress.bytesDone = stepBase
             publish(force: true)
             do {
-                if step.replace && FileOps.exists(step.to) {
-                    var trashed: NSURL?
-                    try fm.trashItem(at: step.to, resultingItemURL: &trashed)
-                    if let trashed { outcome.changes.append(.moved(from: step.to, to: trashed as URL)) }
+                guard !FileOps.isSameItem(step.from, step.to) else {
+                    throw OpError("The source and destination are the same file, so it was left alone.")
                 }
-                if move && sameVolume(step) {
+                if step.replace {
+                    try replace(step, into: &outcome)
+                } else if move && sameVolume(step) {
                     // A placeholder renamed is still a placeholder: its app fills it in first.
                     try copier.whileReading(step.from) { try fm.moveItem(at: $0, to: step.to) }
                     outcome.changes.append(.moved(from: step.from, to: step.to))
@@ -283,8 +284,11 @@ final class Transfer {
                     if move {
                         // The original goes only once every byte arrived.
                         if copier.errors.isEmpty {
+                            // Even if removing the original fails, this new
+                            // copy still belongs in Undo.
+                            outcome.changes.append(.created(step.to))
                             try fm.removeItem(at: step.from)
-                            outcome.changes.append(.moved(from: step.from, to: step.to))
+                            outcome.changes[outcome.changes.count - 1] = .moved(from: step.from, to: step.to)
                         } else {
                             outcome.changes.append(.created(step.to))
                             outcome.failures.append("“\(step.from.lastPathComponent)” was copied but not removed, because part of it couldn't be copied.")
@@ -317,6 +321,54 @@ final class Transfer {
         progress.itemsDone = plan.steps.count
         publish(force: true)
         return outcome
+    }
+
+    /// Prepare a replacement before touching the existing destination. A
+    /// cancelled/failed copy leaves it in place, including for a Move.
+    private func replace(_ step: Step, into outcome: inout Outcome) throws {
+        let fm = FileManager.default
+        let before = FileOps.revision(of: step.to)
+        if move && sameVolume(step) {
+            // Keep a same-volume move a rename (including its hard links),
+            // but wait for the source before taking the destination away.
+            try copier.whileReading(step.from) { source in
+                guard FileOps.exists(source) else { throw CocoaError(.fileNoSuchFile) }
+                try installReplacement(source, step: step, expected: before, into: &outcome)
+                outcome.changes.append(.moved(from: step.from, to: step.to))
+            }
+            return
+        }
+        let staging = try FileOps.stagingFolder(beside: step.to)
+        defer { try? fm.removeItem(at: staging) }
+        let ready = staging.appendingPathComponent(step.to.lastPathComponent)
+        try copier.copy(step.from, to: ready)
+        guard copier.errors.isEmpty else { throw OpError(copier.errors.joined(separator: "\n")) }
+        try installReplacement(ready, step: step, expected: before, into: &outcome)
+        outcome.changes.append(.created(step.to))
+        if move {
+            try fm.removeItem(at: step.from)
+            outcome.changes[outcome.changes.count - 1] = .moved(from: step.from, to: step.to)
+        }
+    }
+
+    private func installReplacement(_ ready: URL, step: Step, expected: FileOps.Revision?, into outcome: inout Outcome) throws {
+        if cancelled.isSet { throw CancellationError() }
+        guard FileOps.revision(of: step.to) == expected, !FileOps.isSameItem(step.from, step.to) else {
+            throw OpError("The destination changed while copying, so it was left alone. Try again.")
+        }
+        var trashed: NSURL?
+        if expected != nil { try FileManager.default.trashItem(at: step.to, resultingItemURL: &trashed) }
+        if renamex_np(ready.path, step.to.path, UInt32(RENAME_EXCL)) != 0 {
+            let problem = NSError(domain: NSPOSIXErrorDomain, code: Int(errno))
+            // Restore the previous destination when its name is still free.
+            // Otherwise keep its Trash location in Undo without replacing the
+            // item that another writer just put there.
+            if let trashed, renamex_np((trashed as URL).path, step.to.path, UInt32(RENAME_EXCL)) != 0 {
+                outcome.changes.append(.moved(from: step.to, to: trashed as URL))
+            }
+            throw problem
+        }
+        if let trashed { outcome.changes.append(.moved(from: step.to, to: trashed as URL)) }
     }
 
     private func publish(force: Bool) {
@@ -384,8 +436,18 @@ final class TreeCopier {
         guard !FileOps.exists(to) else {
             throw OpError("There is already an item named “\(to.lastPathComponent)”.")
         }
-        try whileReading(from) { try copyNow($0, to: to) }
-        removeSkipped(in: to)
+        let staging = try FileOps.stagingFolder(beside: to)
+        defer { try? FileManager.default.removeItem(at: staging) }
+        let ready = staging.appendingPathComponent("item")
+        try whileReading(from) { try copyNow($0, to: ready) }
+        guard FileOps.exists(ready) else {
+            throw OpError(errors.isEmpty ? "The source couldn't be copied." : errors.joined(separator: "\n"))
+        }
+        removeSkipped(in: ready)
+        if cancelled.isSet { throw CancellationError() }
+        guard renamex_np(ready.path, to.path, UInt32(RENAME_EXCL)) == 0 else {
+            throw NSError(domain: NSPOSIXErrorDomain, code: Int(errno))
+        }
     }
 
     /// copyfile leaves out a file it is told to skip, but a folder it is told

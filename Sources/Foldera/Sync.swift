@@ -127,7 +127,8 @@ enum Sync {
 
     /// Never synced: Finder's and the drive's own bookkeeping.
     static func isIgnored(_ name: String, atTop: Bool) -> Bool {
-        name == ".DS_Store" || name.hasPrefix("._") || name.hasSuffix(partialSuffix) || (atTop && driveNames.contains(name))
+        name == ".DS_Store" || name.hasPrefix("._") || name.hasSuffix(partialSuffix)
+            || name.hasSuffix(FileOps.stagingSuffix) || (atTop && driveNames.contains(name))
     }
 
     private static let driveNames: Set<String> = [

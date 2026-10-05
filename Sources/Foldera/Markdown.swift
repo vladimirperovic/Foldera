@@ -342,6 +342,8 @@ final class MarkdownView: NSView, WKNavigationDelegate {
     private let pictures = LocalPictures()
     /// The file on screen; showing it again only swaps the text, keeping the scroll position.
     private var shown: URL?
+    private static let renders = BackgroundTask.queue("Foldera.markdown")
+    private let render = BackgroundTask(queue: MarkdownView.renders)
     var fontSize = 14
 
     override init(frame: NSRect) {
@@ -365,15 +367,26 @@ final class MarkdownView: NSView, WKNavigationDelegate {
 
     /// Renders `text`; pictures and links are found relative to `file`'s folder.
     func show(_ text: String, file: URL) {
-        let rendered = Markdown.html(text)
-        if shown?.key == file.key, !web.isLoading, let body = try? JSONEncoder().encode(rendered),
-           let literal = String(data: body, encoding: .utf8) {
+        render.run({
+            let html = Markdown.html(text)
+            let literal = (try? JSONEncoder().encode(html)).flatMap { String(data: $0, encoding: .utf8) }
+            return (html, literal)
+        }) { [weak self] rendered, literal in
+            self?.display(rendered, literal: literal, file: file)
+        }
+    }
+
+    func cancel() { render.cancel() }
+
+    private func display(_ rendered: String, literal: String?, file: URL) {
+        let generation = render.generation
+        if shown?.key == file.key, !web.isLoading, let literal {
             // The same file edited: only the text changes. (Scripts in the
             // page are off; this one comes from the app, not the file.)
             pictures.page = Markdown.page(rendered: rendered, base: pictures.base, fontSize: fontSize)
             web.evaluateJavaScript("document.body.innerHTML = \(literal); 0") { [weak self] _, error in
                 // Should the swap ever fail, load the page whole rather than leave it stale.
-                guard error != nil, let self else { return }
+                guard error != nil, let self, self.render.generation == generation else { return }
                 self.web.load(URLRequest(url: self.pictures.pageURL))
             }
             return
@@ -693,6 +706,8 @@ final class MarkdownEditor: NSWindowController, NSWindowDelegate, NSTextViewDele
     }
 
     func windowWillClose(_ notification: Notification) {
+        pending?.cancel()
+        preview.cancel()
         Self.open.removeAll { $0 === self }
     }
 }

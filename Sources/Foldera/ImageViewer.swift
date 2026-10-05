@@ -271,7 +271,9 @@ final class ImageViewer: NSWindowController, NSWindowDelegate, NSMenuItemValidat
     private var turns = 0
     private(set) var fitMode = true
     private var cache: [String: ImageFiles.Loaded] = [:]
-    private var inFlight: Set<String> = []
+    private static let decodes = BackgroundTask.queue("Foldera.image-decoding")
+    private var inFlight: [String: BackgroundTask] = [:]
+    private let sharpen = BackgroundTask(queue: ImageViewer.decodes)
     /// True while the full-resolution picture is being decoded for zooming in.
     private var sharpening = false
     private var slideshow: Timer?
@@ -294,6 +296,7 @@ final class ImageViewer: NSWindowController, NSWindowDelegate, NSMenuItemValidat
         let viewer = shared ?? ImageViewer()
         shared = viewer
         viewer.urls = urls
+        viewer.cancelLoads()
         viewer.cache = [:]
         viewer.go(to: min(max(index, 0), urls.count - 1))
         viewer.showWindow(nil)
@@ -459,6 +462,7 @@ final class ImageViewer: NSWindowController, NSWindowDelegate, NSMenuItemValidat
         index = newIndex
         turns = 0
         sharpening = false
+        sharpen.cancel()
         guard let url = current else { return }
         window?.title = url.lastPathComponent
         window?.representedURL = url
@@ -488,21 +492,19 @@ final class ImageViewer: NSWindowController, NSWindowDelegate, NSMenuItemValidat
     }
 
     private func load(_ url: URL) {
-        guard !inFlight.contains(url.key) else { return }
-        inFlight.insert(url.key)
+        guard inFlight[url.key] == nil else { return }
+        let task = BackgroundTask(queue: Self.decodes)
+        inFlight[url.key] = task
         let screen = ImageFiles.screenPixels
-        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
-            let bitmap = ImageFiles.decodeBitmap(url, maxPixels: screen)
-            DispatchQueue.main.async {
-                guard let self else { return }
-                self.inFlight.remove(url.key)
-                guard let loaded = bitmap ?? ImageFiles.decodeOther(url) else {
-                    if url.key == self.current?.key { self.failed(url) }
-                    return
-                }
-                self.cache[url.key] = loaded
-                if url.key == self.current?.key { self.display(loaded) }
+        task.run({ ImageFiles.decodeBitmap(url, maxPixels: screen) }) { [weak self] bitmap in
+            guard let self else { return }
+            self.inFlight[url.key] = nil
+            guard let loaded = bitmap ?? ImageFiles.decodeOther(url) else {
+                if url.key == self.current?.key { self.failed(url) }
+                return
             }
+            self.cache[url.key] = loaded
+            if url.key == self.current?.key { self.display(loaded) }
         }
     }
 
@@ -511,9 +513,19 @@ final class ImageViewer: NSWindowController, NSWindowDelegate, NSMenuItemValidat
     private func prefetch() {
         let keep = Set([index - 1, index, index + 1].filter { $0 >= 0 && $0 < urls.count }.map { urls[$0].key })
         cache = cache.filter { keep.contains($0.key) }
+        for key in Array(inFlight.keys) where !keep.contains(key) {
+            inFlight.removeValue(forKey: key)?.cancel()
+        }
         for i in [index + 1, index - 1] where i >= 0 && i < urls.count && cache[urls[i].key] == nil {
             load(urls[i])
         }
+    }
+
+    private func cancelLoads() {
+        inFlight.values.forEach { $0.cancel() }
+        inFlight.removeAll()
+        sharpen.cancel()
+        sharpening = false
     }
 
     private func failed(_ url: URL) {
@@ -550,16 +562,14 @@ final class ImageViewer: NSWindowController, NSWindowDelegate, NSMenuItemValidat
         let needed = canvas.frame.width * scroll.magnification * window.backingScaleFactor
         guard needed > decoded.width * 1.05 else { return }
         sharpening = true
-        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
-            let full = ImageFiles.decodeBitmap(url)
-            DispatchQueue.main.async {
-                guard let self, self.sharpening, url.key == self.current?.key, let full else { return }
-                self.sharpening = false
-                self.original = full
-                let turned = ImageFiles.rotated(full, quarterTurns: self.turns)
-                self.shown = turned
-                self.canvas.image = turned.image
-            }
+        sharpen.run({ ImageFiles.decodeBitmap(url) }) { [weak self] full in
+            guard let self, self.sharpening, url.key == self.current?.key else { return }
+            self.sharpening = false
+            guard let full else { return }
+            self.original = full
+            let turned = ImageFiles.rotated(full, quarterTurns: self.turns)
+            self.shown = turned
+            self.canvas.image = turned.image
         }
     }
 
@@ -807,6 +817,7 @@ final class ImageViewer: NSWindowController, NSWindowDelegate, NSMenuItemValidat
     }
 
     func windowWillClose(_ notification: Notification) {
+        cancelLoads()
         slideshow?.invalidate()
         slideshow = nil
         playButton.isOn = false

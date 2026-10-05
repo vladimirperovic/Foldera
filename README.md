@@ -72,7 +72,8 @@ yourself, see [Building](#building).
     - home and This Mac with its drives;
     - AirDrop and Network (the file servers nearby);
     - Trash (drop files on it; right-click → Empty Trash).
-  - Every folder unfolds into a tree.
+  - Every folder unfolds into a tree. Open branches track changes; F5
+    refreshes the navigation tree as well as the file list.
 - **Layouts**: **Details** (⌘1), **Large icons** with thumbnails (⌘2) and
   **Columns** (⌘3, as in Finder).
   - Details shows Name, Date modified, Type and Size (in KB, as Windows
@@ -181,13 +182,14 @@ For animated or multi-frame images it reads the first frame.
 
 - **Paste into the same folder** makes `name - Copy`.
 - **Name clashes** ask Replace / Keep both / Skip / Stop. A replaced item
-  goes to the Trash.
+  goes to the Trash once the new copy is ready. Failed or cancelled
+  preparation leaves the existing destination in place.
 - **Folders with the same name are merged**, as in Windows. Clashing files
   inside are asked about one by one, or all at once.
 - **Large copies** show a progress window with Cancel. A cancelled copy
   leaves no half-copied file behind, and a move deletes the original only
-  once every byte has arrived. On APFS a copy is a clone and takes no
-  space.
+  once every byte has arrived. On APFS a copy can use a clone that initially
+  shares the source's file data.
 - **Dragging**: onto the same drive moves; onto another drive copies; ⌥
   always copies. Cut items show faded.
 - **⌘Z undoes** copies, moves, renames, new items, zips and trips to the
@@ -441,6 +443,10 @@ The regression tests use temporary files. Setting `FOLDERA_TEST_VOLUME`
 to a mounted, disposable, case-sensitive volume also exercises case-sensitive
 rename collisions and move/Undo/Redo across volumes. Passing these tests does
 not replace testing with real workloads, network shares and other macOS versions.
+
+The [5 October review report](docs/izvjestaj-dubinske-provjere-2026-10-05.md)
+records the transfer safety fixes, background loading changes, 221-test
+debug/release results, and the limits of those checks.
 
 If Finder automation is unavailable, `FOLDERA_DMG_LAYOUT=0 ./build.sh dmg`
 creates the same installer without arranging its Finder window.

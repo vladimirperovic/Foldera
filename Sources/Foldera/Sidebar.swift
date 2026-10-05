@@ -137,28 +137,40 @@ final class NetworkNeighbourhood {
 }
 
 final class SidebarNode {
-    enum Section { case quickAccess, locations }
-    enum Kind: Equatable { case section(Section), pinned, cloud, home, thisMac, volume, folder, airDrop, network, server, trash }
+    enum Section: Hashable { case quickAccess, locations }
+    enum Kind: Hashable { case section(Section), pinned, cloud, home, thisMac, volume, folder, airDrop, network, server, trash }
+
+    struct Identity: Hashable {
+        let kind: Kind
+        let path: String?
+        let title: String
+        let isFile: Bool
+    }
+    var identity: Identity { Identity(kind: kind, path: url?.key, title: title, isFile: isFile) }
 
     let kind: Kind
     let url: URL?
     let title: String
+    let isFile: Bool
     var detail: String?
     var children: [SidebarNode]?
-    private var expandable: Bool?
+    var loading = false
+    var needsReload = true
+    var generation = 0
+    let watcher = DirectoryWatcher()
+    lazy var loadingRow = SidebarNode(.folder, title: "Loading…")
+
+    func invalidate() { generation += 1; needsReload = true }
 
     init(_ kind: Kind, url: URL? = nil, title: String, detail: String? = nil) {
         self.kind = kind
         self.url = url
         self.title = title
         self.detail = detail
+        isFile = kind == .pinned && url.map { !FileOps.isFolder($0) } == true
     }
 
     var isSection: Bool { if case .section = kind { return true } else { return false } }
-
-    /// A pinned file rather than a folder: opens instead of navigating.
-    /// Asked on every navigation, so the disk is asked only once.
-    lazy var isFile: Bool = kind == .pinned && url.map { !FileOps.isFolder($0) } == true
 
     var location: Location? {
         switch kind {
@@ -191,10 +203,9 @@ final class SidebarNode {
         case .pinned: return !isFile
         case .airDrop, .server, .trash: return false
         case .folder:
-            if let expandable { return expandable }
-            let answer = url.map(Folders.hasSubfolder) ?? false
-            expandable = answer
-            return answer
+            // An arrow must not read a whole directory on the drawing
+            // thread, or permanently hide children added later.
+            return url != nil
         }
     }
 }
@@ -294,6 +305,8 @@ final class Sidebar: NSObject, NSOutlineViewDataSource, NSOutlineViewDelegate {
     private let neighbourhood = NetworkNeighbourhood()
     private var current: Location = .thisMac
     private var syncing = false
+    private var firstLocationsLoad = true
+    private static let reads = BackgroundTask.queue("Foldera.sidebar")
 
     private static let pinDrag = NSPasteboard.PasteboardType("com.vladimirperovic.foldera.pin")
 
@@ -360,7 +373,6 @@ final class Sidebar: NSObject, NSOutlineViewDataSource, NSOutlineViewDelegate {
                 SidebarNode(.pinned, url: $0, title: fm.displayName(atPath: $0.path), detail: Format.path($0))
             }
         case .locations:
-            shownPlaces = Self.placesKey()
             var nodes: [SidebarNode] = []
             if let iCloud = Places.iCloudDrive { nodes.append(SidebarNode(.cloud, url: iCloud, title: "iCloud Drive")) }
             nodes += Places.cloudDrives.map { SidebarNode(.cloud, url: $0.url, title: $0.title, detail: $0.detail) }
@@ -375,57 +387,103 @@ final class Sidebar: NSObject, NSOutlineViewDataSource, NSOutlineViewDelegate {
 
     private func children(of node: SidebarNode?) -> [SidebarNode] {
         guard let node else { return [quickAccess, locations] }
-        if case .section(let section) = node.kind {
-            if node.children == nil { node.children = sectionChildren(section) }
+        if node.kind == .network {
+            if node.children == nil { node.children = neighbourhood.servers.map { SidebarNode(.server, url: $0.url, title: $0.name) } }
             return node.children ?? []
         }
-        if let children = node.children { return children }
-        let made: [SidebarNode]
+        guard node.isExpandable else { return [] }
+        if node.needsReload && !node.loading { load(node) }
+        return node.children ?? [node.loadingRow]
+    }
+
+    /// Directory reads, including pinned/network locations, stay off the UI
+    /// thread. Keep node identities so open branches survive a refresh.
+    private func load(_ node: SidebarNode) {
+        guard !stopped, !node.loading, node.isExpandable, node.kind != .network else { return }
+        node.loading = true
+        let generation = node.generation
+        Self.reads.addOperation { [weak self, weak node] in
+            guard let self, let node else { return }
+            let made = self.readChildren(node)
+            DispatchQueue.main.async { [weak self, weak node] in
+                guard let self, let node, !self.stopped else { return }
+                node.loading = false
+                guard generation == node.generation else {
+                    if self.outline.isItemExpanded(node) { self.load(node) }
+                    return
+                }
+                let old = Dictionary((node.children ?? []).map { ($0.identity, $0) }, uniquingKeysWith: { first, _ in first })
+                node.children = made.map { old[$0.identity] ?? $0 }
+                node.needsReload = false
+                self.outline.reloadItem(node, reloadChildren: true)
+                if node === self.locations, self.firstLocationsLoad {
+                    self.firstLocationsLoad = false
+                    self.outline.expandItem(self.thisMac)
+                }
+                self.sync(to: self.current)
+            }
+        }
+    }
+
+    private func readChildren(_ node: SidebarNode) -> [SidebarNode] {
         switch node.kind {
+        case .section(let section): return sectionChildren(section)
         case .thisMac:
-            made = FileItem.volumes().map { SidebarNode(.volume, url: $0.url, title: $0.name) }
-        case .network:
-            made = neighbourhood.servers.map { SidebarNode(.server, url: $0.url, title: $0.name) }
-        case .airDrop, .server, .trash, .section:
-            made = []
+            return FileItem.volumes().map { SidebarNode(.volume, url: $0.url, title: $0.name) }
+        case .airDrop, .server, .trash, .network: return []
         default:
             let url = node.url.map { node.kind == .pinned ? $0.resolvingSymlinksInPath() : $0 }
-            made = url.map { Folders.subfolders(of: $0).map { SidebarNode(.folder, url: $0, title: $0.lastPathComponent) } } ?? []
+            return url.map { Folders.subfolders(of: $0).map { SidebarNode(.folder, url: $0, title: $0.lastPathComponent) } } ?? []
         }
-        node.children = made
-        return made
+    }
+
+    private func reload(_ node: SidebarNode) {
+        node.invalidate()
+        if outline.isItemExpanded(node), !node.loading { load(node) }
+    }
+
+    /// F5 also refreshes branches already open in the navigation tree.
+    func refresh() {
+        func visit(_ node: SidebarNode) {
+            let children = node.children ?? []
+            reload(node)
+            children.forEach(visit)
+        }
+        visit(quickAccess)
+        visit(locations)
+    }
+
+    func stop() {
+        stopped = true
+        func visit(_ node: SidebarNode) {
+            node.invalidate()
+            node.watcher.stop()
+            node.children?.forEach(visit)
+        }
+        visit(quickAccess)
+        visit(locations)
+        cloudWatcher.stop()
     }
 
     @objc private func volumesChanged() {
-        thisMac.children = nil
-        outline.reloadItem(thisMac, reloadChildren: true)
+        reload(thisMac)
         placesChanged()
     }
 
     /// The cloud drives, and iCloud Drive, as the Locations section last showed them.
-    private var shownPlaces: [String] = []
     private let cloudWatcher = DirectoryWatcher()
-
-    private static func placesKey() -> [String] {
-        [Places.iCloudDrive?.path ?? ""] + Places.cloudDrives.map { $0.url.path + "|" + $0.title }
-    }
+    private var stopped = false
 
     @objc private func placesChanged() {
+        guard !stopped else { return }
         if cloudWatcher.isIdle, FileOps.exists(Places.cloudStorage) {
             cloudWatcher.watch(Places.cloudStorage)
         }
-        guard locations.children != nil, Self.placesKey() != shownPlaces else { return }
-        let wasOpen = outline.isItemExpanded(thisMac)
-        locations.children = nil
-        outline.reloadItem(locations, reloadChildren: true)
-        if wasOpen { outline.expandItem(thisMac) }
-        sync(to: current)
+        reload(locations)
     }
 
     @objc private func pinsChanged() {
-        quickAccess.children = nil
-        outline.reloadItem(quickAccess, reloadChildren: true)
-        sync(to: current)
+        reload(quickAccess)
     }
 
     /// Highlights the entry for `location` when there is one, without navigating.
@@ -480,11 +538,34 @@ final class Sidebar: NSObject, NSOutlineViewDataSource, NSOutlineViewDelegate {
     }
 
     func outlineView(_ outlineView: NSOutlineView, shouldSelectItem item: Any) -> Bool {
-        (item as? SidebarNode)?.isSection == false
+        guard let node = item as? SidebarNode else { return false }
+        return !node.isSection && !(node.kind == .folder && node.url == nil)
     }
 
     func outlineViewItemWillExpand(_ notification: Notification) {
-        if (notification.userInfo?["NSObject"] as? SidebarNode)?.kind == .network { neighbourhood.start() }
+        guard let node = notification.userInfo?["NSObject"] as? SidebarNode else { return }
+        if node.kind == .network { neighbourhood.start() }
+    }
+
+    func outlineViewItemDidExpand(_ notification: Notification) {
+        guard !stopped, let node = notification.userInfo?["NSObject"] as? SidebarNode else { return }
+        if node.needsReload { load(node) }
+        guard let url = node.url, !node.isFile else { return }
+        node.watcher.onChange = { [weak self, weak node] in
+            guard let self, let node else { return }
+            self.reload(node)
+        }
+        if node.watcher.isIdle { node.watcher.watch(url) }
+    }
+
+    func outlineViewItemDidCollapse(_ notification: Notification) {
+        guard let node = notification.userInfo?["NSObject"] as? SidebarNode else { return }
+        func stop(_ node: SidebarNode) {
+            node.invalidate()
+            node.watcher.stop()
+            node.children?.forEach(stop)
+        }
+        stop(node)
     }
 
     func outlineViewSelectionDidChange(_ notification: Notification) {

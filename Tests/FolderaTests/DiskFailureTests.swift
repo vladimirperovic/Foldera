@@ -2,40 +2,33 @@ import Foundation
 import Testing
 @testable import Foldera
 
-/// Each test owns a small disk image. No supplied path or physical disk is filled.
+/// CI provisions a small disk image; each serialized test owns its files on it.
 private final class DisposableDisk {
     let root: URL
     let mount: URL
     let sourceFolder: URL
     let destination: URL
     let payload = Data(repeating: 0xA5, count: 16 * 1024 * 1024)
-    private var mounted = false
 
     init() throws {
         root = FileManager.default.temporaryDirectory
             .appendingPathComponent("FolderaDiskFailure-\(UUID().uuidString)").resolvingSymlinksInPath()
-        mount = root.appendingPathComponent("mounted")
+        guard let path = ProcessInfo.processInfo.environment["FOLDERA_DISK_FAILURE_VOLUME"] else {
+            throw OpError("The disposable disk image was not provisioned")
+        }
+        mount = URL(fileURLWithPath: path).resolvingSymlinksInPath()
         sourceFolder = root.appendingPathComponent("source")
-        destination = mount.appendingPathComponent("destination")
+        destination = mount.appendingPathComponent("destination-\(UUID().uuidString)")
+        let image = mount.deletingLastPathComponent().appendingPathComponent("disposable.dmg")
+        let capacity = try FileManager.default.attributesOfFileSystem(forPath: mount.path)[.systemSize] as? NSNumber
+        guard mount.lastPathComponent == "mounted", FileOps.exists(image),
+              TextFile.read(mount.appendingPathComponent(".foldera-disposable"))?.trimmingCharacters(in: .whitespacesAndNewlines) == image.path,
+              let capacity, capacity.int64Value <= 80 * 1024 * 1024 else {
+            throw OpError("Refusing to fill anything other than the provisioned small disk image")
+        }
         try FileManager.default.createDirectory(at: sourceFolder, withIntermediateDirectories: true)
-        try FileManager.default.createDirectory(at: mount, withIntermediateDirectories: true)
-        let image = root.appendingPathComponent("disposable.dmg")
-        // No partition table: a small image doesn't have room for GPT's EFI partition.
-        try Self.hdiutil(["create", "-size", "64m", "-layout", "NONE", "-fs", "ExFAT", "-volname", "FolderaFaultTest", image.path])
-        try Self.hdiutil(["attach", "-nobrowse", "-mountpoint", mount.path, image.path])
-        mounted = true
         try FileManager.default.createDirectory(at: destination, withIntermediateDirectories: true)
         try payload.write(to: sourceFolder.appendingPathComponent("item.bin"))
-    }
-
-    private static func hdiutil(_ arguments: [String]) throws {
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: "/usr/bin/hdiutil")
-        process.arguments = arguments
-        process.standardOutput = FileHandle.nullDevice
-        try process.run()
-        process.waitUntilExit()
-        guard process.terminationStatus == 0 else { throw OpError("hdiutil failed: \(arguments[0])") }
     }
 
     /// Leave enough space to begin copying, but not to finish a 16 MB file.
@@ -60,16 +53,14 @@ private final class DisposableDisk {
     func releaseSpace() throws { try FileManager.default.removeItem(at: mount.appendingPathComponent("filler.bin")) }
 
     deinit {
-        // Never remove the mount point's contents when detaching fails.
-        do {
-            if mounted { try Self.hdiutil(["detach", mount.path]) }
-            try FileManager.default.removeItem(at: root)
-        } catch { Issue.record(error) }
+        try? FileManager.default.removeItem(at: mount.appendingPathComponent("filler.bin"))
+        try? FileManager.default.removeItem(at: destination)
+        try? FileManager.default.removeItem(at: root)
     }
 }
 
 extension SyncTestIsolation {
-@Suite(.serialized, .enabled(if: ProcessInfo.processInfo.environment["FOLDERA_DISK_FAILURE_TESTS"] == "1"))
+@Suite(.serialized, .enabled(if: ProcessInfo.processInfo.environment["FOLDERA_DISK_FAILURE_VOLUME"] != nil))
 struct DiskFailures {
     @Test(arguments: [false, true], [false, true])
     func aFullDiskKeepsTheSourceAndAnyReplacedFile(move: Bool, replace: Bool) throws {

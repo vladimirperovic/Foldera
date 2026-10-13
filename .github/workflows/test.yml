@@ -11,7 +11,6 @@ jobs:
     runs-on: macos-26
     timeout-minutes: 30
     env:
-      FOLDERA_DISK_FAILURE_TESTS: "1"
       # These require another app to supply promised file bytes through a
       # file presenter (as Windows App does). Hosted runners don't provide
       # that interactive handoff, though ordinary AppKit windows work there.
@@ -22,6 +21,14 @@ jobs:
         run: |
           sudo xcode-select -s "$(ls -d /Applications/Xcode_*.app | sort -V | tail -1)"
           swift --version
+      - name: A disposable disk for failure tests
+        id: fault_disk
+        run: |
+          mkdir -p "$RUNNER_TEMP/foldera-fault/mounted"
+          hdiutil create -size 64m -layout NONE -fs ExFAT -volname FolderaFaultTest "$RUNNER_TEMP/foldera-fault/disposable.dmg"
+          hdiutil attach -nobrowse -mountpoint "$RUNNER_TEMP/foldera-fault/mounted" "$RUNNER_TEMP/foldera-fault/disposable.dmg"
+          echo "$RUNNER_TEMP/foldera-fault/disposable.dmg" > "$RUNNER_TEMP/foldera-fault/mounted/.foldera-disposable"
+          echo "FOLDERA_DISK_FAILURE_VOLUME=$RUNNER_TEMP/foldera-fault/mounted" >> "$GITHUB_ENV"
       - name: Build
         id: build
         run: swift build --build-tests
@@ -97,3 +104,6 @@ jobs:
           path: ${{ runner.temp }}/preview-snapshots/*.png
           if-no-files-found: error
           retention-days: 7
+      - name: Detach the disposable failure-test disk
+        if: ${{ always() && steps.fault_disk.outcome == 'success' }}
+        run: hdiutil detach "$FOLDERA_DISK_FAILURE_VOLUME"

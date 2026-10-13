@@ -37,9 +37,13 @@ final class PreviewVerification {
             tab.togglePreviewDetachment(nil)
             guard tab.previewWindow == nil, tab.previewPane.superview === tab.split,
                   let main = tab.window else { return fail("Docking after full screen failed") }
-            capture(main, suffix: "-docked")
-            print("Preview verification passed: detach, enter full screen, leave full screen, dock.")
-            exit(0)
+            // Let Auto Layout and WebKit resize after reparenting the view.
+            main.contentView?.layoutSubtreeIfNeeded()
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [self] in
+                capture(main, suffix: "-docked")
+                print("Preview verification passed: detach, enter full screen, leave full screen, dock.")
+                exit(0)
+            }
         })
         // Retain the check until completion and bound a failed native transition.
         DispatchQueue.main.asyncAfter(deadline: .now() + 25) { [self] in fail("Full-screen transition timed out") }

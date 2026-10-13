@@ -1460,9 +1460,11 @@ final class ExplorerTab: NSViewController, NSSplitViewDelegate {
             return
         }
         guard previewPane.superview === split else { return }
+        let sidebarWidth = split.arrangedSubviews[0].frame.width
         split.removeArrangedSubview(previewPane)
         previewPane.removeFromSuperview()
         split.adjustSubviews()
+        split.setPosition(sidebarWidth, ofDividerAt: 0)
         let detached = PreviewWindow(pane: previewPane)
         previewWindow = detached
         previewPane.isDetached = true
@@ -1495,9 +1497,11 @@ final class ExplorerTab: NSViewController, NSSplitViewDelegate {
         guard previewWindow == nil else { return }
         guard (previewPane.superview === split) != shown else { return }
         if shown {
+            let sidebarWidth = split.arrangedSubviews[0].frame.width
             split.addArrangedSubview(previewPane)
             split.layoutSubtreeIfNeeded()
             placePreviewPane()
+            split.setPosition(sidebarWidth, ofDividerAt: 0)
             selectionChanged()
         } else {
             previewPane.clear()

@@ -450,9 +450,11 @@ to a mounted, disposable, case-sensitive volume also exercises case-sensitive
 rename collisions and move/Undo/Redo across volumes. Passing these tests does
 not replace testing with real workloads, network shares and other macOS versions.
 
-`FOLDERA_DISK_FAILURE_TESTS=1 ./test.sh` also creates and mounts small, disposable
-exFAT disk images to test full disks and cancellation after copying starts.
-These tests fill only their own images and detach them afterwards.
+CI also provisions a small, disposable exFAT disk image to test full disks and
+cancellation after copying starts, then detaches it afterwards. These tests
+require `FOLDERA_DISK_FAILURE_VOLUME` and validate the image's marker and size
+before filling it. Ordinary `./test.sh` runs skip them; use the disk setup in
+`.github/workflows/test.yml` to run them locally, never a disk holding your files.
 
 The [5 October review report](docs/izvjestaj-dubinske-provjere-2026-10-05.md)
 records the transfer safety fixes, background loading changes, 221-test

@@ -74,12 +74,17 @@ import Testing
             tab.tearDown()
             UserDefaults.standard.set(old, forKey: "previewPane")
         }
+        tab.view.layoutSubtreeIfNeeded()
+        tab.split.setPosition(220, ofDividerAt: 0)
+        let sidebarWidth = try #require(tab.split.arrangedSubviews.first?.frame.width)
         tab.togglePreviewDetachment(nil)
+        #expect(abs(tab.split.arrangedSubviews[0].frame.width - sidebarWidth) < 1)
         let detached = try #require(tab.previewWindow)
         detached.closeTab(nil)
         #expect(tab.previewWindow == nil)
         #expect(tab.previewPane.superview === tab.split)
         #expect(detached.window?.contentView == nil)
+        #expect(abs(tab.split.arrangedSubviews[0].frame.width - sidebarWidth) < 1)
 
         tab.togglePreviewDetachment(nil)
         Prefs.previewPane = false

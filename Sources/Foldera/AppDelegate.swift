@@ -381,6 +381,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
             default: return controller?.window
             }
         }
+        if args.contains("--verify-preview") {
+            guard let controller else { exit(2) }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 2) {
+                PreviewVerification(tab: controller, output: URL(fileURLWithPath: args[1])).run()
+            }
+            return
+        }
         DispatchQueue.main.asyncAfter(deadline: .now() + 1) {
             if let count = value("--tabs").flatMap(Int.init), count > 1, let controller {
                 for _ in 1..<min(count, 100) {

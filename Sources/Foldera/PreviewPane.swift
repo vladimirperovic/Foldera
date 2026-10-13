@@ -94,6 +94,7 @@ final class PreviewPane: NSView {
         fullScreenButton.image = NSImage(systemSymbolName: "arrow.up.left.and.arrow.down.right",
                                         accessibilityDescription: "Toggle full screen")
         fullScreenButton.action = #selector(toggleFullScreen(_:))
+        fullScreenButton.identifier = NSUserInterfaceItemIdentifier("preview.fullscreen")
         fullScreenButton.toolTip = "Enter or leave full screen"
         fullScreenButton.setAccessibilityLabel("Toggle full screen")
         for button in [editorButton, detachButton, fullScreenButton] {

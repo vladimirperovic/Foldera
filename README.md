@@ -450,6 +450,10 @@ to a mounted, disposable, case-sensitive volume also exercises case-sensitive
 rename collisions and move/Undo/Redo across volumes. Passing these tests does
 not replace testing with real workloads, network shares and other macOS versions.
 
+`FOLDERA_DISK_FAILURE_TESTS=1 ./test.sh` also creates and mounts small, disposable
+exFAT disk images to test full disks and cancellation after copying starts.
+These tests fill only their own images and detach them afterwards.
+
 The [5 October review report](docs/izvjestaj-dubinske-provjere-2026-10-05.md)
 records the transfer safety fixes, background loading changes, 221-test
 debug/release results, and the limits of those checks.
@@ -472,6 +476,11 @@ again after each rebuild. Full Disk Access for Foldera stops the prompts.
 renders a window to a PNG. It is used during development to check the
 interface without clicking (the screenshots above were made this way, of a
 made-up folder). It leaves your settings as they were.
+
+Adding `--verify-preview` with `--pane` verifies detaching the Details pane,
+entering and leaving native full screen, and docking again in the app's actual
+event loop. It saves full-screen, detached and docked PNGs and exits with an
+error if a transition fails or times out. This needs a macOS graphical session.
 
 ## License and credits
 

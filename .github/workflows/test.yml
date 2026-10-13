@@ -11,6 +11,7 @@ jobs:
     runs-on: macos-26
     timeout-minutes: 30
     env:
+      FOLDERA_DISK_FAILURE_TESTS: "1"
       # These hand a file over through a file presenter (as Windows App does),
       # which needs a logged-in user's file coordination; hosted runners have
       # none, so they fail there even on code that passes on a Mac.
@@ -57,6 +58,7 @@ jobs:
           fi
           exit "$status"
       - name: Preview window snapshots
+        if: ${{ !cancelled() }}
         timeout-minutes: 3
         run: |
           mkdir -p "$RUNNER_TEMP/preview-fixture" "$RUNNER_TEMP/preview-snapshots"
@@ -82,7 +84,12 @@ jobs:
           .build/debug/Foldera --snapshot "$RUNNER_TEMP/preview-fixture" "$RUNNER_TEMP/preview-snapshots/attached.png" --pane --select Reading.md --light --wait 6
           .build/debug/Foldera --snapshot "$RUNNER_TEMP/preview-fixture" "$RUNNER_TEMP/preview-snapshots/detached-light.png" --pane --select Reading.md --act detachpreview --light --wait 6
           .build/debug/Foldera --snapshot "$RUNNER_TEMP/preview-fixture" "$RUNNER_TEMP/preview-snapshots/detached-dark.png" --pane --select Reading.md --act detachpreview --dark --wait 6
+      - name: Native preview full-screen round trip
+        if: ${{ !cancelled() }}
+        timeout-minutes: 1
+        run: .build/debug/Foldera --snapshot "$RUNNER_TEMP/preview-fixture" "$RUNNER_TEMP/preview-snapshots/fullscreen.png" --pane --select Reading.md --light --verify-preview
       - uses: actions/upload-artifact@v4
+        if: ${{ !cancelled() }}
         with:
           name: preview-snapshots
           path: ${{ runner.temp }}/preview-snapshots/*.png

@@ -9,6 +9,8 @@ private final class DisposableDisk {
     let sourceFolder: URL
     let destination: URL
     let payload = Data(repeating: 0xA5, count: 16 * 1024 * 1024)
+    private var ownsFiles = false
+    private var filler: URL { mount.appendingPathComponent(".foldera-fill-\(root.lastPathComponent)") }
 
     init() throws {
         root = FileManager.default.temporaryDirectory
@@ -23,9 +25,10 @@ private final class DisposableDisk {
         let capacity = try FileManager.default.attributesOfFileSystem(forPath: mount.path)[.systemSize] as? NSNumber
         guard mount.lastPathComponent == "mounted", FileOps.exists(image),
               TextFile.read(mount.appendingPathComponent(".foldera-disposable"))?.trimmingCharacters(in: .whitespacesAndNewlines) == image.path,
-              let capacity, capacity.int64Value <= 80 * 1024 * 1024 else {
+              let capacity, capacity.int64Value <= 600 * 1024 * 1024 else {
             throw OpError("Refusing to fill anything other than the provisioned small disk image")
         }
+        ownsFiles = true
         try FileManager.default.createDirectory(at: sourceFolder, withIntermediateDirectories: true)
         try FileManager.default.createDirectory(at: destination, withIntermediateDirectories: true)
         try payload.write(to: sourceFolder.appendingPathComponent("item.bin"))
@@ -33,7 +36,6 @@ private final class DisposableDisk {
 
     /// Leave enough space to begin copying, but not to finish a 16 MB file.
     func leaveFourMegabytesFree() throws {
-        let filler = mount.appendingPathComponent("filler.bin")
         guard FileManager.default.createFile(atPath: filler.path, contents: nil) else {
             throw OpError("Couldn't create the disposable disk's filler")
         }
@@ -41,7 +43,7 @@ private final class DisposableDisk {
         defer { try? handle.close() }
         let chunk = Data(repeating: 0x5A, count: 1024 * 1024)
         // Bound writes even if the image unexpectedly mounts on another filesystem.
-        for _ in 0..<64 {
+        for _ in 0..<600 {
             let free = try FileManager.default.attributesOfFileSystem(forPath: mount.path)[.systemFreeSize] as? NSNumber
             guard let free else { throw OpError("Can't read free space on the disposable disk") }
             if free.int64Value <= 4 * 1024 * 1024 { return }
@@ -50,10 +52,11 @@ private final class DisposableDisk {
         throw OpError("The disposable disk did not reach its expected capacity")
     }
 
-    func releaseSpace() throws { try FileManager.default.removeItem(at: mount.appendingPathComponent("filler.bin")) }
+    func releaseSpace() throws { try FileManager.default.removeItem(at: filler) }
 
     deinit {
-        try? FileManager.default.removeItem(at: mount.appendingPathComponent("filler.bin"))
+        guard ownsFiles else { return }
+        try? FileManager.default.removeItem(at: filler)
         try? FileManager.default.removeItem(at: destination)
         try? FileManager.default.removeItem(at: root)
     }

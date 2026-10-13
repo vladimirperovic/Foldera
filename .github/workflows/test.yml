@@ -25,7 +25,7 @@ jobs:
         id: fault_disk
         run: |
           mkdir -p "$RUNNER_TEMP/foldera-fault/mounted"
-          hdiutil create -size 64m -layout NONE -fs ExFAT -volname FolderaFaultTest "$RUNNER_TEMP/foldera-fault/disposable.dmg"
+          hdiutil create -size 512m -fs APFS -volname FolderaFaultTest "$RUNNER_TEMP/foldera-fault/disposable.dmg"
           hdiutil attach -nobrowse -mountpoint "$RUNNER_TEMP/foldera-fault/mounted" "$RUNNER_TEMP/foldera-fault/disposable.dmg"
           echo "$RUNNER_TEMP/foldera-fault/disposable.dmg" > "$RUNNER_TEMP/foldera-fault/mounted/.foldera-disposable"
           echo "FOLDERA_DISK_FAILURE_VOLUME=$RUNNER_TEMP/foldera-fault/mounted" >> "$GITHUB_ENV"

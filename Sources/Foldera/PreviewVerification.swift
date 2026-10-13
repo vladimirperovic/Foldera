@@ -53,7 +53,7 @@ final class PreviewVerification {
 
     private func findFullScreenButton(_ view: NSView) -> NSButton? {
         if let button = view as? NSButton, button.identifier?.rawValue == "preview.fullscreen" { return button }
-        return view.subviews.lazy.compactMap { findFullScreenButton($0) }.first
+        return view.subviews.lazy.compactMap { self.findFullScreenButton($0) }.first
     }
 
     private func capture(_ window: NSWindow, suffix: String) {

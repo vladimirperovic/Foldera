@@ -92,6 +92,22 @@ struct DiskFailures {
         #expect(try FileManager.default.contentsOfDirectory(atPath: disk.destination.path) == (replace ? ["item.bin"] : []))
     }
 
+    @Test(arguments: [false, true])
+    func aFullDiskNeverPublishesAnIncompleteFolder(move: Bool) throws {
+        let disk = try DisposableDisk()
+        let target = disk.destination.appendingPathComponent("collection")
+        let neighbour = disk.destination.appendingPathComponent("keep.txt")
+        try "untouched".write(to: neighbour, atomically: false, encoding: .utf8)
+        try disk.leaveFourMegabytesFree()
+        let outcome = Transfer(plan: .init(steps: [.init(from: disk.sourceFolder, to: target)]), move: move).perform()
+        #expect(!outcome.failures.isEmpty && !outcome.cancelled)
+        #expect(outcome.changes.isEmpty && outcome.made.isEmpty)
+        #expect(try Data(contentsOf: disk.sourceFolder.appendingPathComponent("item.bin")) == disk.payload)
+        #expect(!FileOps.exists(target))
+        #expect(TextFile.read(neighbour) == "untouched")
+        #expect(try FileManager.default.contentsOfDirectory(atPath: disk.destination.path) == ["keep.txt"])
+    }
+
     @Test func cancellingAfterBytesArriveRemovesThePartialCopy() throws {
         let disk = try DisposableDisk()
         let source = disk.sourceFolder.appendingPathComponent("item.bin")

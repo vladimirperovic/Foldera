@@ -42,14 +42,26 @@ private final class DisposableDisk {
         let handle = try FileHandle(forWritingTo: filler)
         defer { try? handle.close() }
         let chunk = Data(repeating: 0x5A, count: 1024 * 1024)
+        // APFS reserves metadata space, so its reported free bytes can exceed
+        // what a write can actually use. Fill until ENOSPC, then release slack.
+        var full = false
         // Bound writes even if the image unexpectedly mounts on another filesystem.
         for _ in 0..<600 {
-            let free = try FileManager.default.attributesOfFileSystem(forPath: mount.path)[.systemFreeSize] as? NSNumber
-            guard let free else { throw OpError("Can't read free space on the disposable disk") }
-            if free.int64Value <= 4 * 1024 * 1024 { return }
-            try handle.write(contentsOf: chunk)
+            do {
+                try handle.write(contentsOf: chunk)
+            } catch {
+                let problem = error as NSError
+                guard (problem.domain == NSCocoaErrorDomain && problem.code == CocoaError.fileWriteOutOfSpace.rawValue)
+                    || (problem.domain == NSPOSIXErrorDomain && problem.code == Int(ENOSPC)) else { throw error }
+                full = true
+                break
+            }
         }
-        throw OpError("The disposable disk did not reach its expected capacity")
+        guard full else { throw OpError("The disposable disk did not reach its expected capacity") }
+        let end = try handle.seekToEnd()
+        guard end >= 16 * 1024 * 1024 else { throw OpError("The disposable disk was already too full") }
+        try handle.truncate(atOffset: end - 4 * 1024 * 1024)
+        try handle.synchronize()
     }
 
     func releaseSpace() throws { try FileManager.default.removeItem(at: filler) }

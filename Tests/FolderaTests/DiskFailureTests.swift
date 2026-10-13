@@ -9,6 +9,7 @@ private final class DisposableDisk {
     let sourceFolder: URL
     let destination: URL
     let payload = Data(repeating: 0xA5, count: 16 * 1024 * 1024)
+    private var mounted = false
 
     init() throws {
         root = FileManager.default.temporaryDirectory
@@ -19,8 +20,10 @@ private final class DisposableDisk {
         try FileManager.default.createDirectory(at: sourceFolder, withIntermediateDirectories: true)
         try FileManager.default.createDirectory(at: mount, withIntermediateDirectories: true)
         let image = root.appendingPathComponent("disposable.dmg")
-        try Self.hdiutil(["create", "-size", "64m", "-fs", "ExFAT", "-volname", "FolderaFaultTest", image.path])
+        // No partition table: a small image doesn't have room for GPT's EFI partition.
+        try Self.hdiutil(["create", "-size", "64m", "-layout", "NONE", "-fs", "ExFAT", "-volname", "FolderaFaultTest", image.path])
         try Self.hdiutil(["attach", "-nobrowse", "-mountpoint", mount.path, image.path])
+        mounted = true
         try FileManager.default.createDirectory(at: destination, withIntermediateDirectories: true)
         try payload.write(to: sourceFolder.appendingPathComponent("item.bin"))
     }
@@ -59,7 +62,7 @@ private final class DisposableDisk {
     deinit {
         // Never remove the mount point's contents when detaching fails.
         do {
-            try Self.hdiutil(["detach", mount.path])
+            if mounted { try Self.hdiutil(["detach", mount.path]) }
             try FileManager.default.removeItem(at: root)
         } catch { Issue.record(error) }
     }

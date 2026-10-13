@@ -12,9 +12,9 @@ jobs:
     timeout-minutes: 30
     env:
       FOLDERA_DISK_FAILURE_TESTS: "1"
-      # These hand a file over through a file presenter (as Windows App does),
-      # which needs a logged-in user's file coordination; hosted runners have
-      # none, so they fail there even on code that passes on a Mac.
+      # These require another app to supply promised file bytes through a
+      # file presenter (as Windows App does). Hosted runners don't provide
+      # that interactive handoff, though ordinary AppKit windows work there.
       NEEDS_A_DESKTOP: "aFileAnotherAppFillsInOnlyWhenReadArrivesWhole|aFolderWithSuchAFileInsideArrivesWhole|anAppALittleLateIsAskedAgain|aSlowHandOverIsSaid"
     steps:
       - uses: actions/checkout@v4

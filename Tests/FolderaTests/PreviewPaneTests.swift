@@ -12,6 +12,13 @@ import Testing
             .first { $0.identifier?.rawValue == id })
     }
 
+    private func click(_ button: NSButton) throws {
+        // Deliver the real action without performClick's nested animation loop,
+        // which can end the SwiftPM test host before its async tests complete.
+        let action = try #require(button.action)
+        #expect(button.sendAction(action, to: button.target))
+    }
+
     @Test func detachingAndDockingPreservesTheMarkdownDraftWithoutSaving() async throws {
         _ = NSApplication.shared
         let old = UserDefaults.standard.object(forKey: "previewPane")
@@ -38,18 +45,18 @@ import Testing
         }
         let editButton = try #require(edit)
         try #require(editButton.isEnabled && !editButton.isHidden)
-        editButton.performClick(nil)
+        try click(editButton)
         let text = try #require(descendants(of: tab.previewPane).compactMap { $0 as? NSTextView }.first)
         text.string = "# Unsaved draft"
         let detach = try button("preview.detach", in: tab.previewPane)
-        detach.performClick(nil)
+        try click(detach)
         let detached = try #require(tab.previewWindow)
         #expect(detached.window?.contentView === tab.previewPane)
         #expect(detached.window?.collectionBehavior.contains(.fullScreenPrimary) == true)
         #expect(!tab.split.arrangedSubviews.contains(tab.previewPane))
         #expect(text.string == "# Unsaved draft")
         #expect(TextFile.read(file) == "# Original")
-        detach.performClick(nil)
+        try click(detach)
         #expect(tab.previewWindow == nil)
         #expect(tab.previewPane.superview === tab.split)
         #expect(!tab.previewPane.isDetached)

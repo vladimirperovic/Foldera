@@ -51,6 +51,10 @@ jobs:
           fi
           wait "$pid" && status=0 || status=$?
           cat test.log
+          if [ "$status" -eq 0 ] && ! grep -Eq 'Test run with [0-9]+ tests? .*passed' test.log; then
+            echo "::error::The test process exited without a completed Swift Testing run."
+            exit 1
+          fi
           exit "$status"
       - name: Preview window snapshots
         timeout-minutes: 3

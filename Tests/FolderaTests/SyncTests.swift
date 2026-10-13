@@ -86,6 +86,19 @@ private extension Sync.Plan {
 extension SyncTestIsolation {
 @Suite(.serialized) struct SyncFolders {
     @Test(arguments: Sync.Mode.allCases)
+    func replacingAFileWithALongNameDoesNotNeedAnEvenLongerTemporaryName(mode: Sync.Mode) throws {
+        let p = try Pair()
+        let name = String(repeating: "x", count: 240) + ".txt"
+        try p.file("L/\(name)", "new version", age: 60)
+        try p.file("R/\(name)", "old version", age: 7200)
+        let result = try p.sync(mode)
+        #expect(result.failures.isEmpty && result.copied == 1)
+        #expect(p.text("L/\(name)") == "new version")
+        #expect(p.text("R/\(name)") == "new version")
+        #expect(try FileManager.default.contentsOfDirectory(atPath: p.right.path) == [name])
+    }
+
+    @Test(arguments: Sync.Mode.allCases)
     func repeatedSyncsOfTwelveHundredFilesMatchEveryExpectedFile(mode: Sync.Mode) throws {
         let p = try Pair()
         let fm = FileManager.default

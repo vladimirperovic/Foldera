@@ -89,6 +89,12 @@ yourself, see [Building](#building).
   - picture dimensions and camera, PDF page count, running time, and where
     a download came from;
   - for a folder, how many items it holds.
+  - the **Open details in a separate window** button in its header detaches
+    the panel. It follows the selection in its original tab, and the file list
+    gets the freed space. Use the full-screen button or the green window button
+    for a larger view. **Return details to the main window**, or closing the
+    detached window, docks it again. Markdown stays in reading mode; a draft
+    being edited stays open without being saved just by detaching or docking.
 - **Status bar**: item count, selection and its size, and the layout switch.
 - **Search** (top right): searches the folder and everything below it as
   you type. `*.pdf` works.
@@ -444,6 +450,12 @@ to a mounted, disposable, case-sensitive volume also exercises case-sensitive
 rename collisions and move/Undo/Redo across volumes. Passing these tests does
 not replace testing with real workloads, network shares and other macOS versions.
 
+CI also provisions a small, disposable APFS disk image to test full disks and
+cancellation after copying starts, then detaches it afterwards. These tests
+require `FOLDERA_DISK_FAILURE_VOLUME` and validate the image's marker and size
+before filling it. Ordinary `./test.sh` runs skip them; use the disk setup in
+`.github/workflows/test.yml` to run them locally, never a disk holding your files.
+
 The [5 October review report](docs/izvjestaj-dubinske-provjere-2026-10-05.md)
 records the transfer safety fixes, background loading changes, 221-test
 debug/release results, and the limits of those checks.
@@ -457,8 +469,8 @@ again after each rebuild. Full Disk Access for Foldera stops the prompts.
 
 `Foldera --snapshot <folder|thismac|image> out.png [--icons|--columns|--usage] [--pane]
 [--light|--dark] [--size WxH] [--tabs count] [--search text] [--select name] [--press keys]
-[--iconsize points] [--act newfolder|cut|properties|quickopen|commands] [--query text]
-[--press-delay seconds] [--wait seconds] [--capture properties|viewer|sheet]
+[--iconsize points] [--act newfolder|cut|properties|quickopen|commands|detachpreview] [--query text]
+[--press-delay seconds] [--wait seconds] [--capture properties|viewer|sheet|details]
 [--two-panes other-folder]
 [--right-tabs count]
 [--sync other-folder [--mode twoWay|mirror|update] [--sync-left] [--sync-empty]]
@@ -466,6 +478,11 @@ again after each rebuild. Full Disk Access for Foldera stops the prompts.
 renders a window to a PNG. It is used during development to check the
 interface without clicking (the screenshots above were made this way, of a
 made-up folder). It leaves your settings as they were.
+
+Adding `--verify-preview` with `--pane` verifies detaching the Details pane,
+entering and leaving native full screen, and docking again in the app's actual
+event loop. It saves full-screen, detached and docked PNGs and exits with an
+error if a transition fails or times out. This needs a macOS graphical session.
 
 ## License and credits
 

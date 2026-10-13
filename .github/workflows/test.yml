@@ -11,9 +11,9 @@ jobs:
     runs-on: macos-26
     timeout-minutes: 30
     env:
-      # These hand a file over through a file presenter (as Windows App does),
-      # which needs a logged-in user's file coordination; hosted runners have
-      # none, so they fail there even on code that passes on a Mac.
+      # These require another app to supply promised file bytes through a
+      # file presenter (as Windows App does). Hosted runners don't provide
+      # that interactive handoff, though ordinary AppKit windows work there.
       NEEDS_A_DESKTOP: "aFileAnotherAppFillsInOnlyWhenReadArrivesWhole|aFolderWithSuchAFileInsideArrivesWhole|anAppALittleLateIsAskedAgain|aSlowHandOverIsSaid"
     steps:
       - uses: actions/checkout@v4
@@ -21,7 +21,16 @@ jobs:
         run: |
           sudo xcode-select -s "$(ls -d /Applications/Xcode_*.app | sort -V | tail -1)"
           swift --version
+      - name: A disposable disk for failure tests
+        id: fault_disk
+        run: |
+          mkdir -p "$RUNNER_TEMP/foldera-fault/mounted"
+          hdiutil create -size 512m -fs APFS -volname FolderaFaultTest "$RUNNER_TEMP/foldera-fault/disposable.dmg"
+          hdiutil attach -nobrowse -mountpoint "$RUNNER_TEMP/foldera-fault/mounted" "$RUNNER_TEMP/foldera-fault/disposable.dmg"
+          echo "$RUNNER_TEMP/foldera-fault/disposable.dmg" > "$RUNNER_TEMP/foldera-fault/mounted/.foldera-disposable"
+          echo "FOLDERA_DISK_FAILURE_VOLUME=$RUNNER_TEMP/foldera-fault/mounted" >> "$GITHUB_ENV"
       - name: Build
+        id: build
         run: swift build --build-tests
       - name: A second, case-sensitive volume
         # For the tests that move across drives and rename on a drive that tells case apart.
@@ -51,4 +60,50 @@ jobs:
           fi
           wait "$pid" && status=0 || status=$?
           cat test.log
+          if [ "$status" -eq 0 ] && ! grep -Eq 'Test run with [0-9]+ tests? .*passed' test.log; then
+            echo "::error::The test process exited without a completed Swift Testing run."
+            exit 1
+          fi
           exit "$status"
+      - name: Preview window snapshots
+        id: previews
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        timeout-minutes: 3
+        run: |
+          mkdir -p "$RUNNER_TEMP/preview-fixture" "$RUNNER_TEMP/preview-snapshots"
+          cat > "$RUNNER_TEMP/preview-fixture/Reading.md" <<'MARKDOWN'
+          # A little more room to read
+
+          The Details pane can open in its own window. Markdown stays rendered,
+          with **bold text**, *emphasis*, and `inline code`.
+
+          ## Working with the preview
+
+          - Detach the panel using the button in its header.
+          - Use the full-screen button for a larger view.
+          - Dock it again without losing your place or your draft.
+
+          | View | Content |
+          | --- | --- |
+          | Details pane | Preview alongside the file list |
+          | Separate window | More room for reading |
+
+          > Editing remains available when you need it.
+          MARKDOWN
+          .build/debug/Foldera --snapshot "$RUNNER_TEMP/preview-fixture" "$RUNNER_TEMP/preview-snapshots/attached.png" --pane --select Reading.md --light --wait 6
+          .build/debug/Foldera --snapshot "$RUNNER_TEMP/preview-fixture" "$RUNNER_TEMP/preview-snapshots/detached-light.png" --pane --select Reading.md --act detachpreview --light --wait 6
+          .build/debug/Foldera --snapshot "$RUNNER_TEMP/preview-fixture" "$RUNNER_TEMP/preview-snapshots/detached-dark.png" --pane --select Reading.md --act detachpreview --dark --wait 6
+      - name: Native preview full-screen round trip
+        if: ${{ !cancelled() && steps.previews.outcome == 'success' }}
+        timeout-minutes: 1
+        run: .build/debug/Foldera --snapshot "$RUNNER_TEMP/preview-fixture" "$RUNNER_TEMP/preview-snapshots/fullscreen.png" --pane --select Reading.md --light --verify-preview
+      - uses: actions/upload-artifact@v4
+        if: ${{ !cancelled() && steps.previews.outcome == 'success' }}
+        with:
+          name: preview-snapshots
+          path: ${{ runner.temp }}/preview-snapshots/*.png
+          if-no-files-found: error
+          retention-days: 7
+      - name: Detach the disposable failure-test disk
+        if: ${{ always() && steps.fault_disk.outcome == 'success' }}
+        run: hdiutil detach "$FOLDERA_DISK_FAILURE_VOLUME"

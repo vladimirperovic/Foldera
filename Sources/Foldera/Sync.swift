@@ -1059,8 +1059,10 @@ enum Sync {
             let changed = OpError("\(expected.folder ? "Something inside it" : "It") changed on the \(side) since the comparison, so it was left alone.")
             try guardInside(target, onLeft: !toRight)
             guard try unchanged(row, onLeft: !toRight, at: target) else { throw changed }
+            // A valid destination name may already be at the filesystem limit.
+            // Keep the staging name short, regardless of the original name.
             let partial = target.deletingLastPathComponent()
-                .appendingPathComponent(".\(UUID().uuidString.prefix(8))-\(target.lastPathComponent)\(Sync.partialSuffix)")
+                .appendingPathComponent(".\(UUID().uuidString)\(Sync.partialSuffix)")
             try copier.copy(source, to: partial)
             guard copier.errors.isEmpty else {
                 try? FileManager.default.removeItem(at: partial)

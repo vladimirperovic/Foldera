@@ -425,6 +425,7 @@ final class TreeCopier {
     // Touched only from the copying thread (copyfile calls back on it).
     private var finished: Int64 = 0
     private var fileCopied: Int64 = 0
+    private var copyError: Int32?
 
     init(cancelled: CancelFlag) {
         self.cancelled = cancelled
@@ -548,6 +549,7 @@ final class TreeCopier {
     private func copyNow(_ from: URL, to: URL) throws {
         finished = 0
         fileCopied = 0
+        copyError = nil
         let state = copyfile_state_alloc()
         defer { copyfile_state_free(state) }
         let callback: copyfile_callback_t = copierStatus
@@ -555,12 +557,12 @@ final class TreeCopier {
         copyfile_state_set(state, UInt32(COPYFILE_STATE_STATUS_CTX), Unmanaged.passUnretained(self).toOpaque())
         let flags = copyfile_flags_t(COPYFILE_ALL | COPYFILE_RECURSIVE | COPYFILE_EXCL | COPYFILE_NOFOLLOW_SRC | COPYFILE_CLONE)
         let result = copyfile(from.path, to.path, state, flags)
-        let code = errno
+        let code = copyError ?? errno
         if cancelled.isSet {
             try? FileManager.default.removeItem(at: to)
             throw CancellationError()
         }
-        if result != 0 {
+        if result != 0 || copyError != nil {
             try? FileManager.default.removeItem(at: to)
             throw NSError(domain: NSPOSIXErrorDomain, code: Int(code))
         }
@@ -568,6 +570,9 @@ final class TreeCopier {
 
     fileprivate func status(what: Int32, stage: Int32, state: copyfile_state_t?, source: UnsafePointer<CChar>?) -> Int32 {
         if cancelled.isSet { return COPYFILE_QUIT }
+        // A recursive copy may report a data failure again at its outer level.
+        // Keep the original error and abort the whole staged item there too.
+        if copyError != nil { return COPYFILE_QUIT }
         if stage == COPYFILE_START, what == COPYFILE_RECURSE_FILE || what == COPYFILE_RECURSE_DIR,
            let skips, let source, skips((String(cString: source) as NSString).lastPathComponent) {
             return COPYFILE_SKIP
@@ -597,9 +602,12 @@ final class TreeCopier {
             if let state { copyfile_state_get(state, UInt32(COPYFILE_STATE_COPIED), &bytes) }
             fileCopied = Int64(bytes)
         case (_, COPYFILE_ERR), (COPYFILE_RECURSE_ERROR, _):
+            copyError = errno
             let name = source.map { String(cString: $0) }.map { ($0 as NSString).lastPathComponent } ?? "an item"
             errors.append("“\(name)”: \(String(cString: strerror(errno)))")
-            return COPYFILE_SKIP
+            // SKIP on a data error makes copyfile return success with partial
+            // bytes. Fail the staged copy so no incomplete file is published.
+            return COPYFILE_QUIT
         default:
             break
         }

@@ -99,7 +99,7 @@ struct DiskFailures {
         let neighbour = disk.destination.appendingPathComponent("keep.txt")
         try "untouched".write(to: neighbour, atomically: false, encoding: .utf8)
         try disk.leaveFourMegabytesFree()
-        let outcome = Transfer(plan: .init(steps: [.init(from: disk.sourceFolder, to: target)]), move: move).perform()
+        let outcome = Transfer(plan: .init(steps: [.init(from: disk.sourceFolder, to: target, replace: false)]), move: move).perform()
         #expect(!outcome.failures.isEmpty && !outcome.cancelled)
         #expect(outcome.changes.isEmpty && outcome.made.isEmpty)
         #expect(try Data(contentsOf: disk.sourceFolder.appendingPathComponent("item.bin")) == disk.payload)

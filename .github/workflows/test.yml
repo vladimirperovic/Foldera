@@ -52,3 +52,35 @@ jobs:
           wait "$pid" && status=0 || status=$?
           cat test.log
           exit "$status"
+      - name: Preview window snapshots
+        timeout-minutes: 3
+        run: |
+          mkdir -p "$RUNNER_TEMP/preview-fixture" "$RUNNER_TEMP/preview-snapshots"
+          cat > "$RUNNER_TEMP/preview-fixture/Reading.md" <<'MARKDOWN'
+          # A little more room to read
+
+          The Details pane can open in its own window. Markdown stays rendered,
+          with **bold text**, *emphasis*, and `inline code`.
+
+          ## Working with the preview
+
+          - Detach the panel using the button in its header.
+          - Use the full-screen button for a larger view.
+          - Dock it again without losing your place or your draft.
+
+          | View | Content |
+          | --- | --- |
+          | Details pane | Preview alongside the file list |
+          | Separate window | More room for reading |
+
+          > Editing remains available when you need it.
+          MARKDOWN
+          .build/debug/Foldera --snapshot "$RUNNER_TEMP/preview-fixture" "$RUNNER_TEMP/preview-snapshots/attached.png" --pane --select Reading.md --light --wait 6
+          .build/debug/Foldera --snapshot "$RUNNER_TEMP/preview-fixture" "$RUNNER_TEMP/preview-snapshots/detached-light.png" --pane --select Reading.md --act detachpreview --light --wait 6
+          .build/debug/Foldera --snapshot "$RUNNER_TEMP/preview-fixture" "$RUNNER_TEMP/preview-snapshots/detached-dark.png" --pane --select Reading.md --act detachpreview --dark --wait 6
+      - uses: actions/upload-artifact@v4
+        with:
+          name: preview-snapshots
+          path: ${{ runner.temp }}/preview-snapshots/*.png
+          if-no-files-found: error
+          retention-days: 7

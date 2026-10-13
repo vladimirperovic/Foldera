@@ -108,6 +108,7 @@ final class ExplorerTab: NSViewController, NSSplitViewDelegate {
     let gridScroll = NSScrollView()
     let columns = Columns()
     let previewPane = PreviewPane()
+    private(set) var previewWindow: PreviewWindow?
     let emptyLabel = NSTextField(wrappingLabelWithString: "")
     let privacyButton = NSButton(title: "Open Privacy Settings…", target: nil, action: nil)
     let statusLabel = NSTextField(labelWithString: "")
@@ -138,6 +139,7 @@ final class ExplorerTab: NSViewController, NSSplitViewDelegate {
         super.init(nibName: nil, bundle: nil)
         view = NSView(frame: NSRect(x: 0, y: 0, width: 1040, height: 620))
         buildLayout()
+        previewPane.onToggleDetached = { [weak self] in self?.togglePreviewDetachment(nil) }
         wire()
         applyViewMode()
         navigate(to: location, record: false, select: select)
@@ -357,7 +359,7 @@ final class ExplorerTab: NSViewController, NSSplitViewDelegate {
         view.layoutSubtreeIfNeeded()
         let sidebarWidth = UserDefaults.standard.double(forKey: sidebarWidthKey)
         split.setPosition(sidebarWidth >= 150 ? sidebarWidth : 220, ofDividerAt: 0)
-        if Prefs.previewPane && !isSecondPane { placePreviewPane() }
+        if previewPane.superview === split { placePreviewPane() }
     }
 
     var tabTitle: String { location.title }
@@ -1010,7 +1012,10 @@ final class ExplorerTab: NSViewController, NSSplitViewDelegate {
         if shownMode == .usage { rememberUsageSelection() }
         updateStatus()
         updateCommandStates()
-        if Prefs.previewPane && !isSecondPane { previewPane.show(selectedItems, in: location, count: items.count) }
+        if Prefs.previewPane && !isSecondPane {
+            previewPane.show(selectedItems, in: location, count: items.count)
+            previewWindow?.show(selectedItems, in: location)
+        }
         if QLPreviewPanel.sharedPreviewPanelExists(), let panel = QLPreviewPanel.shared(), panel.isVisible,
            (panel.dataSource as AnyObject?) === self {
             panel.reloadData()
@@ -1448,6 +1453,30 @@ final class ExplorerTab: NSViewController, NSSplitViewDelegate {
 
     // MARK: Preview pane
 
+    @objc func togglePreviewDetachment(_ sender: Any?) {
+        guard Prefs.previewPane, !isSecondPane else { return }
+        if let previewWindow {
+            previewWindow.close()
+            return
+        }
+        guard previewPane.superview === split else { return }
+        split.removeArrangedSubview(previewPane)
+        previewPane.removeFromSuperview()
+        split.adjustSubviews()
+        let detached = PreviewWindow(pane: previewPane)
+        previewWindow = detached
+        previewPane.isDetached = true
+        detached.onClose = { [weak self] in
+            guard let self else { return }
+            self.previewWindow = nil
+            self.previewPane.isDetached = false
+            self.applyPreviewPane()
+            if Prefs.previewPane { self.host?.window?.makeKeyAndOrderFront(nil) }
+        }
+        detached.show(selectedItems, in: location)
+        detached.showWindow(nil)
+    }
+
     @objc func togglePreviewPane(_ sender: Any?) {
         Prefs.previewPane.toggle()
         NotificationCenter.default.post(name: .explorerPreviewPaneChanged, object: nil)
@@ -1458,6 +1487,12 @@ final class ExplorerTab: NSViewController, NSSplitViewDelegate {
     func applyPreviewPane() {
         paneButton.isOn = Prefs.previewPane
         let shown = Prefs.previewPane && !isSecondPane
+        if !shown, let previewWindow {
+            previewPane.clear()
+            previewWindow.close()
+            return
+        }
+        guard previewWindow == nil else { return }
         guard (previewPane.superview === split) != shown else { return }
         if shown {
             split.addArrangedSubview(previewPane)
@@ -1564,7 +1599,10 @@ final class ExplorerTab: NSViewController, NSSplitViewDelegate {
         cloudRefresh?.cancel()
         iconReload?.cancel()
         usageScanner?.cancel()
-        previewPane.clear()
+        previewWindow?.onClose = nil
+        previewWindow?.close()
+        previewWindow = nil
+        previewPane.tearDown()
         if let keyMonitor { NSEvent.removeMonitor(keyMonitor) }
         keyMonitor = nil
         observers.forEach(NotificationCenter.default.removeObserver)

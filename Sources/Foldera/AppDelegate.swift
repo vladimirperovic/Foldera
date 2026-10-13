@@ -376,6 +376,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
             case "properties": return NSApp.windows.first { $0 is EscWindow && $0.isVisible }
             case "sync": return NSApp.windows.first { $0.windowController is SyncWindow }
             case "history": return NSApp.windows.first { $0.windowController is SyncHistoryWindow }
+            case "details": return controller?.previewWindow?.window
             case "sheet": return controller?.window?.attachedSheet ?? NSApp.windows.first { $0.windowController is SyncWindow }?.attachedSheet
             default: return controller?.window
             }
@@ -390,6 +391,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
             case "newfolder": controller?.newFolder(nil)
             case "cut": controller?.cut(nil)
             case "properties": controller?.showProperties(nil)
+            case "detachpreview": controller?.togglePreviewDetachment(nil); capture = "details"
             case "filters": controller?.filtersChanged(SearchFilters(kind: .images))
             case "sync": (captured()?.windowController as? SyncWindow)?.synchronize(nil)
             case "synchistory": SyncHistoryWindow.show(); capture = "history"

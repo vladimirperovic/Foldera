@@ -12,6 +12,22 @@ final class FlippedView: NSView {
 /// of the selected file by Quick Look, and what Windows' details pane says
 /// about it. With nothing selected, it describes the folder.
 final class PreviewPane: NSView {
+    var onToggleDetached: (() -> Void)?
+    private let body = NSView()
+    private let detachButton = NSButton()
+    private let fullScreenButton = NSButton()
+    private var stageLimit: NSLayoutConstraint?
+    var isDetached = false {
+        didSet {
+            let label = isDetached ? "Return details to the main window" : "Open details in a separate window"
+            detachButton.image = NSImage(systemSymbolName: isDetached ? "sidebar.right" : "arrow.up.forward.square",
+                                        accessibilityDescription: label)
+            detachButton.toolTip = label
+            detachButton.setAccessibilityLabel(label)
+            fullScreenButton.isHidden = !isDetached
+            stageLimit?.constant = isDetached ? 1200 : 360
+        }
+    }
     private let scroll = NSScrollView()
     private let content = FlippedView()
     private let stage = NSView()
@@ -27,7 +43,7 @@ final class PreviewPane: NSView {
 
     // Markdown files: the rendered page, or the text to edit, over the whole pane.
     private let markdownBox = NSView()
-    private let markdownName = NSTextField(labelWithString: "")
+    private let paneName = NSTextField(labelWithString: "Details")
     private lazy var markdownView = MarkdownView()
     private lazy var markdownEditor = MarkdownTextView()
     private var markdownBuilt = false
@@ -39,7 +55,7 @@ final class PreviewPane: NSView {
     private static let markdownReads = BackgroundTask.queue("Foldera.markdown-files")
     private let markdownRead = BackgroundTask(queue: PreviewPane.markdownReads)
     private var editing = false
-    private var editorButton: NSButton?
+    private let editorButton = NSButton()
 
     override init(frame: NSRect) {
         super.init(frame: frame)
@@ -51,58 +67,74 @@ final class PreviewPane: NSView {
     private func buildMarkdown() {
         guard !markdownBuilt else { return }
         markdownBuilt = true
-        markdownName.font = .boldSystemFont(ofSize: 12)
-        markdownName.lineBreakMode = .byTruncatingMiddle
-        markdownName.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        markdownView.fontSize = 13
+        markdownEditor.isHidden = true
+        pin(markdownView, in: markdownBox)
+        pin(markdownEditor, in: markdownBox)
+        markdownBox.isHidden = true
+        pin(markdownBox, in: body)
+    }
+
+    private func buildHeader() {
+        paneName.font = .boldSystemFont(ofSize: 12)
+        paneName.lineBreakMode = .byTruncatingMiddle
+        paneName.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
         editButton.bezelStyle = .push
         editButton.controlSize = .small
         editButton.target = self
         editButton.action = #selector(toggleEditing(_:))
-        let window = NSButton(image: NSImage(systemSymbolName: "macwindow", accessibilityDescription: "Open in editor")!,
-                              target: self, action: #selector(openEditor(_:)))
-        window.bezelStyle = .push
-        window.controlSize = .small
-        window.toolTip = "Open in the Markdown editor, with the text and the page side by side"
-        editorButton = window
-        let header = NSStackView(views: [markdownName, NSView(), editButton, window])
+        editButton.identifier = NSUserInterfaceItemIdentifier("preview.edit")
+        editButton.isHidden = true
+        editorButton.image = NSImage(systemSymbolName: "macwindow", accessibilityDescription: "Open in editor")
+        editorButton.action = #selector(openEditor(_:))
+        editorButton.toolTip = "Open in the Markdown editor, with the text and the page side by side"
+        editorButton.isHidden = true
+        detachButton.action = #selector(toggleDetached(_:))
+        detachButton.identifier = NSUserInterfaceItemIdentifier("preview.detach")
+        fullScreenButton.image = NSImage(systemSymbolName: "arrow.up.left.and.arrow.down.right",
+                                        accessibilityDescription: "Toggle full screen")
+        fullScreenButton.action = #selector(toggleFullScreen(_:))
+        fullScreenButton.toolTip = "Enter or leave full screen"
+        fullScreenButton.setAccessibilityLabel("Toggle full screen")
+        for button in [editorButton, detachButton, fullScreenButton] {
+            button.target = self
+            button.bezelStyle = .push
+            button.controlSize = .small
+            button.imagePosition = .imageOnly
+        }
+        isDetached = false
+        let header = NSStackView(views: [paneName, NSView(), editButton, editorButton, detachButton, fullScreenButton])
         header.orientation = .horizontal
         header.distribution = .fill
         header.spacing = 6
         header.edgeInsets = NSEdgeInsets(top: 6, left: 12, bottom: 6, right: 8)
         let line = NSBox()
         line.boxType = .separator
-        markdownView.fontSize = 13
-        markdownEditor.isHidden = true
-        for v in [header, line, markdownView, markdownEditor] as [NSView] {
+        for v in [header, line, body] as [NSView] {
             v.translatesAutoresizingMaskIntoConstraints = false
-            markdownBox.addSubview(v)
+            addSubview(v)
         }
         NSLayoutConstraint.activate([
-            header.leadingAnchor.constraint(equalTo: markdownBox.leadingAnchor),
-            header.trailingAnchor.constraint(equalTo: markdownBox.trailingAnchor),
-            header.topAnchor.constraint(equalTo: markdownBox.topAnchor),
-            line.leadingAnchor.constraint(equalTo: markdownBox.leadingAnchor),
-            line.trailingAnchor.constraint(equalTo: markdownBox.trailingAnchor),
+            header.leadingAnchor.constraint(equalTo: leadingAnchor),
+            header.trailingAnchor.constraint(equalTo: trailingAnchor),
+            header.topAnchor.constraint(equalTo: topAnchor),
+            line.leadingAnchor.constraint(equalTo: leadingAnchor),
+            line.trailingAnchor.constraint(equalTo: trailingAnchor),
             line.topAnchor.constraint(equalTo: header.bottomAnchor),
+            body.leadingAnchor.constraint(equalTo: leadingAnchor),
+            body.trailingAnchor.constraint(equalTo: trailingAnchor),
+            body.topAnchor.constraint(equalTo: line.bottomAnchor),
+            body.bottomAnchor.constraint(equalTo: bottomAnchor),
         ])
-        for body in [markdownView, markdownEditor] as [NSView] {
-            NSLayoutConstraint.activate([
-                body.leadingAnchor.constraint(equalTo: markdownBox.leadingAnchor),
-                body.trailingAnchor.constraint(equalTo: markdownBox.trailingAnchor),
-                body.topAnchor.constraint(equalTo: line.bottomAnchor),
-                body.bottomAnchor.constraint(equalTo: markdownBox.bottomAnchor),
-            ])
-        }
-        markdownBox.isHidden = true
-        pin(markdownBox, in: self)
     }
 
     private func build() {
+        buildHeader()
         scroll.drawsBackground = false
         scroll.hasVerticalScroller = true
         scroll.autohidesScrollers = true
         scroll.documentView = content
-        pin(scroll, in: self)
+        pin(scroll, in: body)
 
         picture.imageScaling = .scaleProportionallyUpOrDown
         pin(picture, in: stage, inset: 24)
@@ -118,6 +150,8 @@ final class PreviewPane: NSView {
         content.translatesAutoresizingMaskIntoConstraints = false
         let height = stage.heightAnchor.constraint(equalTo: stage.widthAnchor, multiplier: 0.85)
         height.priority = .defaultHigh
+        let limit = stage.heightAnchor.constraint(lessThanOrEqualToConstant: 360)
+        stageLimit = limit
         NSLayoutConstraint.activate([
             content.leadingAnchor.constraint(equalTo: scroll.contentView.leadingAnchor),
             content.topAnchor.constraint(equalTo: scroll.contentView.topAnchor),
@@ -126,7 +160,7 @@ final class PreviewPane: NSView {
             stage.leadingAnchor.constraint(equalTo: content.leadingAnchor, constant: 14),
             stage.trailingAnchor.constraint(equalTo: content.trailingAnchor, constant: -14),
             height,
-            stage.heightAnchor.constraint(lessThanOrEqualToConstant: 360),
+            limit,
             stage.heightAnchor.constraint(greaterThanOrEqualToConstant: 120),
             title.topAnchor.constraint(equalTo: stage.bottomAnchor, constant: 14),
             title.leadingAnchor.constraint(equalTo: content.leadingAnchor, constant: 16),
@@ -151,6 +185,9 @@ final class PreviewPane: NSView {
 
     // MARK: Showing
 
+    @objc private func toggleDetached(_ sender: Any?) { onToggleDetached?() }
+    @objc private func toggleFullScreen(_ sender: Any?) { window?.toggleFullScreen(sender) }
+
     /// Waits a moment, so holding an arrow key through a list doesn't preview every file on the way.
     func show(_ selection: [FileItem], in location: Location, count: Int) {
         pending?.cancel()
@@ -170,6 +207,13 @@ final class PreviewPane: NSView {
         generation += 1
         quickLook?.previewItem = nil
         previewed = nil
+    }
+
+    /// A tab is closing; the Quick Look view will no longer be reused.
+    func tearDown() {
+        clear()
+        quickLook?.close()
+        quickLook = nil
     }
 
     private func render(_ selection: [FileItem], _ location: Location, _ count: Int) {
@@ -250,7 +294,8 @@ final class PreviewPane: NSView {
         if markdownFile?.key != url.key {
             finishEditing(movingOn: true)
             markdownFile = url
-            markdownName.stringValue = url.lastPathComponent
+            paneName.stringValue = url.lastPathComponent
+            paneName.toolTip = url.lastPathComponent
             markdownSaved = ""
             markdownVersion = nil
             markdownView.show("Loading…", file: url)
@@ -258,7 +303,9 @@ final class PreviewPane: NSView {
         // What is inside an opened archive is shown, not edited: the archive itself wouldn't change.
         let readOnly = ArchiveFolders.isInside(url)
         editButton.isEnabled = !readOnly && editing
-        editorButton?.isEnabled = !readOnly
+        editorButton.isEnabled = !readOnly
+        editButton.isHidden = false
+        editorButton.isHidden = false
         scroll.isHidden = true
         markdownBox.isHidden = false
         if !editing {
@@ -287,6 +334,10 @@ final class PreviewPane: NSView {
         markdownRead.cancel()
         markdownView.cancel()
         markdownFile = nil
+        paneName.stringValue = "Details"
+        paneName.toolTip = nil
+        editButton.isHidden = true
+        editorButton.isHidden = true
         markdownBox.isHidden = true
         scroll.isHidden = false
     }
@@ -395,7 +446,9 @@ final class PreviewPane: NSView {
 
     private func makeQuickLook() -> QLPreviewView {
         let preview: QLPreviewView = QLPreviewView(frame: .zero, style: .compact)
-        preview.shouldCloseWithWindow = true
+        // The same view can move between the tab and a separate window.
+        // Closing that window docks the view; only tearDown disposes it.
+        preview.shouldCloseWithWindow = false
         preview.autostarts = false
         pin(preview, in: stage)
         quickLook = preview

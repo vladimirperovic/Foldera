@@ -89,6 +89,12 @@ yourself, see [Building](#building).
   - picture dimensions and camera, PDF page count, running time, and where
     a download came from;
   - for a folder, how many items it holds.
+  - the **Open details in a separate window** button in its header detaches
+    the panel. It follows the selection in its original tab, and the file list
+    gets the freed space. Use the full-screen button or the green window button
+    for a larger view. **Return details to the main window**, or closing the
+    detached window, docks it again. Markdown stays in reading mode; a draft
+    being edited stays open without being saved just by detaching or docking.
 - **Status bar**: item count, selection and its size, and the layout switch.
 - **Search** (top right): searches the folder and everything below it as
   you type. `*.pdf` works.
@@ -457,8 +463,8 @@ again after each rebuild. Full Disk Access for Foldera stops the prompts.
 
 `Foldera --snapshot <folder|thismac|image> out.png [--icons|--columns|--usage] [--pane]
 [--light|--dark] [--size WxH] [--tabs count] [--search text] [--select name] [--press keys]
-[--iconsize points] [--act newfolder|cut|properties|quickopen|commands] [--query text]
-[--press-delay seconds] [--wait seconds] [--capture properties|viewer|sheet]
+[--iconsize points] [--act newfolder|cut|properties|quickopen|commands|detachpreview] [--query text]
+[--press-delay seconds] [--wait seconds] [--capture properties|viewer|sheet|details]
 [--two-panes other-folder]
 [--right-tabs count]
 [--sync other-folder [--mode twoWay|mirror|update] [--sync-left] [--sync-empty]]

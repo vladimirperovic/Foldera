@@ -118,7 +118,7 @@ yourself, see [Building](#building).
   Commander has it. Each pane has its own tabs and folder tree; the second
   opens where it was last left. The pane at work has a
   coloured line along its top; click a pane or press Tab to change.
-  - The **Sync** icon in the command bar and **Sync › Sync Folders…**
+  - The **Sync folder** button in the command bar and **Sync › Sync Folders…**
     (⌥⌘S) open a separate sync window with the two displayed folders.
     Each side lists its relative paths, sizes and dates, with planned actions
     between them. Browsing stays available while the Sync window is open.
@@ -183,6 +183,9 @@ For animated or multi-frame images it reads the first frame.
   list (Details); move it right and the folder turns into pictures at once,
   bigger the further you go (48–256 points), keeping what you were looking
   at in sight. ⌘+ / ⌘− and ⌘ (or ⌃) with the scroll wheel do the same.
+  The pictures widen to fill each row, and the gaps between them shrink as
+  they grow. At the largest size there are none: the pictures sit edge to
+  edge, cut square, without names (point at one for its name).
 
 ## Copying, moving, undo
 
@@ -204,7 +207,7 @@ For animated or multi-frame images it reads the first frame.
 
 ## Sync folders
 
-The **Sync** toolbar icon, **Sync › Sync Folders…** (⌥⌘S), and
+The **Sync folder** toolbar button, **Sync › Sync Folders…** (⌥⌘S), and
 **File › Sync Folders…** open a separate window to keep two folders in step, as
 [FreeFileSync](https://freefilesync.org) does. Right-click a folder →
 *Sync with…*, or two selected folders → *Sync these folders…*, to start
@@ -409,9 +412,9 @@ DNG…). macOS decodes all of them itself.
 | | |
 |---|---|
 | → ← · Space · wheel | next / previous |
-| click | fit ↔ actual size at that spot; drag to pan |
+| click · T | thumbnails of the folder along the bottom (zoomed in, a click fits again); drag to pan |
 | + − · 0 · 1 · pinch · ⌘/⌥ + wheel | zoom · fit · 100% |
-| F or Enter · double-click | full screen |
+| F or Enter · double-click · Full screen | full screen |
 | R · L | rotate (view only) |
 | I | EXIF panel (camera, lens, exposure, GPS…) |
 | S | slideshow |
@@ -419,6 +422,7 @@ DNG…). macOS decodes all of them itself.
 | E | open in the default app (Preview, Photoshop…) |
 | Esc | leave full screen / close |
 
+Fit makes the picture as large as the window allows, small pictures too.
 The viewer decodes pictures at screen resolution and keeps the one before
 and after ready. It loads the full resolution only when you zoom past the
 screen's resolution.

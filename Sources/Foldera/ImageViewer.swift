@@ -157,6 +157,19 @@ final class CenteringClipView: NSClipView {
     func scrollConstrained(to point: NSPoint) {
         scroll(to: constrainBoundsRect(NSRect(origin: point, size: bounds.size)).origin)
     }
+
+    // A click on the dark around a picture counts as one on the picture.
+    private var viewer: ImageViewer? { (enclosingScrollView as? ViewerScrollView)?.viewer }
+
+    override func mouseDown(with event: NSEvent) {
+        guard let viewer else { return super.mouseDown(with: event) }
+        if event.clickCount == 2 { viewer.doubleClicked() }
+    }
+
+    override func mouseUp(with event: NSEvent) {
+        guard let viewer else { return super.mouseUp(with: event) }
+        if event.clickCount == 1 { viewer.clicked() }
+    }
 }
 
 /// While the whole picture fits, the wheel turns pages, as in FastStone;
@@ -194,8 +207,8 @@ final class ViewerScrollView: NSScrollView {
     }
 }
 
-/// The picture. A click switches between fitting the window and actual
-/// size at that spot; dragging pans; a double-click goes full screen.
+/// The picture. A click shows or hides the thumbnails (or, zoomed in, fits
+/// the picture again); dragging pans; a double-click goes full screen.
 final class ViewerCanvas: NSImageView {
     weak var viewer: ImageViewer?
     private var start: NSPoint?
@@ -214,7 +227,7 @@ final class ViewerCanvas: NSImageView {
 
     override func mouseDown(with event: NSEvent) {
         if event.clickCount == 2 {
-            viewer?.toggleFullScreen(nil)
+            viewer?.doubleClicked()
             start = nil
             return
         }
@@ -238,7 +251,7 @@ final class ViewerCanvas: NSImageView {
 
     override func mouseUp(with event: NSEvent) {
         if start != nil && !dragged && event.clickCount == 1 {
-            viewer?.toggleZoom(at: convert(event.locationInWindow, from: nil))
+            viewer?.clicked()
         }
         if dragged { NSCursor.arrow.set() }
         start = nil
@@ -270,6 +283,9 @@ final class ImageViewer: NSWindowController, NSWindowDelegate, NSMenuItemValidat
     private var shown: ImageFiles.Loaded?
     private var turns = 0
     private(set) var fitMode = true
+    var magnification: CGFloat { scroll.magnification }
+    /// Where the picture can go, above the thumbnails when they show.
+    var pictureArea: NSSize { scroll.frame.size }
     private var cache: [String: ImageFiles.Loaded] = [:]
     private static let decodes = BackgroundTask.queue("Foldera.image-decoding")
     private var inFlight: [String: BackgroundTask] = [:]
@@ -289,6 +305,14 @@ final class ImageViewer: NSWindowController, NSWindowDelegate, NSMenuItemValidat
     private let infoPanel = NSVisualEffectView()
     private let infoText = NSTextField(wrappingLabelWithString: "")
     private let playButton = ToolButton(symbol: "play.fill", tip: "Slideshow (S)", iconSize: 13)
+    private let fullScreenButton = ToolButton(symbol: "arrow.up.left.and.arrow.down.right", label: "Full screen",
+                                              tip: "Full screen (F)", iconSize: 13)
+    private let thumbnailsButton = ToolButton(symbol: "film", tip: "Thumbnails (T)", iconSize: 13)
+    let filmstrip = Filmstrip()
+    private var scrollBottom: NSLayoutConstraint?
+    private var barBottom: NSLayoutConstraint?
+    /// A single click, waiting to see whether it becomes a double one.
+    private var pendingClick: DispatchWorkItem?
 
     /// Opens the viewer on `urls[index]`, reusing the window if it is open.
     static func show(_ urls: [URL], at index: Int) {
@@ -296,6 +320,7 @@ final class ImageViewer: NSWindowController, NSWindowDelegate, NSMenuItemValidat
         let viewer = shared ?? ImageViewer()
         shared = viewer
         viewer.urls = urls
+        viewer.filmstrip.urls = urls
         viewer.cancelLoads()
         viewer.cache = [:]
         viewer.go(to: min(max(index, 0), urls.count - 1))
@@ -380,6 +405,10 @@ final class ImageViewer: NSWindowController, NSWindowDelegate, NSMenuItemValidat
         }
         playButton.target = self
         playButton.action = #selector(toggleSlideshow(_:))
+        fullScreenButton.target = self
+        fullScreenButton.action = #selector(toggleFullScreen(_:))
+        thumbnailsButton.target = self
+        thumbnailsButton.action = #selector(toggleThumbnails(_:))
         let views: [NSView] = [
             button("chevron.left", "Previous (←)", #selector(previous(_:))),
             button("chevron.right", "Next (→)", #selector(next(_:))),
@@ -391,8 +420,9 @@ final class ImageViewer: NSWindowController, NSWindowDelegate, NSMenuItemValidat
             button("rotate.left", "Rotate left (L)", #selector(rotateLeft(_:))),
             button("rotate.right", "Rotate right (R)", #selector(rotateRight(_:))),
             button("info.circle", "Information (I)", #selector(toggleInfo(_:))),
+            thumbnailsButton,
             playButton,
-            button("arrow.up.left.and.arrow.down.right", "Full screen (F)", #selector(toggleFullScreen(_:))),
+            fullScreenButton,
             button("arrow.up.forward.app", "Open in the default app (E)", #selector(openExternally(_:))),
             button("trash", "Move to Trash (Delete)", #selector(delete(_:))),
         ]
@@ -424,19 +454,34 @@ final class ImageViewer: NSWindowController, NSWindowDelegate, NSMenuItemValidat
             infoText.widthAnchor.constraint(equalToConstant: 260),
         ])
 
-        pin(scroll, in: content)
-        for v in [spinner, message, bar, infoPanel] as [NSView] {
+        scroll.translatesAutoresizingMaskIntoConstraints = false
+        content.addSubview(scroll)
+        let scrollBottom = scroll.bottomAnchor.constraint(equalTo: content.bottomAnchor)
+        let barBottom = bar.bottomAnchor.constraint(equalTo: content.bottomAnchor, constant: -18)
+        self.scrollBottom = scrollBottom
+        self.barBottom = barBottom
+        filmstrip.isHidden = true
+        filmstrip.onPick = { [weak self] index in self?.go(to: index) }
+        for v in [spinner, message, filmstrip, bar, infoPanel] as [NSView] {
             v.translatesAutoresizingMaskIntoConstraints = false
             content.addSubview(v)
         }
         NSLayoutConstraint.activate([
+            scroll.leadingAnchor.constraint(equalTo: content.leadingAnchor),
+            scroll.trailingAnchor.constraint(equalTo: content.trailingAnchor),
+            scroll.topAnchor.constraint(equalTo: content.topAnchor),
+            scrollBottom,
+            filmstrip.leadingAnchor.constraint(equalTo: content.leadingAnchor),
+            filmstrip.trailingAnchor.constraint(equalTo: content.trailingAnchor),
+            filmstrip.bottomAnchor.constraint(equalTo: content.bottomAnchor),
+            filmstrip.heightAnchor.constraint(equalToConstant: Filmstrip.height),
             spinner.centerXAnchor.constraint(equalTo: content.centerXAnchor),
             spinner.centerYAnchor.constraint(equalTo: content.centerYAnchor),
             message.centerXAnchor.constraint(equalTo: content.centerXAnchor),
             message.centerYAnchor.constraint(equalTo: content.centerYAnchor),
             message.widthAnchor.constraint(lessThanOrEqualTo: content.widthAnchor, constant: -40),
             bar.centerXAnchor.constraint(equalTo: content.centerXAnchor),
-            bar.bottomAnchor.constraint(equalTo: content.bottomAnchor, constant: -18),
+            barBottom,
             bar.widthAnchor.constraint(lessThanOrEqualTo: content.widthAnchor, constant: -24),
             infoPanel.trailingAnchor.constraint(equalTo: content.trailingAnchor, constant: -16),
             infoPanel.topAnchor.constraint(equalTo: content.topAnchor, constant: 44),
@@ -479,6 +524,7 @@ final class ImageViewer: NSWindowController, NSWindowDelegate, NSMenuItemValidat
         prefetch()
         updateLabels()
         showChrome()
+        filmstrip.current = index
     }
 
     func step(_ delta: Int) {
@@ -582,28 +628,49 @@ final class ImageViewer: NSWindowController, NSWindowDelegate, NSMenuItemValidat
 
     // MARK: Zoom
 
-    /// Big pictures shrink to fit; small ones stay at actual size, as in FastStone.
+    /// The picture as large as the window lets it be, small ones too.
     private func applyFit() {
         let size = canvas.frame.size
         let visible = scroll.contentSize
         guard size.width > 0, size.height > 0, visible.width > 0 else { return }
-        let scale = min(visible.width / size.width, visible.height / size.height, 1)
+        let scale = min(visible.width / size.width, visible.height / size.height)
         scroll.magnification = scale
         (scroll.contentView as? CenteringClipView)?.scrollConstrained(to: .zero)
         scroll.reflectScrolledClipView(scroll.contentView)
         updateLabels()
     }
 
-    func toggleZoom(at point: NSPoint) {
-        if fitMode && scroll.magnification < 0.999 {
-            fitMode = false
-            scroll.setMagnification(1, centeredAt: point)
-            sharpenIfNeeded()
-        } else {
-            fitMode = true
-            applyFit()
+    /// While the picture fits, a click shows or hides the thumbnails; zoomed
+    /// in, it fits the picture again. It waits a double click's time, since
+    /// a double click goes full screen instead.
+    func clicked() {
+        pendingClick?.cancel()
+        let work = DispatchWorkItem { [weak self] in
+            guard let self else { return }
+            self.pendingClick = nil
+            if self.fitMode { self.toggleThumbnails(nil) } else { self.fit(nil) }
         }
-        updateLabels()
+        pendingClick = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + NSEvent.doubleClickInterval, execute: work)
+    }
+
+    func doubleClicked() {
+        pendingClick?.cancel()
+        pendingClick = nil
+        toggleFullScreen(nil)
+    }
+
+    /// The folder's pictures along the bottom; the picture makes room for them.
+    @objc func toggleThumbnails(_ sender: Any?) {
+        let show = filmstrip.isHidden
+        filmstrip.isHidden = !show
+        thumbnailsButton.isOn = show
+        scrollBottom?.constant = show ? -Filmstrip.height : 0
+        barBottom?.constant = show ? -Filmstrip.height - 10 : -18
+        window?.contentView?.layoutSubtreeIfNeeded()
+        if show { filmstrip.current = index }
+        if fitMode { applyFit() }
+        showChrome()
     }
 
     func zoom(by factor: CGFloat, at event: NSEvent? = nil) {
@@ -750,6 +817,7 @@ final class ImageViewer: NSWindowController, NSWindowDelegate, NSMenuItemValidat
         FileOps.trash([url]) { [weak self] removed in
             guard let self, !removed.isEmpty else { return }
             self.urls.removeAll { $0.key == url.key }
+            self.filmstrip.urls = self.urls
             self.cache[url.key] = nil
             if self.urls.isEmpty {
                 self.close()
@@ -784,6 +852,7 @@ final class ImageViewer: NSWindowController, NSWindowDelegate, NSMenuItemValidat
         case "r": rotateRight(nil)
         case "l": rotateLeft(nil)
         case "i": toggleInfo(nil)
+        case "t": toggleThumbnails(nil)
         case "s": toggleSlideshow(nil)
         case "e": openExternally(nil)
         case "+", "=": zoomIn(nil)
@@ -803,11 +872,15 @@ final class ImageViewer: NSWindowController, NSWindowDelegate, NSMenuItemValidat
 
     func windowDidEnterFullScreen(_ notification: Notification) {
         UserDefaults.standard.set(true, forKey: "viewerFullScreen")
+        fullScreenButton.label = "Exit full screen"
+        fullScreenButton.setSymbol("arrow.down.right.and.arrow.up.left", iconSize: 13)
         fit(nil)
     }
 
     func windowDidExitFullScreen(_ notification: Notification) {
         UserDefaults.standard.set(false, forKey: "viewerFullScreen")
+        fullScreenButton.label = "Full screen"
+        fullScreenButton.setSymbol("arrow.up.left.and.arrow.down.right", iconSize: 13)
         fit(nil)
     }
 
@@ -822,10 +895,172 @@ final class ImageViewer: NSWindowController, NSWindowDelegate, NSMenuItemValidat
         slideshow = nil
         playButton.isOn = false
         hideWork?.cancel()
+        pendingClick?.cancel()
+        filmstrip.urls = []
         cache = [:]
         canvas.image = nil
         original = nil
         shown = nil
         Self.shared = nil
+    }
+}
+
+/// The folder's pictures in a row along the bottom of the viewer; a click
+/// on one shows it. Thumbnails are made only for the ones in sight.
+final class Filmstrip: NSVisualEffectView, NSCollectionViewDataSource, NSCollectionViewDelegate {
+    static let height: CGFloat = 104
+    static let side: CGFloat = 84
+
+    var urls: [URL] = [] { didSet { grid.reloadData() } }
+    /// The picture shown above, framed and kept in sight.
+    var current = 0 {
+        didSet {
+            guard !isHidden, current < urls.count else { return }
+            for tile in grid.visibleItems() { (tile as? FilmstripItem)?.refreshMark(current: current) }
+            grid.layoutSubtreeIfNeeded()
+            grid.scrollToItems(at: [IndexPath(item: current, section: 0)], scrollPosition: .centeredHorizontally)
+        }
+    }
+    var onPick: ((Int) -> Void)?
+
+    private let scroll = SidewaysScrollView()
+    private let grid = KeylessCollectionView()
+
+    override init(frame: NSRect) {
+        super.init(frame: frame)
+        material = .hudWindow
+        blendingMode = .withinWindow
+        state = .active
+        let layout = NSCollectionViewFlowLayout()
+        layout.scrollDirection = .horizontal
+        layout.itemSize = NSSize(width: Self.side, height: Self.side)
+        layout.minimumLineSpacing = 6
+        layout.sectionInset = NSEdgeInsets(top: 10, left: 10, bottom: 10, right: 10)
+        grid.collectionViewLayout = layout
+        grid.backgroundColors = [.clear]
+        grid.isSelectable = false
+        grid.dataSource = self
+        grid.delegate = self
+        grid.register(FilmstripItem.self, forItemWithIdentifier: Self.item)
+        scroll.documentView = grid
+        scroll.drawsBackground = false
+        scroll.hasHorizontalScroller = true
+        scroll.hasVerticalScroller = false
+        scroll.autohidesScrollers = true
+        scroll.scrollerStyle = .overlay
+        scroll.translatesAutoresizingMaskIntoConstraints = false
+        addSubview(scroll)
+        NSLayoutConstraint.activate([
+            scroll.leadingAnchor.constraint(equalTo: leadingAnchor),
+            scroll.trailingAnchor.constraint(equalTo: trailingAnchor),
+            scroll.topAnchor.constraint(equalTo: topAnchor),
+            scroll.bottomAnchor.constraint(equalTo: bottomAnchor),
+        ])
+    }
+
+    required init?(coder: NSCoder) { fatalError("not used") }
+
+    private static let item = NSUserInterfaceItemIdentifier("FilmstripItem")
+
+    func collectionView(_ collectionView: NSCollectionView, numberOfItemsInSection section: Int) -> Int { urls.count }
+
+    func collectionView(_ collectionView: NSCollectionView, itemForRepresentedObjectAt indexPath: IndexPath) -> NSCollectionViewItem {
+        let tile = collectionView.makeItem(withIdentifier: Self.item, for: indexPath)
+        if let tile = tile as? FilmstripItem, indexPath.item < urls.count {
+            tile.configure(urls[indexPath.item], index: indexPath.item, current: current)
+            tile.onClick = { [weak self] index in self?.onPick?(index) }
+        }
+        return tile
+    }
+
+    func collectionView(_ collectionView: NSCollectionView, didEndDisplaying item: NSCollectionViewItem,
+                        forRepresentedObjectAt indexPath: IndexPath) {
+        guard collectionView.indexPath(for: item) == nil else { return }
+        (item as? FilmstripItem)?.stopThumbnail()
+    }
+}
+
+/// Keys stay with the viewer, which turns the pages.
+final class KeylessCollectionView: NSCollectionView {
+    override var acceptsFirstResponder: Bool { false }
+}
+
+/// A row that scrolls sideways under a mouse wheel too.
+final class SidewaysScrollView: NSScrollView {
+    override func scrollWheel(with event: NSEvent) {
+        guard abs(event.scrollingDeltaY) > abs(event.scrollingDeltaX), let document = documentView else {
+            return super.scrollWheel(with: event)
+        }
+        let step = event.hasPreciseScrollingDeltas ? event.scrollingDeltaY : event.scrollingDeltaY * 12
+        var origin = contentView.bounds.origin
+        origin.x = min(max(origin.x - step, 0), max(document.frame.width - contentView.bounds.width, 0))
+        contentView.scroll(to: origin)
+        reflectScrolledClipView(contentView)
+    }
+}
+
+/// One thumbnail in the strip; the picture shown above is framed.
+final class FilmstripItem: NSCollectionViewItem {
+    private let picture = NSImageView()
+    private var url: URL?
+    private var index = 0
+    private var thumbnail: Thumbnails.Ticket?
+    var onClick: ((Int) -> Void)?
+
+    override func loadView() {
+        let tile = ClickView()
+        tile.wantsLayer = true
+        tile.layer?.cornerRadius = 4
+        tile.onClick = { [weak self] in
+            guard let self else { return }
+            self.onClick?(self.index)
+        }
+        picture.imageScaling = .scaleProportionallyUpOrDown
+        picture.translatesAutoresizingMaskIntoConstraints = false
+        tile.addSubview(picture)
+        NSLayoutConstraint.activate([
+            picture.leadingAnchor.constraint(equalTo: tile.leadingAnchor, constant: 3),
+            picture.trailingAnchor.constraint(equalTo: tile.trailingAnchor, constant: -3),
+            picture.topAnchor.constraint(equalTo: tile.topAnchor, constant: 3),
+            picture.bottomAnchor.constraint(equalTo: tile.bottomAnchor, constant: -3),
+        ])
+        view = tile
+    }
+
+    func configure(_ url: URL, index: Int, current: Int) {
+        if self.url?.key != url.key { stopThumbnail() }
+        self.url = url
+        self.index = index
+        view.toolTip = url.lastPathComponent
+        refreshMark(current: current)
+        // By its name, not the file: a slow disk is asked only for the thumbnail.
+        picture.image = NSWorkspace.shared.icon(for: UTType(filenameExtension: url.pathExtension) ?? .image)
+        let scale = view.window?.backingScaleFactor ?? 2
+        thumbnail = Thumbnails.shared.image(for: url, side: Filmstrip.side, scale: scale, version: nil) { [weak self] image in
+            guard let self, self.url?.key == url.key else { return }
+            self.thumbnail = nil
+            self.picture.image = image
+        }
+    }
+
+    func refreshMark(current: Int) {
+        let shown = index == current
+        view.layer?.borderWidth = shown ? 3 : 0
+        view.layer?.borderColor = NSColor.controlAccentColor.cgColor
+        picture.alphaValue = shown ? 1 : 0.75
+    }
+
+    func stopThumbnail() {
+        if let thumbnail { Thumbnails.shared.cancel(thumbnail) }
+        thumbnail = nil
+    }
+}
+
+/// Answers a click, for a tile that isn't a button.
+final class ClickView: NSView {
+    var onClick: (() -> Void)?
+    override func mouseDown(with event: NSEvent) {}
+    override func mouseUp(with event: NSEvent) {
+        if bounds.contains(convert(event.locationInWindow, from: nil)) { onClick?() }
     }
 }

@@ -103,7 +103,7 @@ extension ExplorerTab: NSCollectionViewDataSource, NSCollectionViewDelegate {
         let tile = collectionView.makeItem(withIdentifier: .iconItem, for: indexPath)
         if let tile = tile as? IconItem, indexPath.item < items.count {
             let item = items[indexPath.item]
-            tile.side = Prefs.iconSize
+            tile.geometry = (collectionView.collectionViewLayout as? IconLayout)?.geometry ?? IconGeometry()
             tile.configure(item, dimmed: FileClipboard.shared.isCut(item.key))
         }
         return tile

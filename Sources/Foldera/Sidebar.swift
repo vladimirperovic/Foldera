@@ -402,16 +402,25 @@ final class Sidebar: NSObject, NSOutlineViewDataSource, NSOutlineViewDelegate {
         guard !stopped, !node.loading, node.isExpandable, node.kind != .network else { return }
         node.loading = true
         let generation = node.generation
+        let started = Date()
         Self.reads.addOperation { [weak self, weak node] in
             guard let self, let node else { return }
             let made = self.readChildren(node)
             DispatchQueue.main.async { [weak self, weak node] in
                 guard let self, let node, !self.stopped else { return }
-                node.loading = false
                 guard generation == node.generation else {
-                    if self.outline.isItemExpanded(node) { self.load(node) }
+                    // Changed while it was read: rest as long as the read
+                    // took, still loading so no other read starts, then read
+                    // again. A folder that keeps changing on a slow disk is
+                    // not read back to back.
+                    DispatchQueue.main.asyncAfter(deadline: .now() + Date().timeIntervalSince(started)) { [weak self, weak node] in
+                        guard let self, let node else { return }
+                        node.loading = false
+                        if !self.stopped, self.outline.isItemExpanded(node) { self.load(node) }
+                    }
                     return
                 }
+                node.loading = false
                 let old = Dictionary((node.children ?? []).map { ($0.identity, $0) }, uniquingKeysWith: { first, _ in first })
                 node.children = made.map { old[$0.identity] ?? $0 }
                 node.needsReload = false

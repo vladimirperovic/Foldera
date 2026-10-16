@@ -39,6 +39,21 @@ final class ExplorerTab: NSViewController, NSSplitViewDelegate {
     let search = FolderSearch()
     let watcher = DirectoryWatcher()
     var loadGeneration = 0
+    /// The folder read under way, whether the folder changed meanwhile, and
+    /// the pause before reading it again: a folder that keeps changing (a
+    /// download, a script writing thousands of files) is read one time after
+    /// another with rests between, not again every few tenths of a second
+    /// with each read on a slow disk queued behind the last.
+    private var folderRead: (generation: Int, started: Date)?
+    private var changedDuringRead = false
+    private var changeReload: DispatchWorkItem?
+    /// A folder opened but not read yet. After a moment the one left behind
+    /// goes from the screen, so a slow disk doesn't show it under the new
+    /// address; a fast one reads the folder first and nothing blinks.
+    private var opening: DispatchWorkItem?
+    private(set) var waitingForFolder = false
+    /// Reads a folder for the list; tests stand a slow disk in for it.
+    static var readFolder: (URL, Bool) throws -> [FileItem] = FileItem.contents(of:showHidden:)
     private var navigationGeneration = 0
     private var pendingRecentVisit = false
     var sortGeneration = 0
@@ -86,7 +101,7 @@ final class ExplorerTab: NSViewController, NSSplitViewDelegate {
     let deleteButton = ToolButton(symbol: "trash", tip: "Move to Trash (Delete)")
     let sortButton = ToolButton(symbol: "arrow.up.arrow.down", label: "Sort", tip: "Sort", dropdown: true)
     let viewButton = ToolButton(symbol: "rectangle.grid.1x2", label: "View", tip: "Layout and hidden items", dropdown: true)
-    let syncButton = ToolButton(symbol: "arrow.triangle.2.circlepath", tip: "Sync folders…", iconSize: 16)
+    let syncButton = ToolButton(label: "Sync folder", tip: "Sync folders…")
     let moreButton = ToolButton(symbol: "ellipsis", tip: "See more")
     let paneButton = ToolButton(symbol: "sidebar.right", label: "Details", tip: "Preview and details pane (⇧⌘P)")
     let extractButton = ToolButton(symbol: "archivebox", label: "Extract all", tip: "Unpack this archive into a folder beside it")
@@ -116,7 +131,7 @@ final class ExplorerTab: NSViewController, NSSplitViewDelegate {
     let iconsToggle = ToolButton(symbol: "square.grid.2x2", tip: "Large icons (⌘2)", iconSize: 12, height: 22)
     let columnsToggle = ToolButton(symbol: "rectangle.split.3x1", tip: "Columns (⌘3)", iconSize: 12, height: 22)
     let usageToggle = ToolButton(symbol: "square.split.2x2", tip: "Disk usage (⌘4)", iconSize: 12, height: 22)
-    let iconSlider = NSSlider(value: Double(Prefs.iconSize), minValue: Double(ExplorerTab.listNotch), maxValue: 256, target: nil, action: nil)
+    let iconSlider = NSSlider(value: Double(Prefs.iconSize), minValue: Double(ExplorerTab.listNotch), maxValue: Double(IconGeometry.largest), target: nil, action: nil)
     let treemap = TreemapView()
 
     // Disk usage: the measuring under way, and who is waiting for it.
@@ -124,6 +139,8 @@ final class ExplorerTab: NSViewController, NSSplitViewDelegate {
     var measuring: Location?
     var waitingForUsage: [(UsageNode) -> Void] = []
     private var iconReload: DispatchWorkItem?
+    /// The size the pictures were last asked for at, and whether with names.
+    private var iconPictures: (CGFloat, Bool)?
     /// Folder sizes are already waiting for the scan under way.
     var waitingForFolderSizes = false
     /// Selecting from code, which the selection callbacks should let pass.
@@ -458,11 +475,9 @@ final class ExplorerTab: NSViewController, NSSplitViewDelegate {
     }
 
     private func setupGrid() {
-        let layout = NSCollectionViewFlowLayout()
-        layout.itemSize = Self.tileSize(Prefs.iconSize)
-        layout.minimumInteritemSpacing = 4
-        layout.minimumLineSpacing = 4
-        layout.sectionInset = NSEdgeInsets(top: 10, left: 10, bottom: 10, right: 10)
+        let layout = IconLayout()
+        layout.side = Prefs.iconSize
+        layout.onChange = { [weak self] geometry in self?.iconGeometryChanged(geometry) }
         grid.host = self
         grid.collectionViewLayout = layout
         grid.isSelectable = true
@@ -493,7 +508,7 @@ final class ExplorerTab: NSViewController, NSSplitViewDelegate {
         watcher.onChange = { [weak self] in
             guard let self, !self.isSearching else { return }
             if let folder = self.location.url { UsageCache.changed(folder) }
-            self.reload()
+            self.reloadForChange()
         }
         sidebar.onNavigate = { [weak self] location in self?.navigate(to: location) }
         sidebar.onDrop = { [weak self] urls, folder, move in self?.transfer(urls, into: folder, move: move) }
@@ -612,7 +627,29 @@ final class ExplorerTab: NSViewController, NSSplitViewDelegate {
             viewMode = remembered
             layoutLists()
         }
+        opening?.cancel()
+        opening = nil
         load()
+        if target != previous { clearWhileOpening() }
+    }
+
+    private func clearWhileOpening() {
+        let generation = loadGeneration
+        let work = DispatchWorkItem { [weak self] in
+            guard let self, generation == self.loadGeneration, !self.isSearching else { return }
+            self.opening = nil
+            self.waitingForFolder = true
+            self.items = []
+            if self.shownMode != .usage {
+                self.selectingQuietly = true
+                self.reloadVisibleList()
+                self.selectingQuietly = false
+            }
+            self.updateEmptyState()
+            self.selectionChanged()
+        }
+        opening = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.15, execute: work)
     }
 
     func submitAddress(_ text: String) {
@@ -672,6 +709,10 @@ final class ExplorerTab: NSViewController, NSSplitViewDelegate {
         }
         loadGeneration += 1
         let generation = loadGeneration
+        changeReload?.cancel()
+        changeReload = nil
+        folderRead = nil
+        changedDuringRead = false
         switch location {
         case .thisMac:
             // A network drive that stopped answering can hold this up; keep it off the main thread too.
@@ -687,10 +728,12 @@ final class ExplorerTab: NSViewController, NSSplitViewDelegate {
             let order = sort
             // Folder sizes measured before go in here too, so sorting by size is right the first time.
             let sizes = Prefs.folderSizes ? UsageCache.node(for: url).map(Self.folderSizes(in:)) : nil
+            let read = Self.readFolder
+            folderRead = (generation, Date())
             // Sorting a big folder takes a while; it happens here, off the main thread.
             DispatchQueue.global(qos: .userInitiated).async { [weak self] in
                 let result = Result { () -> [FileItem] in
-                    let found = try FileItem.contents(of: url, showHidden: hidden)
+                    let found = try read(url, hidden)
                     if let sizes { for item in found where item.isFolder && item.volume == nil { item.folderSize = sizes[item.name] } }
                     return found.sorted(by: order)
                 }
@@ -700,9 +743,40 @@ final class ExplorerTab: NSViewController, NSSplitViewDelegate {
                     case .success(let loaded): self.apply(loaded, error: nil, sortedBy: order, sized: sizes != nil)
                     case .failure(let error): self.apply([], error: error)
                     }
+                    self.folderReadFinished()
                 }
             }
         }
+    }
+
+    /// Answers the folder watcher. A change seen while the folder is read, or
+    /// while it rests after a read, is picked up by the next read.
+    private func reloadForChange() {
+        if changeReload != nil { return }
+        if folderRead?.generation == loadGeneration {
+            changedDuringRead = true
+            return
+        }
+        reload()
+    }
+
+    /// When the folder changed while it was read, it is read again after
+    /// resting as long as that read took: on a slow disk (exFAT, a network
+    /// share) the list stays current without the disk doing nothing else.
+    private func folderReadFinished() {
+        guard let read = folderRead, read.generation == loadGeneration else { return }
+        folderRead = nil
+        guard changedDuringRead else { return }
+        changedDuringRead = false
+        let generation = loadGeneration
+        let work = DispatchWorkItem { [weak self] in
+            guard let self else { return }
+            self.changeReload = nil
+            guard generation == self.loadGeneration, !self.isSearching else { return }
+            self.reload()
+        }
+        changeReload = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + max(0.3, Date().timeIntervalSince(read.started)), execute: work)
     }
 
     /// Loads again, keeping what is selected and where the list is scrolled.
@@ -721,6 +795,9 @@ final class ExplorerTab: NSViewController, NSSplitViewDelegate {
             return
         }
         loadError = error
+        opening?.cancel()
+        opening = nil
+        waitingForFolder = false
         if pendingRecentVisit, error == nil, !isSearching, let folder = location.url {
             RecentFolders.remember(folder)
             pendingRecentVisit = false
@@ -914,6 +991,8 @@ final class ExplorerTab: NSViewController, NSSplitViewDelegate {
         } else if items.isEmpty {
             if isSearching {
                 message = searchRunning ? nil : "No items match your search."
+            } else if waitingForFolder {
+                message = "Working on it…"
             } else if location != .thisMac {
                 message = "This folder is empty."
             }
@@ -1060,7 +1139,7 @@ final class ExplorerTab: NSViewController, NSSplitViewDelegate {
                 found += " (\(searchUnreadable == 1 ? "1 folder" : "\(Format.count(Int64(searchUnreadable))) folders") couldn't be searched)"
             }
             parts.append(found)
-        } else {
+        } else if !waitingForFolder {
             parts.append(Format.items(items.count))
         }
         let selected = selectedItems
@@ -1119,6 +1198,7 @@ final class ExplorerTab: NSViewController, NSSplitViewDelegate {
         let root = location.url ?? FileManager.default.homeDirectoryForCurrentUser
         // A folder listing still on its way must not land among the results.
         loadGeneration += 1
+        waitingForFolder = false
         items = []
         loadError = nil
         searchRunning = true
@@ -1261,11 +1341,6 @@ final class ExplorerTab: NSViewController, NSSplitViewDelegate {
 
     // MARK: Picture size
 
-    /// A tile a little wider than the picture, with room for two lines of name.
-    static func tileSize(_ side: CGFloat) -> NSSize {
-        NSSize(width: max(side + 44, 108), height: side + 56)
-    }
-
     /// The left end of the size slider, which stands for the list (Details).
     static let listNotch: CGFloat = 32
 
@@ -1292,21 +1367,27 @@ final class ExplorerTab: NSViewController, NSSplitViewDelegate {
     }
 
     func setIconSize(_ side: CGFloat) {
-        let side = min(max(side.rounded(), 48), 256)
+        let side = min(max(side.rounded(), 48), IconGeometry.largest)
         Prefs.iconSize = side
         iconSlider.doubleValue = Double(side)
-        guard let layout = grid.collectionViewLayout as? NSCollectionViewFlowLayout, layout.itemSize != Self.tileSize(side) else { return }
+        guard let layout = grid.collectionViewLayout as? IconLayout, layout.side != side else { return }
         // The picture chosen, or else the first in sight, stays in sight as the size changes.
         let anchor = grid.selectionIndexPaths.min() ?? grid.indexPathsForVisibleItems().min()
-        // A wheel sends many sizes a second: the tiles on screen follow at
-        // once, and the pictures are drawn again at the new size when it stops.
-        layout.itemSize = Self.tileSize(side)
-        for tile in grid.visibleItems() { (tile as? IconItem)?.side = side }
-        layout.invalidateLayout()
+        layout.side = side
         if let anchor, !gridScroll.isHidden, anchor.item < items.count {
             grid.layoutSubtreeIfNeeded()
             grid.scrollToItems(at: [anchor], scrollPosition: grid.selectionIndexPaths.isEmpty ? .top : .nearestHorizontalEdge)
         }
+    }
+
+    /// A new size, or the same size in a wider or narrower view. A wheel
+    /// sends many sizes a second: the tiles on screen follow at once, and
+    /// the pictures are drawn again at the new size when it stops.
+    func iconGeometryChanged(_ geometry: IconGeometry) {
+        for tile in grid.visibleItems() { (tile as? IconItem)?.geometry = geometry }
+        let pictures = (geometry.thumbnailSide, geometry.names)
+        guard iconPictures.map({ $0 != pictures }) ?? true else { return }
+        iconPictures = pictures
         iconReload?.cancel()
         let work = DispatchWorkItem { [weak self] in
             guard let self else { return }

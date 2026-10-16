@@ -75,6 +75,92 @@ import Testing
         #expect(watcher.isIdle && changes == 0)
     }
 
+    @Test func aFolderThatKeepsChangingIsReadOneTimeAfterAnother() async throws {
+        _ = NSApplication.shared
+        let fm = FileManager.default
+        let folder = fm.temporaryDirectory.appendingPathComponent("FolderaPaced-\(UUID().uuidString)")
+        try fm.createDirectory(at: folder, withIntermediateDirectories: true)
+        defer { try? fm.removeItem(at: folder) }
+        // A slow disk for this folder only: each read waits to be let through.
+        let gate = DispatchSemaphore(value: 0)
+        let lock = NSLock()
+        var reads = 0, active = 0, peak = 0
+        func counts() -> (reads: Int, active: Int, peak: Int) { lock.lock(); defer { lock.unlock() }; return (reads, active, peak) }
+        let original = ExplorerTab.readFolder
+        ExplorerTab.readFolder = { url, hidden in
+            guard url.key == folder.key else { return try original(url, hidden) }
+            lock.lock(); reads += 1; active += 1; peak = max(peak, active); lock.unlock()
+            _ = gate.wait(timeout: .now() + 5)
+            lock.lock(); active -= 1; lock.unlock()
+            return try original(url, hidden)
+        }
+        defer {
+            ExplorerTab.readFolder = original
+            for _ in 0..<8 { gate.signal() }
+        }
+
+        let tab = ExplorerTab(location: .folder(folder))
+        defer { tab.watcher.stop() }
+        try await eventually("first read started") { counts().active == 1 }
+        try "new".write(to: folder.appendingPathComponent("new.txt"), atomically: true, encoding: .utf8)
+        for _ in 0..<5 { tab.watcher.onChange?() }
+        try await Task.sleep(for: .milliseconds(400))
+        #expect(counts().reads == 1) // Changes during a read wait for it.
+
+        gate.signal()
+        try await eventually("read again once") { counts().active == 1 && counts().reads == 2 }
+        for _ in 0..<5 { tab.watcher.onChange?() }
+        // The changes during the second read bring exactly one more; both are let through.
+        gate.signal()
+        gate.signal()
+        try await eventually("third read") { counts().reads == 3 && counts().active == 0 }
+        try await eventually("shown") { tab.items.contains { $0.name == "new.txt" } }
+        try await Task.sleep(for: .milliseconds(600))
+        #expect(counts().reads == 3)
+        #expect(counts().peak == 1)
+    }
+
+    @Test func aSlowFolderDoesNotShowTheOneLeftBehind() async throws {
+        _ = NSApplication.shared
+        let fm = FileManager.default
+        let root = fm.temporaryDirectory.appendingPathComponent("FolderaOpening-\(UUID().uuidString)")
+        let first = root.appendingPathComponent("First"), slow = root.appendingPathComponent("Slow")
+        for folder in [first, slow] { try fm.createDirectory(at: folder, withIntermediateDirectories: true) }
+        defer { try? fm.removeItem(at: root) }
+        try "a".write(to: first.appendingPathComponent("a.txt"), atomically: true, encoding: .utf8)
+        try "b".write(to: slow.appendingPathComponent("b.txt"), atomically: true, encoding: .utf8)
+        // A slow disk for the second folder only.
+        let gate = DispatchSemaphore(value: 0)
+        let original = ExplorerTab.readFolder
+        ExplorerTab.readFolder = { url, hidden in
+            if url.key == slow.key { _ = gate.wait(timeout: .now() + 5) }
+            return try original(url, hidden)
+        }
+        defer {
+            ExplorerTab.readFolder = original
+            for _ in 0..<4 { gate.signal() }
+        }
+        func shows(_ name: String) -> Bool { tab.items.contains { $0.name == name } }
+
+        let tab = ExplorerTab(location: .folder(first))
+        defer { tab.watcher.stop() }
+        try await eventually("first folder") { shows("a.txt") }
+        tab.navigate(to: .folder(slow))
+        #expect(shows("a.txt") && !tab.waitingForFolder) // No blink while a fast read could still arrive.
+        try await eventually("old folder gone") { tab.waitingForFolder && tab.items.isEmpty }
+        #expect(tab.emptyLabel.stringValue == "Working on it…" && !tab.emptyLabel.isHidden)
+        #expect(!tab.statusLabel.stringValue.contains("item"))
+        gate.signal()
+        try await eventually("new folder") { shows("b.txt") && !tab.waitingForFolder }
+        #expect(tab.emptyLabel.isHidden)
+
+        // Reading the same folder again keeps it on screen.
+        tab.reload()
+        try await Task.sleep(for: .milliseconds(400))
+        #expect(shows("b.txt") && !tab.waitingForFolder)
+        gate.signal()
+    }
+
     @Test func expandedSidebarTracksNewFoldersAndRefreshPreservesBranches() async throws {
         _ = NSApplication.shared
         let fm = FileManager.default

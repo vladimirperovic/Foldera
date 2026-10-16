@@ -196,6 +196,18 @@ import Testing
         #expect(outline.isItemExpanded(node))
     }
 
+    @Test func treeFoldersCanGoToTheTrashButDrivesCannot() throws {
+        _ = NSApplication.shared
+        let sidebar = Sidebar()
+        defer { sidebar.stop() }
+        let folder = SidebarNode(.folder, url: FileManager.default.temporaryDirectory, title: "tmp")
+        let drive = SidebarNode(.volume, url: URL(fileURLWithPath: "/"), title: "Macintosh HD")
+        let titles = { (node: SidebarNode) in sidebar.menu(for: node)?.items.map(\.title) ?? [] }
+        #expect(titles(folder).contains("Move to Trash"))
+        #expect(!titles(drive).contains("Move to Trash"))
+        #expect(sidebar.focusedFolder == nil) // Nothing picked, no keyboard: the list's selection counts.
+    }
+
     @Test func addressCompletionHandlesSpacesAndCommonPrefixes() throws {
         let fm = FileManager.default
         let root = fm.temporaryDirectory.appendingPathComponent("FolderaCompletion-\(UUID().uuidString)")

@@ -694,6 +694,11 @@ final class Sidebar: NSObject, NSOutlineViewDataSource, NSOutlineViewDelegate {
         add("Copy as Path", "link", #selector(copyPath(_:)))
         if !node.isFile { add("Open in Terminal", "terminal", #selector(openTerminal(_:))) }
         add("Show in Finder", "folder", #selector(showInFinder(_:)))
+        // Folders in the tree only: drives, home and cloud roots stay put.
+        if node.kind == .folder {
+            menu.addItem(.separator())
+            add("Move to Trash", "trash", #selector(moveToTrash(_:)))
+        }
         menu.addItem(.separator())
         add("Properties", "info.circle", #selector(properties(_:)))
         return menu
@@ -722,6 +727,29 @@ final class Sidebar: NSObject, NSOutlineViewDataSource, NSOutlineViewDelegate {
     @objc private func openTerminal(_ sender: Any?) { if let url = node(sender)?.url { FileOps.openTerminal(at: url) } }
     @objc private func showInFinder(_ sender: Any?) { if let url = node(sender)?.url { FileOps.showInFinder([url]) } }
     @objc private func properties(_ sender: Any?) { if let url = node(sender)?.url { PropertiesWindow.show([url]) } }
+
+    /// To the Trash, as Delete does in the list (⌘Z brings it back). A window
+    /// showing that folder, or one inside it, goes up to where it was.
+    @objc func moveToTrash(_ sender: Any?) {
+        if let url = node(sender)?.url { trash(url) }
+    }
+
+    /// The folder picked in the tree while the tree has the keyboard: the
+    /// trash button and Delete act on it then, as in Windows' navigation pane.
+    var focusedFolder: URL? {
+        guard outline.window?.firstResponder === outline, outline.selectedRow >= 0,
+              let node = outline.item(atRow: outline.selectedRow) as? SidebarNode, node.kind == .folder else { return nil }
+        return node.url
+    }
+
+    func trash(_ url: URL) {
+        FileOps.trash([url]) { [weak self] removed in
+            guard let self, removed.contains(where: { $0.key == url.key }), let shown = self.current.url?.key else { return }
+            if shown == url.key || shown.hasPrefix(url.key + "/") {
+                self.onNavigate?(.folder(url.deletingLastPathComponent()))
+            }
+        }
+    }
 
     /// Empties ~/.Trash for good, after asking. Reading the Trash needs Full Disk Access.
     @objc private func emptyTrash(_ sender: Any?) {

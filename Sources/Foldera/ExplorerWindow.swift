@@ -1161,7 +1161,7 @@ final class ExplorerTab: NSViewController, NSSplitViewDelegate {
         cutButton.isEnabled = files && !isInArchive
         copyButton.isEnabled = files
         shareButton.isEnabled = files
-        deleteButton.isEnabled = files && !isInArchive
+        deleteButton.isEnabled = (files || sidebar.focusedFolder != nil) && !isInArchive
         renameButton.isEnabled = files && !isInArchive
         pasteButton.isEnabled = currentFolder != nil && FileClipboard.shared.hasFiles
         newButton.isEnabled = currentFolder != nil

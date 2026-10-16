@@ -484,7 +484,8 @@ final class IconLayout: NSCollectionViewFlowLayout {
 
     override func prepare() {
         let view = collectionView
-        let width = view?.enclosingScrollView?.contentSize.width ?? view?.bounds.width ?? 0
+        // The width the flow lays the rows out in, so the tiles fill exactly that.
+        let width = view?.bounds.width ?? 0
         laidOutWidth = width
         let fresh = IconGeometry(side: side, width: width, scale: view?.window?.backingScaleFactor ?? 2)
         // Each of these lays out again when set, so only when it changes.

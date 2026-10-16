@@ -66,6 +66,8 @@ import Testing
             prefs.set(oldMode, forKey: "viewMode")
         }
 
+        // Starts in Details, as a first run does: the pictures' view was laid out while hidden.
+        prefs.set("details", forKey: "viewMode")
         let tab = ExplorerTab(location: .folder(folder))
         defer { tab.watcher.stop() }
         try await eventually("folder read") { tab.items.count == 20 }
@@ -76,6 +78,9 @@ import Testing
         let layout = try #require(tab.grid.collectionViewLayout)
         let frames = (0..<20).compactMap { layout.layoutAttributesForItem(at: IndexPath(item: $0, section: 0))?.frame }
         #expect(frames.count == 20)
+        let geometry0 = try #require((layout as? IconLayout)?.geometry)
+        #expect(geometry0.left + geometry0.right + frames.filter { $0.minY == frames[0].minY }.map(\.width).reduce(0, +)
+                    == tab.grid.bounds.width, "grid \(tab.grid.bounds.width), tile \(geometry0.tile)")
         let firstRow = frames.filter { $0.minY == frames[0].minY }
         #expect(firstRow.count > 1)
         for (a, b) in zip(firstRow, firstRow.dropFirst()) { #expect(b.minX == a.maxX) }

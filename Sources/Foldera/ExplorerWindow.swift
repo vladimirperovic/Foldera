@@ -838,8 +838,10 @@ final class ExplorerTab: NSViewController, NSSplitViewDelegate {
     /// the folder again: on a slow disk that takes seconds, and the pictures
     /// just thrown away stayed on screen till then. What was selected stays so.
     func drop(_ keys: Set<String>) {
-        guard !keys.isEmpty, items.contains(where: { keys.contains($0.key) }) else { return }
+        // Remembered even when a read got there first and the list no longer
+        // has them: a stale answer after that would bring them back.
         justRemoved.formUnion(keys)
+        guard items.contains(where: { keys.contains($0.key) }) else { return }
         // Disk usage takes its own out of the map; the lists catch up when shown.
         guard shownMode != .usage else {
             items.removeAll { keys.contains($0.key) }

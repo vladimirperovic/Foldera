@@ -191,7 +191,7 @@ extension BackgroundWork {
                 _ = gate.wait(timeout: .now() + 10)
             }
             return record
-        })
+        }, observeChanges: false)
         defer { controller.close() }
         try await auditEventually { started.isSet }
         controller.table.selectRowIndexes(IndexSet(integer: 1), byExtendingSelection: false)
@@ -199,6 +199,32 @@ extension BackgroundWork {
         try await auditEventually { controller.details.string.contains("Latest selected run") }
         try await Task.sleep(for: .milliseconds(50))
         #expect(!controller.details.string.contains("Slow first run"))
+    }
+
+    @Test func historyRefreshKeepsASelectionChangedWhileLoading() async throws {
+        _ = NSApplication.shared
+        let setup = SyncWindow.Setup(left: "/left", right: "/right", mode: .update)
+        let first = SyncLibrary.Record(profileName: "First run", setup: setup, started: Date())
+        let second = SyncLibrary.Record(profileName: "Second run", setup: setup, started: Date())
+        let listed = CancelFlag(), refreshing = CancelFlag(), gate = DispatchSemaphore(value: 0)
+        defer { gate.signal() }
+        let controller = SyncHistoryWindow(readRecords: {
+            if !listed.isSet { listed.set(); return [first, second] }
+            refreshing.set()
+            _ = gate.wait(timeout: .now() + 10)
+            var updated = second
+            updated.profileName = "Second refreshed"
+            return [first, updated]
+        }, readRecord: { $0 }, observeChanges: false)
+        defer { controller.close() }
+        try await auditEventually { controller.records.count == 2 }
+        controller.reload()
+        try await auditEventually { refreshing.isSet }
+        controller.table.selectRowIndexes(IndexSet(integer: 1), byExtendingSelection: false)
+        gate.signal()
+        try await auditEventually { controller.records.last?.profileName == "Second refreshed" }
+        #expect(controller.table.selectedRow == 1)
+        try await auditEventually { controller.details.string.contains("Second refreshed") }
     }
 }
 

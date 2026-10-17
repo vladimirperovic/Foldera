@@ -22,7 +22,8 @@ final class SyncHistoryWindow: NSWindowController, NSWindowDelegate, NSTableView
     }
 
     init(readRecords: @escaping () throws -> [SyncLibrary.Record] = { try SyncLibrary.summaries() },
-         readRecord: @escaping (SyncLibrary.Record) throws -> SyncLibrary.Record = SyncLibrary.record) {
+         readRecord: @escaping (SyncLibrary.Record) throws -> SyncLibrary.Record = SyncLibrary.record,
+         observeChanges: Bool = true) {
         self.readRecords = readRecords
         self.readRecord = readRecord
         let window = EscWindow(contentRect: NSRect(x: 0, y: 0, width: 960, height: 580),
@@ -89,8 +90,10 @@ final class SyncHistoryWindow: NSWindowController, NSWindowDelegate, NSTableView
             split.setPosition(315, ofDividerAt: 0)
         }
         window.center()
-        observer = NotificationCenter.default.addObserver(forName: SyncLibrary.changed, object: nil, queue: .main) { [weak self] _ in
-            self?.reload()
+        if observeChanges {
+            observer = NotificationCenter.default.addObserver(forName: SyncLibrary.changed, object: nil, queue: .main) { [weak self] _ in
+                self?.reload()
+            }
         }
         reload()
     }
@@ -99,7 +102,6 @@ final class SyncHistoryWindow: NSWindowController, NSWindowDelegate, NSTableView
 
     private var selected: SyncLibrary.Record? { records.indices.contains(table.selectedRow) ? records[table.selectedRow] : nil }
     func reload() {
-        let chosen = selected?.id
         let read = readRecords
         status.stringValue = "Reading history…"
         detailRead.cancel()
@@ -107,6 +109,8 @@ final class SyncHistoryWindow: NSWindowController, NSWindowDelegate, NSTableView
             guard let self else { return }
             switch result {
             case .success(let records):
+                // The user may have selected another run while this read waited.
+                let chosen = self.selected?.id
                 self.records = records
                 self.table.reloadData()
                 if !records.isEmpty {

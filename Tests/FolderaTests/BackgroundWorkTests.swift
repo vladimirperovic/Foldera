@@ -285,7 +285,7 @@ import Testing
         ExplorerTab.readFolder = { url, hidden in
             guard url.key == folder.key else { return try original(url, hidden) }
             _ = gate.wait(timeout: .now() + 5)
-            return before.map(FileItem.init(url:))
+            return before.map { FileItem(url: $0) }
         }
         defer {
             ExplorerTab.readFolder = original

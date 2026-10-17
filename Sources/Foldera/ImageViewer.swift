@@ -458,6 +458,11 @@ final class ImageViewer: NSWindowController, NSWindowDelegate, NSMenuItemValidat
     private let fullScreenButton = ToolButton(symbol: "arrow.up.left.and.arrow.down.right", label: "Full screen",
                                               tip: "Full screen (F)", iconSize: 13)
     private let thumbnailsButton = ToolButton(symbol: "film", tip: "Thumbnails (T)", iconSize: 13)
+    private let copyButton = ToolButton(symbol: "doc.on.doc", tip: "Copy the file (⌘C), the picture itself (⌥⌘C), its path (⇧⌘C) or its text",
+                                        dropdown: true, iconSize: 13)
+    private let moreButton = ToolButton(symbol: "ellipsis.circle",
+                                        tip: "More: share, open with, show in Foldera or Finder, desktop picture… (or right-click the picture)",
+                                        iconSize: 13)
     let filmstrip = Filmstrip()
     private var scrollBottom: NSLayoutConstraint?
     private var barBottom: NSLayoutConstraint?
@@ -559,6 +564,10 @@ final class ImageViewer: NSWindowController, NSWindowDelegate, NSMenuItemValidat
         fullScreenButton.action = #selector(toggleFullScreen(_:))
         thumbnailsButton.target = self
         thumbnailsButton.action = #selector(toggleThumbnails(_:))
+        copyButton.target = self
+        copyButton.action = #selector(showCopyMenu(_:))
+        moreButton.target = self
+        moreButton.action = #selector(showPictureMenu(_:))
         let views: [NSView] = [
             button("chevron.left", "Previous (←)", #selector(previous(_:))),
             button("chevron.right", "Next (→)", #selector(next(_:))),
@@ -573,8 +582,10 @@ final class ImageViewer: NSWindowController, NSWindowDelegate, NSMenuItemValidat
             thumbnailsButton,
             playButton,
             fullScreenButton,
+            copyButton,
             button("arrow.up.forward.app", "Open in the default app (E)", #selector(openExternally(_:))),
-            button("trash", "Move to Trash (Delete)", #selector(delete(_:))),
+            button("trash", "Move to Trash (⌦ or ⌘⌫)", #selector(delete(_:))),
+            moreButton,
         ]
         let row = NSStackView(views: views)
         row.orientation = .horizontal
@@ -1054,28 +1065,54 @@ final class ImageViewer: NSWindowController, NSWindowDelegate, NSMenuItemValidat
 
     // MARK: The picture's menu
 
+    private func command(_ title: String, _ symbol: String, _ action: Selector, _ key: String = "",
+                         _ mods: NSEvent.ModifierFlags = [], tip: String) -> NSMenuItem {
+        let item = NSMenuItem(title: title, action: action, keyEquivalent: key)
+        item.keyEquivalentModifierMask = mods
+        item.target = self
+        item.image = NSImage(systemSymbolName: symbol, accessibilityDescription: nil)
+        item.toolTip = tip
+        return item
+    }
+
+    /// The ways to copy, in the picture's menu and under the tool bar's Copy button.
+    private func copyCommands() -> [NSMenuItem] {
+        [
+            command("Copy", "doc.on.doc", #selector(copy(_:)), "c", .command,
+                    tip: "Copy the file, to paste into a folder, a message or a mail"),
+            command("Copy image", "photo.on.rectangle", #selector(copyImage(_:)), "c", [.command, .option],
+                    tip: "Copy the picture itself, full size and turned as shown, to paste into an editor or a document"),
+            command("Copy as path", "link", #selector(copyPath(_:)), "c", [.command, .shift],
+                    tip: "Copy where the file is, as text"),
+            command("Copy text from image", "text.viewfinder", #selector(copyTextFromImage(_:)),
+                    tip: "Read the text in the picture, on this Mac, and copy it"),
+        ]
+    }
+
+    func copyMenu() -> NSMenu {
+        let menu = NSMenu()
+        copyCommands().forEach(menu.addItem)
+        return menu
+    }
+
+    @objc func showCopyMenu(_ sender: Any?) {
+        copyButton.popUp(copyMenu())
+    }
+
+    @objc func showPictureMenu(_ sender: Any?) {
+        moreButton.popUp(pictureMenu())
+    }
+
     /// A right-click on the picture: everything there is to do with it, each
     /// command saying in its tooltip what it does, with its key.
     func pictureMenu() -> NSMenu {
         let menu = NSMenu()
         func add(_ title: String, _ symbol: String, _ action: Selector, _ key: String = "",
                  _ mods: NSEvent.ModifierFlags = [], tip: String) {
-            let item = NSMenuItem(title: title, action: action, keyEquivalent: key)
-            item.keyEquivalentModifierMask = mods
-            item.target = self
-            item.image = NSImage(systemSymbolName: symbol, accessibilityDescription: nil)
-            item.toolTip = tip
-            menu.addItem(item)
+            menu.addItem(command(title, symbol, action, key, mods, tip: tip))
         }
         let full = window?.styleMask.contains(.fullScreen) == true
-        add("Copy", "doc.on.doc", #selector(copy(_:)), "c", .command,
-            tip: "Copy the file, to paste into a folder, a message or a mail")
-        add("Copy image", "photo.on.rectangle", #selector(copyImage(_:)), "c", [.command, .option],
-            tip: "Copy the picture itself, full size and turned as shown, to paste into an editor or a document")
-        add("Copy as path", "link", #selector(copyPath(_:)), "c", [.command, .shift],
-            tip: "Copy where the file is, as text")
-        add("Copy text from image", "text.viewfinder", #selector(copyTextFromImage(_:)),
-            tip: "Read the text in the picture, on this Mac, and copy it")
+        copyCommands().forEach(menu.addItem)
         if let url = current {
             let picker = NSSharingServicePicker(items: [url])
             sharePicker = picker

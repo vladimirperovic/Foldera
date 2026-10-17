@@ -73,6 +73,28 @@ import Testing
         try await eventually("second click") { viewer.filmstrip.isHidden }
     }
 
+    /// A tooltip lives in a tracking area of its own. The buttons used to
+    /// remove every area when they refreshed their hover area, so no tooltip
+    /// in the app ever showed, though each button had one.
+    @Test func toolButtonsKeepTheirTooltipsWhenTheirAreasAreRefreshed() {
+        _ = NSApplication.shared
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 200, height: 80), styleMask: [.titled],
+                              backing: .buffered, defer: false)
+        window.isReleasedWhenClosed = false
+        defer { window.close() }
+        let button = ToolButton(symbol: "doc.on.doc", tip: "Copy (⌘C)")
+        button.frame = NSRect(x: 10, y: 10, width: 40, height: 30)
+        window.contentView?.addSubview(button)
+        window.orderFront(nil)
+        button.updateTrackingAreas()
+        let owners = button.trackingAreas.map { $0.owner.map { String(describing: type(of: $0)) } ?? "none" }
+        #expect(owners.count >= 2, "a hover area and the tooltip's: \(owners)")
+        button.updateTrackingAreas()
+        button.updateTrackingAreas()
+        #expect(button.trackingAreas.count == owners.count)
+        #expect(button.toolTip == "Copy (⌘C)")
+    }
+
     @Test func thePicturesMenuCopiesAndSaysWhatEachCommandDoes() async throws {
         _ = NSApplication.shared
         let fm = FileManager.default
@@ -99,6 +121,10 @@ import Testing
         for title in ["Copy image", "Copy as path", "Copy text from image", "Open with", "Show in Foldera", "Move to Trash"] {
             #expect(items.contains { $0.title == title }, "missing \(title)")
         }
+        // The tool bar's Copy button offers the same four, each with its tooltip.
+        let copies = viewer.copyMenu().items
+        #expect(copies.map(\.title) == ["Copy", "Copy image", "Copy as path", "Copy text from image"])
+        #expect(copies.allSatisfy { !($0.toolTip ?? "").isEmpty })
         // Each of the viewer's own commands reaches it, and is on while a picture shows.
         for item in items where item.target === viewer {
             let action = try #require(item.action)

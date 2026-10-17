@@ -4,10 +4,12 @@ import Testing
 @testable import Foldera
 
 @Suite(.serialized) @MainActor struct Viewer {
-    /// The message is put together when the wait is over, to say how things stood.
+    /// The message is put together when the wait is over, to say how things
+    /// stood. Long, since the other suites can keep the main thread for
+    /// seconds on a busy CI Mac.
     private func eventually(_ message: @autoclosure () -> String = "condition", _ condition: () -> Bool) async throws {
         Awake.hold()
-        let deadline = Date().addingTimeInterval(5)
+        let deadline = Date().addingTimeInterval(15)
         while !condition(), Date() < deadline { try await Task.sleep(for: .milliseconds(10)) }
         #expect(condition(), Comment(rawValue: message()))
     }
@@ -62,5 +64,12 @@ import Testing
         #expect(!viewer.filmstrip.isHidden && !window.styleMask.contains(.fullScreen))
         viewer.toggleThumbnails(nil)
         #expect(viewer.filmstrip.isHidden && viewer.pictureArea.height == tall)
+
+        // Two clicks, each its own: the first, still waiting when the second
+        // comes (a busy Mac is late with it), is done then, not dropped.
+        viewer.clicked()
+        viewer.clicked()
+        #expect(!viewer.filmstrip.isHidden)
+        try await eventually("second click") { viewer.filmstrip.isHidden }
     }
 }

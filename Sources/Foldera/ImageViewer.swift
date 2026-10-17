@@ -798,7 +798,13 @@ final class ImageViewer: NSWindowController, NSWindowDelegate, NSMenuItemValidat
     /// in, it fits the picture again. It waits a double click's time, since
     /// a double click goes full screen instead.
     func clicked() {
-        pendingClick?.cancel()
+        // A click still waiting when another comes was a click of its own
+        // (a double click comes to doubleClicked instead), late only because
+        // the Mac was busy: it is done now, not dropped.
+        if let earlier = pendingClick {
+            earlier.perform()
+            earlier.cancel()
+        }
         let work = DispatchWorkItem { [weak self] in
             guard let self else { return }
             self.pendingClick = nil

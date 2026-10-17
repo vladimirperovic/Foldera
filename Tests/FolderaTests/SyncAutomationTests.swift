@@ -50,7 +50,7 @@ extension SyncTestIsolation.SyncAutomation {
         #expect(try String(contentsOf: old, encoding: .utf8) == "complete replacement")
         let remainder = try #require(FileManager.default.contentsOfDirectory(at: p.right, includingPropertiesForKeys: nil)
             .first { $0.lastPathComponent.hasSuffix(Sync.partialSuffix) })
-        #expect(try String(contentsOf: remainder.appendingPathComponent("two.txt"), encoding: .utf8) == "old two")
+        #expect(try String(contentsOf: remainder.appendingPathComponent("thing/two.txt"), encoding: .utf8) == "old two")
     }
 
     @Test @MainActor func syncReplacementSupportsUndoAndRedo() throws {
@@ -65,6 +65,11 @@ extension SyncTestIsolation.SyncAutomation {
             }
         }
         #expect(result.failures.isEmpty && result.copied == 1)
+        let trash = try #require(result.changes.compactMap { change -> URL? in
+            if case let .moved(_, to) = change { return to }
+            return nil
+        }.first)
+        #expect(trash.pathExtension == "txt" && !trash.lastPathComponent.hasPrefix("."))
         let undo = FileUndo.Manager()
         undo.groupsByEvent = false
         undo.beginUndoGrouping()
@@ -144,7 +149,8 @@ extension SyncTestIsolation.SyncAutomation {
         let result = job.perform()
         #expect(result.failures.contains { $0.contains("old version is preserved") })
         #expect(try String(contentsOf: p.right.appendingPathComponent("shared.txt"), encoding: .utf8) == "other writer")
-        let contents = try FileManager.default.contentsOfDirectory(at: p.right, includingPropertiesForKeys: nil)
+        let walker = try #require(FileManager.default.enumerator(at: p.right, includingPropertiesForKeys: nil))
+        let contents = try (walker.allObjects as? [URL] ?? []).filter { !FileOps.isFolder($0) }
             .map { try String(contentsOf: $0, encoding: .utf8) }
         #expect(Set(contents) == ["old content", "new content", "other writer"])
     }

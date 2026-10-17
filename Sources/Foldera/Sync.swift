@@ -1079,11 +1079,19 @@ enum Sync {
                 try? FileManager.default.removeItem(at: partial)
                 throw OpError(copier.errors.joined(separator: " "))
             }
-            let backup = target.deletingLastPathComponent().appendingPathComponent(".\(UUID().uuidString)\(Sync.partialSuffix)")
+            // Keep the original basename inside a private staging directory,
+            // so Trash contains a recognizable file rather than a hidden UUID.
+            let backupFolder = target.deletingLastPathComponent().appendingPathComponent(".\(UUID().uuidString)\(Sync.partialSuffix)")
+            let backup = backupFolder.appendingPathComponent(target.lastPathComponent)
+            // Only remove an empty directory: a failed rollback may leave the
+            // user's old version here for recovery.
+            defer { _ = rmdir(backupFolder.path) }
             do {
                 // Looked at again right before it goes: the copy may have taken a while.
                 try guardInside(target, onLeft: !toRight)
                 guard try unchanged(row, onLeft: !toRight, at: target) else { throw changed }
+                try FileManager.default.createDirectory(at: backupFolder, withIntermediateDirectories: false,
+                                                         attributes: [.posixPermissions: 0o700])
                 try Self.moveExclusively(target, backup)
             } catch {
                 try? FileManager.default.removeItem(at: partial)

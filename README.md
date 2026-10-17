@@ -95,7 +95,8 @@ yourself, see [Building](#building).
     for a larger view. **Return details to the main window**, or closing the
     detached window, docks it again. Markdown stays in reading mode; a draft
     being edited stays open without being saved just by detaching or docking.
-- **Status bar**: item count, selection and its size, and the layout switch.
+- **Status bar**: item count; the selection, named for one item, with its
+  size, type, date and a picture's pixel size; and the layout switch.
 - **Search** (top right): searches the folder and everything below it as
   you type. `*.pdf` works.
   - **Search options** (the button beside the box, ⌥⌘F): kind (pictures,
@@ -138,6 +139,7 @@ gets back the width you dragged it to once there is room again.
 |---|---|
 | Enter opens · Backspace goes back | same |
 | Type the start of a name to select it, then Enter to open | same, in Details, Large icons and Columns |
+| Shift+click from the first file to the tenth selects everything between | same |
 | Jump to a folder or tab / search commands | ⌘P Quick Open · ⌥⌘P commands |
 | Alt+← → ↑ | ⌥← ⌥→ ⌥↑ |
 | F2 rename · F5 refresh · F3 search · F4 / Alt+D address | same |
@@ -181,7 +183,7 @@ For animated or multi-frame images it reads the first frame.
   walking into a folder already measured is instant.
 - **Picture size**: the slider at the bottom left. All the way left is the
   list (Details); move it right and the folder turns into pictures at once,
-  bigger the further you go (48–256 points), keeping what you were looking
+  bigger the further you go (48–320 points), keeping what you were looking
   at in sight. ⌘+ / ⌘− and ⌘ (or ⌃) with the scroll wheel do the same.
   The pictures widen to fill each row, and the gaps between them shrink as
   they grow. At the largest size there are none: the pictures sit edge to

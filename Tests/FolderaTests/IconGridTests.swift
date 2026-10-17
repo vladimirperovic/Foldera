@@ -53,6 +53,18 @@ import Testing
         #expect(named.tile.width + named.left + named.right <= 150)
     }
 
+    /// The slider's top end moved one step past 256 (the old largest), so a
+    /// row that held four pictures edge to edge holds three now.
+    @Test func theTopSizeShowsThreeEdgeToEdge() {
+        #expect(IconGeometry.largest == 320)
+        let atOldTop = IconGeometry(side: 256, width: 1243, scale: 2)
+        #expect(columns(atOldTop, width: 1243) == 4)
+        let sheet = IconGeometry(side: IconGeometry.largest, width: 1243, scale: 2)
+        #expect(!sheet.names && sheet.gap == 0 && sheet.margin == 0 && sheet.top == 0)
+        #expect(columns(sheet, width: 1243) == 3)
+        #expect(sheet.side == sheet.tile.width)
+    }
+
     @Test func theLargestSizeLaysPicturesEdgeToEdge() async throws {
         _ = NSApplication.shared
         let fm = FileManager.default

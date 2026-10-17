@@ -492,8 +492,9 @@ final class PreviewPane: NSView {
         var rows: [(String, String)] = []
         if ImageFiles.isImage(url), let source = CGImageSourceCreateWithURL(url as CFURL, nil),
            let p = CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [CFString: Any] {
-            if let w = p[kCGImagePropertyPixelWidth] as? Int, let h = p[kCGImagePropertyPixelHeight] as? Int {
-                rows.append(("Dimensions", "\(w) × \(h) px"))
+            // Standing up, as the camera's orientation turns it, like the viewer's I panel.
+            if let size = ImageFiles.uprightSize(of: source) {
+                rows.append(("Dimensions", "\(Int(size.width)) × \(Int(size.height)) px"))
             }
             let tiff = p[kCGImagePropertyTIFFDictionary] as? [CFString: Any] ?? [:]
             let camera = [tiff[kCGImagePropertyTIFFMake] as? String, tiff[kCGImagePropertyTIFFModel] as? String]
@@ -520,6 +521,15 @@ final class PreviewPane: NSView {
             }
         }
         return rows
+    }
+
+    /// A picture's pixel size standing up, alone, for the status bar; nil
+    /// when ImageIO can't read the file (an SVG, say). Safe off the main
+    /// thread: the header of a RAW file can take a moment on a slow disk.
+    static func pictureDimensions(_ url: URL) -> String? {
+        guard let source = CGImageSourceCreateWithURL(url as CFURL, [kCGImageSourceShouldCache: false] as CFDictionary),
+              let size = ImageFiles.uprightSize(of: source) else { return nil }
+        return "\(Int(size.width)) × \(Int(size.height)) px"
     }
 }
 

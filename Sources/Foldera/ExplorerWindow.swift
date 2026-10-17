@@ -68,6 +68,14 @@ final class ExplorerTab: NSViewController, NSSplitViewDelegate {
     var reloadDeferred = false
     var keyMonitor: Any?
     var typeSelection = TypeSelection()
+    /// The item a Shift+click extends from, as Windows Explorer keeps it:
+    /// the item the last click without modifiers landed on.
+    private(set) var selectionAnchor: String?
+    /// Picture pixel sizes for the status bar, read in the background once
+    /// per version of a file; nil where the file held no size to read.
+    private var pictureSizes: [String: (stamp: String, text: String?)] = [:]
+    private var pictureSizeReads: Set<String> = []
+    private static let pictureSizeQueue = BackgroundTask.queue("Foldera.picture-sizes")
     var observers: [NSObjectProtocol] = []
     /// Lists that missed a reload while hidden; they catch up when shown.
     var staleViews: Set<ViewMode> = []
@@ -1064,6 +1072,29 @@ final class ExplorerTab: NSViewController, NSSplitViewDelegate {
         }
     }
 
+    /// A click in the list that AppKit has handled already: a plain click
+    /// makes the item under it the anchor a later Shift+click extends from,
+    /// a Command+click (a toggle) leaves the anchor where it was, and a
+    /// click on empty space clears it.
+    func listClicked(at index: Int?, command: Bool) {
+        guard !command else { return }
+        selectionAnchor = index.flatMap { items.indices.contains($0) ? items[$0].key : nil }
+    }
+
+    /// Windows' Shift+click: everything from the anchor (the item the last
+    /// click without modifiers landed on) to this one. With no anchor, from
+    /// the selected item, or the first in the list.
+    @discardableResult
+    func extendSelection(to index: Int) -> Bool {
+        guard items.indices.contains(index) else { return false }
+        let from = selectionAnchor.flatMap { anchor in items.firstIndex { $0.key == anchor } }
+            ?? firstSelectedIndex ?? 0
+        let range = from <= index ? from...index : index...from
+        selectQuietly(Set(range.map { items[$0].key }))
+        listSelectionDidChange()
+        return true
+    }
+
     func scroll(to index: Int) {
         guard index < items.count else { return }
         switch shownMode {
@@ -1082,6 +1113,10 @@ final class ExplorerTab: NSViewController, NSSplitViewDelegate {
     /// in the middle of a reload are left for the caller.
     func listSelectionDidChange() {
         guard !selectingQuietly else { return }
+        // Moving through the list with the keyboard (or a click AppKit has
+        // handled) leaves one item chosen: it becomes the anchor a later
+        // Shift+click extends from, as the focused item does in Windows.
+        if let only = selectedIndexes.first, selectedIndexes.count == 1 { selectionAnchor = items[only].key }
         // A click while a listing or a sort is on its way is what it should select.
         if pendingSelection != nil { pendingSelection = Set(selectedItems.map(\.key)) }
         selectionChanged()
@@ -1143,7 +1178,18 @@ final class ExplorerTab: NSViewController, NSSplitViewDelegate {
             parts.append(Format.items(items.count))
         }
         let selected = selectedItems
-        if !selected.isEmpty {
+        if selected.count == 1, let item = selected.first {
+            var text = item.name
+            if let dimensions = pictureSize(of: item) { text += "     " + dimensions }
+            if let size = item.size ?? item.folderSize { text += "     " + Format.bytes(size) }
+            if let volume = item.volume {
+                text += "     " + item.kind + "     " + Format.bytes(volume.free) + " free"
+            } else {
+                text += "     " + item.kind
+                if let modified = item.modified { text += "     " + Format.date.string(from: modified) }
+            }
+            parts.append(text)
+        } else if !selected.isEmpty {
             var text = "\(Format.items(selected.count)) selected"
             let sizes = selected.compactMap { $0.size ?? $0.folderSize }
             if !sizes.isEmpty { text += "  " + Format.bytes(sizes.reduce(0, +)) }
@@ -1153,6 +1199,33 @@ final class ExplorerTab: NSViewController, NSSplitViewDelegate {
         if let usageNote, Prefs.folderSizes { parts.append(usageNote) }
         if let busyText { parts.append(busyText) }
         statusLabel.stringValue = parts.joined(separator: "     ")
+    }
+
+    /// The picture's pixel size for the status bar: the one read already, or
+    /// nil while a background read starts, which brings the status bar up to
+    /// date when it arrives. A camera RAW's header alone can take a moment
+    /// on a slow disk, so the read stays off the main thread.
+    private func pictureSize(of item: FileItem) -> String? {
+        guard !item.isFolder, ImageFiles.isImage(item.url) else { return nil }
+        let stamp = "\(item.modified?.timeIntervalSince1970 ?? 0)-\(item.size ?? -1)"
+        if let read = pictureSizes[item.key], read.stamp == stamp { return read.text }
+        let token = "\(item.key)|\(stamp)"
+        guard pictureSizeReads.insert(token).inserted else { return nil }
+        let url = item.url
+        let key = item.key
+        Self.pictureSizeQueue.addOperation { [weak self] in
+            let text = PreviewPane.pictureDimensions(url)
+            DispatchQueue.main.async {
+                guard let self else { return }
+                self.pictureSizeReads.remove(token)
+                if self.pictureSizes.count >= 500 {
+                    for stale in self.pictureSizes.keys.prefix(100) { self.pictureSizes[stale] = nil }
+                }
+                self.pictureSizes[key] = (stamp, text)
+                self.updateStatus()
+            }
+        }
+        return nil
     }
 
     func updateCommandStates() {

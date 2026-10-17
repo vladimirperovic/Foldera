@@ -333,12 +333,27 @@ final class TextCell: NSTableCellView {
 final class FileTableView: NSTableView {
     weak var host: ExplorerTab?
 
+    /// Shift+click takes the whole range from the click before, as Windows
+    /// does; the anchor stays there through further Shift+clicks.
+    override func mouseDown(with event: NSEvent) {
+        let row = row(at: convert(event.locationInWindow, from: nil))
+        let shift = event.modifierFlags.contains(.shift)
+        if shift, let host, row >= 0, host.extendSelection(to: row) {
+            window?.makeFirstResponder(self)
+            return
+        }
+        super.mouseDown(with: event)
+        if !shift { host?.listClicked(at: row >= 0 ? row : nil, command: event.modifierFlags.contains(.command)) }
+    }
+
     override func menu(for event: NSEvent) -> NSMenu? {
         let row = row(at: convert(event.locationInWindow, from: nil))
         if row >= 0 {
             if !selectedRowIndexes.contains(row) { selectRowIndexes([row], byExtendingSelection: false) }
+            host?.listClicked(at: row, command: false)
         } else {
             deselectAll(nil)
+            host?.listClicked(at: nil, command: false)
         }
         return host?.contextMenu()
     }
@@ -353,9 +368,19 @@ final class FileTableView: NSTableView {
 final class FileCollectionView: NSCollectionView {
     weak var host: ExplorerTab?
 
+    /// Shift+click takes the whole range from the click before, as Windows
+    /// does, in the pictures as in the list.
     override func mouseDown(with event: NSEvent) {
+        let point = convert(event.locationInWindow, from: nil)
+        let path = indexPathForItem(at: point)
+        let shift = event.modifierFlags.contains(.shift)
+        if shift, let host, let path, host.extendSelection(to: path.item) {
+            window?.makeFirstResponder(self)
+            return
+        }
         super.mouseDown(with: event)
-        if event.clickCount == 2, indexPathForItem(at: convert(event.locationInWindow, from: nil)) != nil {
+        if !shift { host?.listClicked(at: path?.item, command: event.modifierFlags.contains(.command)) }
+        if event.clickCount == 2, path != nil {
             host?.openSelection(nil)
         }
     }
@@ -363,8 +388,10 @@ final class FileCollectionView: NSCollectionView {
     override func menu(for event: NSEvent) -> NSMenu? {
         if let path = indexPathForItem(at: convert(event.locationInWindow, from: nil)) {
             if !selectionIndexPaths.contains(path) { selectionIndexPaths = [path] }
+            host?.listClicked(at: path.item, command: false)
         } else {
             selectionIndexPaths = []
+            host?.listClicked(at: nil, command: false)
         }
         host?.selectionChanged()
         return host?.contextMenu()
@@ -414,7 +441,9 @@ final class SelectionFrame: NSView {
 /// contact sheet. The tiles always widen to fill their row, so what a row
 /// leaves over isn't spread between them as gaps.
 struct IconGeometry: Equatable {
-    static let largest: CGFloat = 256
+    /// The biggest pictures: one step past what used to be the largest (256),
+    /// so a row that held four pictures edge to edge holds three.
+    static let largest: CGFloat = 320
 
     /// The picture's side, and the tile it is in.
     var side: CGFloat = 64

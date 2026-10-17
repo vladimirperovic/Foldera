@@ -468,9 +468,9 @@ enum Prefs {
         UserDefaults.standard.set(views, forKey: "folderViews")
     }
 
-    /// The picture size in Large icons, 48–256 points.
+    /// The picture size in Large icons, 48–320 points.
     static var iconSize: CGFloat {
-        get { min(max(UserDefaults.standard.object(forKey: "iconSize").map { CGFloat(($0 as? Double) ?? 64) } ?? 64, 48), 256) }
+        get { min(max(UserDefaults.standard.object(forKey: "iconSize").map { CGFloat(($0 as? Double) ?? 64) } ?? 64, 48), IconGeometry.largest) }
         set { UserDefaults.standard.set(Double(newValue), forKey: "iconSize") }
     }
 

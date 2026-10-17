@@ -508,4 +508,6 @@ extension Notification.Name {
     static let explorerPinsChanged = Notification.Name("ExplorerPinsChanged")
     static let explorerPreviewPaneChanged = Notification.Name("ExplorerPreviewPaneChanged")
     static let explorerFolderSizesChanged = Notification.Name("ExplorerFolderSizesChanged")
+    /// Items sent to the Trash or deleted, as "urls": every list drops them at once.
+    static let explorerItemsRemoved = Notification.Name("ExplorerItemsRemoved")
 }

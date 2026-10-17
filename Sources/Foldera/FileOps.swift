@@ -140,8 +140,16 @@ enum FileOps {
                 FileUndo.record(trashed.map { Change.moved(from: $0.key, to: $0.value) }, name: "Move to Trash")
                 if let error { NSAlert(error: error).runModal() }
                 done(Array(trashed.keys))
+                announceRemoved(Array(trashed.keys))
             }
         }
+    }
+
+    /// Every window takes the items off its list without waiting to read the
+    /// folder again, which on a slow disk takes seconds.
+    static func announceRemoved(_ urls: [URL]) {
+        guard !urls.isEmpty else { return }
+        NotificationCenter.default.post(name: .explorerItemsRemoved, object: nil, userInfo: ["urls": urls])
     }
 
     /// Shift+Delete: gone for good, after one clear question.
@@ -171,6 +179,7 @@ enum FileOps {
             DispatchQueue.main.async {
                 report(failures)
                 done(removed)
+                announceRemoved(removed)
             }
         }
     }

@@ -319,13 +319,9 @@ extension ExplorerTab: NSMenuItemValidation {
         for item in gone { UsageCache.changed(item.url.deletingLastPathComponent()) }
         let next = neighbour(of: gone)
         pendingSelection = next.map { [$0] } ?? []
-        if isSearching {
-            let keys = Set(gone.map(\.key))
-            items.removeAll { keys.contains($0.key) }
-            showItems()
-        } else {
-            load()
-        }
+        // Off the list at once; the folder is read again behind, to catch up with anything else.
+        drop(Set(gone.map(\.key)))
+        if !isSearching { reload() }
     }
 
     @objc func delete(_ sender: Any?) {

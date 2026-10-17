@@ -38,8 +38,8 @@ jobs:
         run: swift build -c "${{ matrix.configuration }}" --build-tests -Xswiftc -enable-testing
       - name: An exFAT volume for native hidden attributes
         run: |
-          hdiutil create -size 128m -layout NONE -format UDRW "$RUNNER_TEMP/foldera-exfat.dmg"
-          device=$(hdiutil attach -nomount "$RUNNER_TEMP/foldera-exfat.dmg" | awk '/^\/dev\/disk/ {print $1; exit}')
+          mkfile 128m "$RUNNER_TEMP/foldera-exfat.img"
+          device=$(hdiutil attach -nomount -imagekey diskimage-class=CRawDiskImage "$RUNNER_TEMP/foldera-exfat.img" | awk '/^\/dev\/disk/ {print $1; exit}')
           test -n "$device"
           sudo newfs_exfat -v FolderaExFAT "$device"
           diskutil mount "$device"
@@ -78,6 +78,12 @@ jobs:
             exit 1
           fi
           exit "$status"
+      - uses: actions/upload-artifact@v4
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        with:
+          name: test-log-${{ matrix.configuration }}
+          path: test.log
+          retention-days: 7
       - name: Package and verify the release application
         if: ${{ matrix.configuration == 'release' }}
         run: |

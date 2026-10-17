@@ -197,6 +197,51 @@ import Testing
         #expect(outline.isItemExpanded(node))
     }
 
+    /// Pictures thrown away left the list only when the folder had been read
+    /// again, seconds later on an exFAT disk. Now they leave at once, and a
+    /// read still listing them (begun before, or a slow disk's stale answer)
+    /// doesn't bring them back.
+    @Test func itemsGoneFromTheDiskLeaveTheListAtOnceAndStayGone() async throws {
+        _ = NSApplication.shared
+        let fm = FileManager.default
+        let folder = fm.temporaryDirectory.appendingPathComponent("FolderaGone-\(UUID().uuidString)")
+        try fm.createDirectory(at: folder, withIntermediateDirectories: true)
+        defer { try? fm.removeItem(at: folder) }
+        for name in ["a.jpg", "b.jpg", "c.jpg"] {
+            try "x".write(to: folder.appendingPathComponent(name), atomically: true, encoding: .utf8)
+        }
+        let tab = ExplorerTab(location: .folder(folder))
+        defer { tab.watcher.stop() }
+        try await eventually("read") { tab.items.count == 3 }
+        tab.select(keys: [folder.appendingPathComponent("c.jpg").key])
+
+        // From now on the disk is slow, and answers with what was there before.
+        let before = tab.items.map(\.url)
+        let gate = DispatchSemaphore(value: 0)
+        let original = ExplorerTab.readFolder
+        ExplorerTab.readFolder = { url, hidden in
+            guard url.key == folder.key else { return try original(url, hidden) }
+            _ = gate.wait(timeout: .now() + 5)
+            return before.map(FileItem.init(url:))
+        }
+        defer {
+            ExplorerTab.readFolder = original
+            for _ in 0..<4 { gate.signal() }
+        }
+
+        let gone = folder.appendingPathComponent("a.jpg")
+        try fm.removeItem(at: gone)
+        FileOps.announceRemoved([gone])
+        // Every read is held at the gate: this is the list dropping it, before any read.
+        try await eventually("off the list") { tab.items.map(\.name) == ["b.jpg", "c.jpg"] }
+        #expect(tab.selectedItems.map(\.name) == ["c.jpg"])
+
+        tab.reload()
+        for _ in 0..<4 { gate.signal() }
+        try await Task.sleep(for: .milliseconds(600))
+        #expect(tab.items.map(\.name) == ["b.jpg", "c.jpg"])
+    }
+
     @Test func treeFoldersCanGoToTheTrashButDrivesCannot() throws {
         _ = NSApplication.shared
         let sidebar = Sidebar()

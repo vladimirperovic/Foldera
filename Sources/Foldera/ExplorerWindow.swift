@@ -54,6 +54,10 @@ final class ExplorerTab: NSViewController, NSSplitViewDelegate {
     private(set) var waitingForFolder = false
     /// Reads a folder for the list; tests stand a slow disk in for it.
     static var readFolder: (URL, Bool) throws -> [FileItem] = FileItem.contents(of:showHidden:)
+    /// Items taken off the list as they went to the Trash. A read begun
+    /// before, or a slow disk's stale answer, that still has one leaves it
+    /// out when it is no longer on the disk (one put back is shown again).
+    private var justRemoved: Set<String> = []
     private var navigationGeneration = 0
     private var pendingRecentVisit = false
     var sortGeneration = 0
@@ -548,6 +552,10 @@ final class ExplorerTab: NSViewController, NSSplitViewDelegate {
         observers.append(center.addObserver(forName: .explorerPreviewPaneChanged, object: nil, queue: .main) { [weak self] _ in
             self?.applyPreviewPane()
         })
+        observers.append(center.addObserver(forName: .explorerItemsRemoved, object: nil, queue: .main) { [weak self] note in
+            guard let urls = note.userInfo?["urls"] as? [URL] else { return }
+            self?.drop(Set(urls.map(\.key)))
+        })
         keyMonitor = NSEvent.addLocalMonitorForEvents(matching: [.keyDown, .leftMouseDown, .rightMouseDown, .otherMouseDown]) { [weak self] event in
             if event.type != .keyDown {
                 self?.typeSelection.reset()
@@ -598,6 +606,7 @@ final class ExplorerTab: NSViewController, NSSplitViewDelegate {
             forwardStack.removeAll()
         }
         location = target
+        justRemoved = []
         cloudRefresh?.cancel()
         usageScanner?.cancel()
         measuring = nil
@@ -737,11 +746,15 @@ final class ExplorerTab: NSViewController, NSSplitViewDelegate {
             // Folder sizes measured before go in here too, so sorting by size is right the first time.
             let sizes = Prefs.folderSizes ? UsageCache.node(for: url).map(Self.folderSizes(in:)) : nil
             let read = Self.readFolder
+            let removed = justRemoved
             folderRead = (generation, Date())
             // Sorting a big folder takes a while; it happens here, off the main thread.
             DispatchQueue.global(qos: .userInitiated).async { [weak self] in
                 let result = Result { () -> [FileItem] in
-                    let found = try read(url, hidden)
+                    var found = try read(url, hidden)
+                    if !removed.isEmpty {
+                        found.removeAll { removed.contains($0.key) && !FileManager.default.fileExists(atPath: $0.url.path) }
+                    }
                     if let sizes { for item in found where item.isFolder && item.volume == nil { item.folderSize = sizes[item.name] } }
                     return found.sorted(by: order)
                 }
@@ -785,6 +798,23 @@ final class ExplorerTab: NSViewController, NSSplitViewDelegate {
         }
         changeReload = work
         DispatchQueue.main.asyncAfter(deadline: .now() + max(0.3, Date().timeIntervalSince(read.started)), execute: work)
+    }
+
+    /// Takes items gone from the disk off the list at once, without reading
+    /// the folder again: on a slow disk that takes seconds, and the pictures
+    /// just thrown away stayed on screen till then. What was selected stays so.
+    func drop(_ keys: Set<String>) {
+        guard !keys.isEmpty, items.contains(where: { keys.contains($0.key) }) else { return }
+        justRemoved.formUnion(keys)
+        // Disk usage takes its own out of the map; the lists catch up when shown.
+        guard shownMode != .usage else {
+            items.removeAll { keys.contains($0.key) }
+            staleViews.formUnion([.details, .icons, .columns])
+            return
+        }
+        if pendingSelection == nil { pendingSelection = Set(selectedItems.map(\.key)).subtracting(keys) }
+        items.removeAll { keys.contains($0.key) }
+        showItems()
     }
 
     /// Loads again, keeping what is selected and where the list is scrolled.

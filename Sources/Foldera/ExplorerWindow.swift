@@ -765,7 +765,7 @@ final class ExplorerTab: NSViewController, NSSplitViewDelegate {
             DispatchQueue.global(qos: .userInitiated).async { [weak self] in
                 let result = Result { () -> [FileItem] in
                     var found = try read(url, hidden) { soFar in
-                        let shown = soFar.filter { !removed.contains($0.key) }.sorted(by: order)
+                        let shown = soFar.filter { !ExplorerTab.isAmong($0, removed) }.sorted(by: order)
                         DispatchQueue.main.async { self?.showSoFar(shown, generation: generation) }
                     }
                     if !removed.isEmpty {

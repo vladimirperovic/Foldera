@@ -38,8 +38,11 @@ jobs:
         run: swift build -c "${{ matrix.configuration }}" --build-tests -Xswiftc -enable-testing
       - name: An exFAT volume for native hidden attributes
         run: |
-          hdiutil create -size 128m -fs ExFAT -volname FolderaExFAT "$RUNNER_TEMP/foldera-exfat.dmg"
-          hdiutil attach "$RUNNER_TEMP/foldera-exfat.dmg"
+          hdiutil create -size 128m -layout NONE -type UDRW "$RUNNER_TEMP/foldera-exfat.dmg"
+          device=$(hdiutil attach -nomount "$RUNNER_TEMP/foldera-exfat.dmg" | awk '/^\/dev\/disk/ {print $1; exit}')
+          test -n "$device"
+          sudo newfs_exfat -v FolderaExFAT "$device"
+          diskutil mount "$device"
           echo "FOLDERA_EXFAT_VOLUME=/Volumes/FolderaExFAT" >> "$GITHUB_ENV"
       - name: A second, case-sensitive volume
         # For the tests that move across drives and rename on a drive that tells case apart.

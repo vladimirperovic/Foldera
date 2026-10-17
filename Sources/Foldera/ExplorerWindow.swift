@@ -753,7 +753,7 @@ final class ExplorerTab: NSViewController, NSSplitViewDelegate {
                 let result = Result { () -> [FileItem] in
                     var found = try read(url, hidden)
                     if !removed.isEmpty {
-                        found.removeAll { removed.contains($0.key) && !FileManager.default.fileExists(atPath: $0.url.path) }
+                        found.removeAll { Self.isAmong($0, removed) && !FileManager.default.fileExists(atPath: $0.url.path) }
                     }
                     if let sizes { for item in found where item.isFolder && item.volume == nil { item.folderSize = sizes[item.name] } }
                     return found.sorted(by: order)
@@ -798,6 +798,13 @@ final class ExplorerTab: NSViewController, NSSplitViewDelegate {
         }
         changeReload = work
         DispatchQueue.main.asyncAfter(deadline: .now() + max(0.3, Date().timeIntervalSince(read.started)), execute: work)
+    }
+
+    /// Whether `item` is one of those thrown away. Its key may have kept the
+    /// "/private" before /var or /tmp, which standardizing drops only while
+    /// the file is there; the key it was thrown away under hasn't.
+    static func isAmong(_ item: FileItem, _ removed: Set<String>) -> Bool {
+        removed.contains(item.key) || removed.contains { item.key.hasSuffix($0) }
     }
 
     /// Takes items gone from the disk off the list at once, without reading

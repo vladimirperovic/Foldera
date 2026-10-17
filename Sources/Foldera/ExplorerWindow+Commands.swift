@@ -261,6 +261,7 @@ extension ExplorerTab: NSMenuItemValidation {
         Transfer.planInBackground(urls, into: folder, move: move, cancelled: cancelled, ask: Transfer.askWithAlert) { [weak self] planned in
             guard let self, let plan = planned else { progress.finish(); return }
             FileOps.report(plan.problems)
+            guard !cancelled.isSet else { progress.finish(); return }
             guard !plan.steps.isEmpty || (move && !plan.emptied.isEmpty) else {
                 progress.finish()
                 then?()

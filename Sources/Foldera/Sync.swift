@@ -901,6 +901,7 @@ enum Sync {
     final class Job {
         /// Kept injectable to exercise a failed final rename after a successful copy.
         var installReplacement: (URL, URL) throws -> Void = Job.moveExclusively
+        var discardPermanently: (URL) throws -> Void = { try FileManager.default.removeItem(at: $0) }
 
         private static func moveExclusively(_ from: URL, _ to: URL) throws {
             guard renamex_np(from.path, to.path, UInt32(RENAME_EXCL)) == 0 else {
@@ -1098,6 +1099,14 @@ enum Sync {
                 }
             } catch {
                 let failure = error
+                if installed && permanently {
+                    // Removing an old directory can fail after removing some
+                    // children. Never restore that incomplete backup over the
+                    // successfully installed, complete replacement.
+                    outcome.changes.append(.created(target))
+                    outcome.copied += 1
+                    throw OpError("The new version was installed, but the previous version could not be fully removed at \(backup.path): \(failure.localizedDescription)")
+                }
                 do {
                     if installed { try Self.moveExclusively(target, partial) }
                     try Self.moveExclusively(backup, target)
@@ -1160,7 +1169,7 @@ enum Sync {
         /// Out of the way: to the Trash (Undo brings it back), or gone for good.
         private func remove(_ url: URL) throws -> Change? {
             if permanently {
-                try FileManager.default.removeItem(at: url)
+                try discardPermanently(url)
                 return nil
             }
             var trashed: NSURL?

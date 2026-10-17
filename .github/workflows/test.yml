@@ -35,7 +35,7 @@ jobs:
           echo "FOLDERA_DISK_FAILURE_VOLUME=$RUNNER_TEMP/foldera-fault/mounted" >> "$GITHUB_ENV"
       - name: Build
         id: build
-        run: swift build -c "${{ matrix.configuration }}" --build-tests
+        run: swift build -c "${{ matrix.configuration }}" --build-tests -Xswiftc -enable-testing
       - name: A second, case-sensitive volume
         # For the tests that move across drives and rename on a drive that tells case apart.
         run: |
@@ -46,7 +46,7 @@ jobs:
         # A test that hangs shouldn't hold the run for half an hour: after ten
         # minutes the test process's threads are printed, and it is stopped.
         run: |
-          ./test.sh -c "${{ matrix.configuration }}" --skip "$NEEDS_A_DESKTOP" > test.log 2>&1 &
+          ./test.sh -c "${{ matrix.configuration }}" -Xswiftc -enable-testing --skip "$NEEDS_A_DESKTOP" > test.log 2>&1 &
           pid=$!
           for _ in $(seq 1 120); do
             sleep 5

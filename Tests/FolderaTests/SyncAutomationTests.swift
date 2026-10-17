@@ -32,6 +32,50 @@ private final class SyncFixture {
 }
 
 extension SyncTestIsolation.SyncAutomation {
+    @Test func partialBackupCleanupNeverRestoresAnIncompleteOldDirectory() throws {
+        let p = try SyncFixture()
+        try p.file(p.left, "thing", "complete replacement")
+        let old = p.right.appendingPathComponent("thing")
+        try FileManager.default.createDirectory(at: old, withIntermediateDirectories: true)
+        try p.file(old, "one.txt", "old one")
+        try p.file(old, "two.txt", "old two")
+        let scan = try Sync.compare(p.left, p.right, by: .content, cancelled: CancelFlag())
+        let job = Sync.Job(scan, rows: Sync.plan(scan, mode: .mirror).rows, permanently: true)
+        job.discardPermanently = { backup in
+            try FileManager.default.removeItem(at: backup.appendingPathComponent("one.txt"))
+            throw CocoaError(.fileWriteNoPermission)
+        }
+        let result = job.perform()
+        #expect(result.copied == 1 && !result.failures.isEmpty)
+        #expect(try String(contentsOf: old, encoding: .utf8) == "complete replacement")
+        let remainder = try #require(FileManager.default.contentsOfDirectory(at: p.right, includingPropertiesForKeys: nil)
+            .first { $0.lastPathComponent.hasSuffix(Sync.partialSuffix) })
+        #expect(try String(contentsOf: remainder.appendingPathComponent("two.txt"), encoding: .utf8) == "old two")
+    }
+
+    @Test @MainActor func syncReplacementSupportsUndoAndRedo() throws {
+        let p = try SyncFixture()
+        try p.file(p.left, "shared.txt", "new content")
+        try p.file(p.right, "shared.txt", "old content")
+        let scan = try Sync.compare(p.left, p.right, by: .content, cancelled: CancelFlag())
+        let result = Sync.Job(scan, rows: Sync.plan(scan, mode: .mirror).rows, permanently: false).perform()
+        defer {
+            for change in result.changes {
+                if case let .moved(_, to) = change, to.path.contains(".Trash") { try? FileManager.default.removeItem(at: to) }
+            }
+        }
+        #expect(result.failures.isEmpty && result.copied == 1)
+        let undo = FileUndo.Manager()
+        undo.groupsByEvent = false
+        undo.beginUndoGrouping()
+        FileUndo.record(result.changes, name: "Sync", in: undo)
+        undo.endUndoGrouping()
+        undo.undo()
+        #expect(try String(contentsOf: p.right.appendingPathComponent("shared.txt"), encoding: .utf8) == "old content")
+        undo.redo()
+        #expect(try String(contentsOf: p.right.appendingPathComponent("shared.txt"), encoding: .utf8) == "new content")
+    }
+
     @Test(arguments: ["shared.txt", "Group"])
     func exclusionsKeepTwoWayHistoryUntilConflictingFilesReturn(exclusion: String) throws {
         let p = try SyncFixture()

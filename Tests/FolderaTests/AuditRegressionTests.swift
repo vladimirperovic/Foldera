@@ -23,8 +23,8 @@ private final class AuditFolder {
 
 // Share BackgroundWork's serialization: these tests replace the same folder reader.
 extension BackgroundWork {
-    @Test(arguments: [ViewMode.details, .icons])
-    func progressiveBatchesKeepTheSelectedFileWhenEarlierNamesArrive(mode: ViewMode) async throws {
+    @Test(arguments: [ExplorerTab.ViewMode.details, .icons])
+    func progressiveBatchesKeepTheSelectedFileWhenEarlierNamesArrive(mode: ExplorerTab.ViewMode) async throws {
         _ = NSApplication.shared
         let fixture = try AuditFolder()
         let first = try fixture.file("First/first.txt").deletingLastPathComponent()

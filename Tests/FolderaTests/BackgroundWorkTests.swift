@@ -197,6 +197,48 @@ import Testing
         #expect(outline.isItemExpanded(node))
     }
 
+    /// A folder reached from the list is highlighted in the tree, opened to
+    /// if it is deeper than the tree is open; a branch closed afterwards
+    /// stays closed when the tree is read again.
+    @Test func theTreeOpensToTheFolderShownAndLeavesAClosedBranchClosed() async throws {
+        _ = NSApplication.shared
+        let fm = FileManager.default
+        let root = fm.temporaryDirectory.appendingPathComponent("FolderaReveal-\(UUID().uuidString)")
+        let outer = root.appendingPathComponent("Projects")
+        let deep = outer.appendingPathComponent("Hotel/Drawings")
+        try fm.createDirectory(at: deep, withIntermediateDirectories: true)
+        defer { try? fm.removeItem(at: root) }
+        let oldPins = UserDefaults.standard.object(forKey: "pinned")
+        Pins.urls = [root]
+        defer {
+            UserDefaults.standard.set(oldPins, forKey: "pinned")
+            NotificationCenter.default.post(name: .explorerPinsChanged, object: nil)
+        }
+        let sidebar = Sidebar()
+        defer { sidebar.stop() }
+        let outline = sidebar.outline
+        let section = try #require(sidebar.outlineView(outline, child: 0, ofItem: nil) as? SidebarNode)
+        try await eventually("pins read") { section.children?.contains { $0.url?.key == root.key } == true }
+        func highlighted() -> String? { (outline.item(atRow: outline.selectedRow) as? SidebarNode)?.url?.key }
+        func node(_ url: URL) -> SidebarNode? {
+            (0..<outline.numberOfRows).lazy.compactMap { outline.item(atRow: $0) as? SidebarNode }.first { $0.url?.key == url.key }
+        }
+
+        sidebar.sync(to: .folder(deep))
+        try await eventually("opened to the folder") { highlighted() == deep.key }
+
+        let projects = try #require(node(outer))
+        outline.collapseItem(projects)
+        sidebar.refresh()
+        try await Task.sleep(for: .milliseconds(600))
+        #expect(!outline.isItemExpanded(projects))
+        #expect(highlighted() == nil)
+
+        // Going there again opens the way again.
+        sidebar.sync(to: .folder(deep))
+        try await eventually("opened again") { highlighted() == deep.key }
+    }
+
     @Test func treeFoldersCanGoToTheTrashButDrivesCannot() throws {
         _ = NSApplication.shared
         let sidebar = Sidebar()

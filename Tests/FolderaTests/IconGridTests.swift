@@ -112,7 +112,8 @@ import Testing
         CGImageDestinationAddImage(destination, context.makeImage()!, nil)
         #expect(CGImageDestinationFinalize(destination))
 
-        #expect(Thumbnails.imageIOThumbnail(file, pixels: 128).map { max($0.width, $0.height) } == 128)
+        let source = try #require(CGImageSourceCreateWithURL(file as CFURL, nil))
+        #expect(Thumbnails.decode(source, pixels: 128).map { max($0.width, $0.height) } == 128)
         var delivered: NSImage?
         Thumbnails.shared.image(for: file, side: 64, scale: 2, version: Date()) { delivered = $0 }
         try await eventually("thumbnail made") { delivered != nil }

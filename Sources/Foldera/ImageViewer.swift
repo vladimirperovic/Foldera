@@ -51,15 +51,15 @@ enum ImageFiles {
     static func decodeBitmap(_ url: URL, maxPixels: Int? = nil) -> Loaded? {
         guard let source = CGImageSourceCreateWithURL(url as CFURL, [kCGImageSourceShouldCache: false] as CFDictionary),
               CGImageSourceGetCount(source) > 0 else { return nil }
-        // Animations (GIF, animated WebP) stay NSImages, which NSImageView plays.
-        if CGImageSourceGetCount(source) > 1, let image = NSImage(contentsOf: url),
+        // Animations (GIF, animated WebP) stay NSImages, which NSImageView
+        // plays. A JPEG with more than one picture holds a camera's preview
+        // (MPF) or a stereo pair: the photo is the first, decoded as any other.
+        if CGImageSourceGetCount(source) > 1, !isJPEG(source), let image = NSImage(contentsOf: url),
            let rep = image.representations.first as? NSBitmapImageRep {
             return Loaded(image: image, pixels: NSSize(width: rep.pixelsWide, height: rep.pixelsHigh))
         }
-        let properties = CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [CFString: Any]
-        let width = properties?[kCGImagePropertyPixelWidth] as? Int ?? 0
-        let height = properties?[kCGImagePropertyPixelHeight] as? Int ?? 0
-        let largest = max(width, height, 1)
+        let upright = uprightSize(of: source)
+        let largest = Int(max(upright?.width ?? 1, upright?.height ?? 1))
         let options: [CFString: Any] = [
             kCGImageSourceCreateThumbnailFromImageAlways: true,
             kCGImageSourceCreateThumbnailWithTransform: true,
@@ -68,11 +68,72 @@ enum ImageFiles {
         ]
         guard let cg = CGImageSourceCreateThumbnailAtIndex(source, 0, options as CFDictionary) else { return nil }
         let size = NSSize(width: cg.width, height: cg.height)
+        return Loaded(image: NSImage(cgImage: cg, size: size), pixels: size, full: upright ?? size)
+    }
+
+    private static func isJPEG(_ source: CGImageSource) -> Bool {
+        guard let found = CGImageSourceGetType(source) else { return false }
+        let id = found as String
+        return UTType(id)?.conforms(to: .jpeg) == true || id == "public.mpo-image"
+    }
+
+    /// The picture's pixel size standing up, as the camera's orientation turns it.
+    static func uprightSize(of source: CGImageSource) -> NSSize? {
+        guard let p = CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [CFString: Any],
+              let width = p[kCGImagePropertyPixelWidth] as? Int, let height = p[kCGImagePropertyPixelHeight] as? Int,
+              width > 0, height > 0 else { return nil }
         // Orientations 5–8 stand the picture on its side.
-        let sideways = (properties?[kCGImagePropertyOrientation] as? Int).map { $0 >= 5 } ?? false
-        let full = width > 0 && height > 0
-            ? (sideways ? NSSize(width: height, height: width) : NSSize(width: width, height: height)) : size
-        return Loaded(image: NSImage(cgImage: cg, size: size), pixels: size, full: full)
+        let sideways = (p[kCGImagePropertyOrientation] as? Int).map { $0 >= 5 } ?? false
+        return sideways ? NSSize(width: height, height: width) : NSSize(width: width, height: height)
+    }
+
+    /// The small picture a camera or phone keeps inside the file (EXIF, or a
+    /// RAW file's preview), standing up and at most `maxPixels` across. It is
+    /// read from the first part of the file without decoding the photo, so it
+    /// costs next to nothing even on a slow disk. Nil when there is none, or
+    /// when its shape says it isn't of this photo. Safe off the main thread.
+    static func storedThumbnail(in source: CGImageSource, maxPixels: Int) -> CGImage? {
+        guard keepsThumbnails(source) else { return nil }
+        // Without either "from image" key, ImageIO hands back only a picture the file already has.
+        guard let stored = CGImageSourceCreateThumbnailAtIndex(source, 0, [
+            kCGImageSourceCreateThumbnailWithTransform: true,
+            kCGImageSourceShouldCacheImmediately: true,
+            kCGImageSourceThumbnailMaxPixelSize: maxPixels,
+        ] as CFDictionary) else { return nil }
+        guard let upright = uprightSize(of: source) else { return stored }
+        return trimmed(stored, toShapeOf: upright)
+    }
+
+    /// The same, as a picture to show, and nil when the file is not one ImageIO reads.
+    static func storedThumbnail(_ url: URL, maxPixels: Int) -> NSImage? {
+        guard let source = CGImageSourceCreateWithURL(url as CFURL, [kCGImageSourceShouldCache: false] as CFDictionary),
+              CGImageSourceGetCount(source) > 0, let stored = storedThumbnail(in: source, maxPixels: maxPixels) else { return nil }
+        return NSImage(cgImage: stored, size: NSSize(width: stored.width, height: stored.height))
+    }
+
+    /// Kinds of file that carry a picture of their own; asking the others only fills the log.
+    private static func keepsThumbnails(_ source: CGImageSource) -> Bool {
+        guard let found = CGImageSourceGetType(source) else { return false }
+        let id = found as String
+        guard let type = UTType(id) else { return false }
+        return [UTType.jpeg, .heic, .heif, .tiff, .rawImage].contains { type.conforms(to: $0) } || id == "public.mpo-image"
+    }
+
+    /// A thumbnail of another shape than its photo, as when a camera pads a
+    /// 3:2 photo's 4:3 thumbnail with black bars, cut to the photo's shape.
+    /// Nil when the shapes are too far apart to be the same picture.
+    static func trimmed(_ image: CGImage, toShapeOf size: NSSize) -> CGImage? {
+        let width = CGFloat(image.width), height = CGFloat(image.height)
+        guard width > 0, height > 0, size.width > 0, size.height > 0 else { return nil }
+        let wanted = size.width / size.height
+        let ratio = width / height / wanted
+        if abs(ratio - 1) < 0.02 { return image }
+        // 4:3 for 3:2 or 16:9 is padding; a tall thumbnail for a wide photo is another picture.
+        guard ratio > 0.7, ratio < 1.43 else { return nil }
+        let crop = ratio > 1
+            ? CGRect(x: ((width - height * wanted) / 2).rounded(), y: 0, width: (height * wanted).rounded(), height: height)
+            : CGRect(x: 0, y: ((height - width / wanted) / 2).rounded(), width: width, height: (width / wanted).rounded())
+        return image.cropping(to: crop)
     }
 
     /// Vector formats and anything ImageIO passed on. Main thread.
@@ -287,9 +348,15 @@ final class ImageViewer: NSWindowController, NSWindowDelegate, NSMenuItemValidat
     /// Where the picture can go, above the thumbnails when they show.
     var pictureArea: NSSize { scroll.frame.size }
     private var cache: [String: ImageFiles.Loaded] = [:]
-    private static let decodes = BackgroundTask.queue("Foldera.image-decoding")
+    /// The picture on screen and the ones read ahead, side by side.
+    private static let decodes = BackgroundTask.queue("Foldera.image-decoding", limit: 3)
     private var inFlight: [String: BackgroundTask] = [:]
     private let sharpen = BackgroundTask(queue: ImageViewer.decodes)
+    /// The rough picture shown while the right one decodes.
+    private static let previews = BackgroundTask.queue("Foldera.image-previews")
+    private let rough = BackgroundTask(queue: ImageViewer.previews)
+    /// Which way the pages are turning (1 or −1), to read ahead that way.
+    private var heading = 1
     /// True while the full-resolution picture is being decoded for zooming in.
     private var sharpening = false
     private var slideshow: Timer?
@@ -520,6 +587,8 @@ final class ImageViewer: NSWindowController, NSWindowDelegate, NSMenuItemValidat
             canvas.image = nil
             spinner.startAnimation(nil)
             load(url)
+            inFlight[url.key]?.hurry()
+            showRough(url)
         }
         prefetch()
         updateLabels()
@@ -534,7 +603,31 @@ final class ImageViewer: NSWindowController, NSWindowDelegate, NSMenuItemValidat
             NSSound.beep()
             return
         }
+        heading = delta < 0 ? -1 : 1
         go(to: target)
+    }
+
+    /// Something to look at at once while the photo decodes, as FastStone
+    /// does: the thumbnail the folder's grid made, else the small picture the
+    /// file keeps. It is stretched to fit, and gives way to the photo.
+    private func showRough(_ url: URL) {
+        rough.cancel()
+        if let image = Thumbnails.shared.anyPicture(of: url) { return showRough(image) }
+        rough.run({ ImageFiles.storedThumbnail(url, maxPixels: 1024) }) { [weak self] image in
+            guard let self, let image, self.original == nil, url.key == self.current?.key else { return }
+            self.showRough(image)
+        }
+    }
+
+    private func showRough(_ image: NSImage) {
+        let size = image.size
+        guard size.width > 0, size.height > 0 else { return }
+        spinner.stopAnimation(nil)
+        canvas.image = image
+        // Window-sized, so fitting it stays within the zoom's limits.
+        let across = 1000 / max(size.width, size.height)
+        canvas.frame = NSRect(x: 0, y: 0, width: size.width * across, height: size.height * across)
+        applyFit()
     }
 
     private func load(_ url: URL) {
@@ -554,15 +647,21 @@ final class ImageViewer: NSWindowController, NSWindowDelegate, NSMenuItemValidat
         }
     }
 
-    /// Decodes the neighbours ahead of time, so the next picture is instant;
-    /// forgets the ones further away.
+    /// The pictures decoded ahead of time, so turning the page is instant:
+    /// two the way the pages are turning, and the one behind.
+    static func readAhead(from index: Int, heading: Int, count: Int) -> [Int] {
+        [index + heading, index + 2 * heading, index - heading].filter { $0 >= 0 && $0 < count }
+    }
+
+    /// Decodes the neighbours ahead of time; forgets the ones further away.
     private func prefetch() {
-        let keep = Set([index - 1, index, index + 1].filter { $0 >= 0 && $0 < urls.count }.map { urls[$0].key })
+        let ahead = Self.readAhead(from: index, heading: heading, count: urls.count)
+        let keep = Set(([index] + ahead).map { urls[$0].key })
         cache = cache.filter { keep.contains($0.key) }
         for key in Array(inFlight.keys) where !keep.contains(key) {
             inFlight.removeValue(forKey: key)?.cancel()
         }
-        for i in [index + 1, index - 1] where i >= 0 && i < urls.count && cache[urls[i].key] == nil {
+        for i in ahead where cache[urls[i].key] == nil {
             load(urls[i])
         }
     }
@@ -572,9 +671,11 @@ final class ImageViewer: NSWindowController, NSWindowDelegate, NSMenuItemValidat
         inFlight.removeAll()
         sharpen.cancel()
         sharpening = false
+        rough.cancel()
     }
 
     private func failed(_ url: URL) {
+        rough.cancel()
         spinner.stopAnimation(nil)
         canvas.image = nil
         message.stringValue = "Foldera can't display “\(url.lastPathComponent)”.\nPress E to open it in its own app."
@@ -582,6 +683,7 @@ final class ImageViewer: NSWindowController, NSWindowDelegate, NSMenuItemValidat
     }
 
     private func display(_ loaded: ImageFiles.Loaded) {
+        rough.cancel()
         spinner.stopAnimation(nil)
         message.stringValue = ""
         original = loaded
@@ -1028,15 +1130,21 @@ final class FilmstripItem: NSCollectionViewItem {
     }
 
     func configure(_ url: URL, index: Int, current: Int) {
-        if self.url?.key != url.key { stopThumbnail() }
+        // Drawn again for the same picture: the thumbnail on its way stays on its way.
+        let coming = self.url?.key == url.key && thumbnail != nil
+        if !coming { stopThumbnail() }
         self.url = url
         self.index = index
         view.toolTip = url.lastPathComponent
         refreshMark(current: current)
+        guard !coming else { return }
         // By its name, not the file: a slow disk is asked only for the thumbnail.
         picture.image = NSWorkspace.shared.icon(for: UTType(filenameExtension: url.pathExtension) ?? .image)
         let scale = view.window?.backingScaleFactor ?? 2
-        thumbnail = Thumbnails.shared.image(for: url, side: Filmstrip.side, scale: scale, version: nil) { [weak self] image in
+        thumbnail = Thumbnails.shared.image(for: url, side: Filmstrip.side, scale: scale, version: nil, early: { [weak self] image in
+            guard let self, self.url?.key == url.key else { return }
+            self.picture.image = image
+        }) { [weak self] image in
             guard let self, self.url?.key == url.key else { return }
             self.thumbnail = nil
             self.picture.image = image

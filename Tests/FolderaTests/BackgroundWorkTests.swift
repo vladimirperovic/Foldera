@@ -3,9 +3,10 @@ import Testing
 @testable import Foldera
 
 @Suite(.serialized) @MainActor struct BackgroundWork {
+    /// Long, since the other suites can keep the main thread for seconds on a busy CI Mac.
     private func eventually(_ message: String = "condition", _ condition: () -> Bool) async throws {
         Awake.hold()
-        let deadline = Date().addingTimeInterval(5)
+        let deadline = Date().addingTimeInterval(15)
         while !condition(), Date() < deadline { try await Task.sleep(for: .milliseconds(10)) }
         #expect(condition(), Comment(rawValue: message))
     }

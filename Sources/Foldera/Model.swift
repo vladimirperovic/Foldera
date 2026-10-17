@@ -1,4 +1,5 @@
 import AppKit
+import UniformTypeIdentifiers
 
 /// Where a window is looking: a folder on disk, or the list of drives.
 enum Location: Equatable {
@@ -144,6 +145,8 @@ final class FileItem {
     /// A folder's size on disk, once measured (View › Folder Sizes, Disk usage).
     var folderSize: Int64?
     private var cachedIcon: NSImage?
+    /// On a disk without macOS's own file metadata: its kind and icon are told from the name.
+    private let byName: Bool
 
     /// The folder it is in, kept for sorting search results by folder.
     lazy var folderPath: String = url.deletingLastPathComponent().path
@@ -159,14 +162,37 @@ final class FileItem {
         .ubiquitousItemDownloadingStatusKey,
     ]
 
+    /// What a disk without macOS's own file metadata (exFAT, FAT, a share) is
+    /// asked for. Whether an item is hidden, an alias or a package, and its
+    /// kind, live there in the "._" file beside it, and asking means a search
+    /// of the folder per item: on an exFAT disk through FSKit, seconds for a
+    /// folder of photos. They are told from the name instead.
+    static let leanKeys: [URLResourceKey] = [
+        .isDirectoryKey, .isSymbolicLinkKey, .fileSizeKey, .contentModificationDateKey, .creationDateKey, .contentAccessDateKey,
+    ]
+
+    /// Folders Windows keeps out of sight at the top of a drive.
+    private static let windowsHidden: Set<String> = ["System Volume Information", "$RECYCLE.BIN"]
+
+    static func hiddenByName(_ name: String) -> Bool {
+        name.hasPrefix(".") || windowsHidden.contains(name)
+    }
+
+    /// The type an item's name says it is: a folder's extension is looked up among folders ("app"), a file's among files.
+    private static func type(byName url: URL, directory: Bool) -> UTType? {
+        url.pathExtension.isEmpty ? nil : UTType(filenameExtension: url.pathExtension, conformingTo: directory ? .directory : .data)
+    }
+
     /// Something you walk into rather than hand to an app.
     var isFolder: Bool { volume != nil || (isDirectory && !isPackage) }
 
-    init(url: URL) {
+    /// `foreign`: on a disk without macOS's own file metadata, asked only for `leanKeys`.
+    init(url: URL, foreign: Bool = false) {
         self.url = url
         key = url.key
         name = url.lastPathComponent
-        let values = try? url.resourceValues(forKeys: Set(Self.keys))
+        byName = foreign
+        let values = try? url.resourceValues(forKeys: Set(foreign ? Self.leanKeys : Self.keys))
         isSymlink = values?.isSymbolicLink ?? false
         var directory = values?.isDirectory ?? false
         var package = values?.isPackage ?? false
@@ -174,17 +200,24 @@ final class FileItem {
             let target = try? url.resolvingSymlinksInPath().resourceValues(forKeys: [.isDirectoryKey, .isPackageKey])
             directory = target?.isDirectory ?? false
             package = target?.isPackage ?? false
+        } else if foreign {
+            package = directory && Self.type(byName: url, directory: true)?.conforms(to: .package) == true
         }
         isDirectory = directory
         isPackage = package
-        isHidden = (values?.isHidden ?? false) || name.hasPrefix(".")
+        isHidden = foreign ? Self.hiddenByName(name) : (values?.isHidden ?? false) || name.hasPrefix(".")
         // isAliasFile is also true for symbolic links.
         isAlias = (values?.isAliasFile ?? false) && !isSymlink
         size = directory ? nil : values?.fileSize.map(Int64.init)
         modified = values?.contentModificationDate
         created = values?.creationDate
         accessed = values?.contentAccessDate
-        kind = values?.localizedTypeDescription ?? (directory ? "Folder" : "Document")
+        if foreign {
+            kind = directory && !package ? "Folder"
+                : Self.type(byName: url, directory: directory)?.localizedDescription ?? (directory ? "Folder" : "Document")
+        } else {
+            kind = values?.localizedTypeDescription ?? (directory ? "Folder" : "Document")
+        }
         volume = nil
         if let status = values?.ubiquitousItemDownloadingStatus {
             let sync = try? url.resourceValues(forKeys: [.ubiquitousItemIsDownloadingKey, .ubiquitousItemIsUploadingKey])
@@ -211,6 +244,7 @@ final class FileItem {
             .volumeIsRemovableKey, .volumeIsEjectableKey, .volumeIsLocalKey,
         ])
         name = values?.volumeLocalizedName ?? url.lastPathComponent
+        byName = false
         isDirectory = true
         isPackage = false
         isHidden = false
@@ -246,16 +280,42 @@ final class FileItem {
 
     var icon: NSImage {
         if let cachedIcon { return cachedIcon }
-        let image = NSWorkspace.shared.icon(forFile: url.path)
+        // On a foreign disk by its name: asking the file there means a trip to its "._" file, on the drawing thread.
+        let image = byName
+            ? NSWorkspace.shared.icon(for: isFolder ? .folder : Self.type(byName: url, directory: isDirectory) ?? .data)
+            : NSWorkspace.shared.icon(forFile: url.path)
         cachedIcon = image
         return image
     }
 
-    static func contents(of folder: URL, showHidden: Bool) throws -> [FileItem] {
-        let urls = try FileManager.default.contentsOfDirectory(
-            at: folder, includingPropertiesForKeys: keys,
-            options: showHidden ? [] : [.skipsHiddenFiles])
-        return urls.map(FileItem.init(url:))
+    /// The items in `folder`. `step` is handed what has been read so far
+    /// twice a second, so a slow disk shows the first before the rest.
+    static func contents(of folder: URL, showHidden: Bool, step: (([FileItem]) -> Void)? = nil) throws -> [FileItem] {
+        let foreign = UsageScanner.isForeign(folder)
+        // On a foreign disk hidden is told from the name, so the walk isn't asked
+        // to tell (it would look into every "._" file).
+        var options: FileManager.DirectoryEnumerationOptions = [.skipsSubdirectoryDescendants]
+        if !showHidden && !foreign { options.insert(.skipsHiddenFiles) }
+        var failed = false
+        guard let walker = FileManager.default.enumerator(
+            at: folder, includingPropertiesForKeys: foreign ? leanKeys : keys, options: options,
+            errorHandler: { _, _ in failed = true; return true }) else { throw CocoaError(.fileReadUnknown) }
+        var found: [FileItem] = []
+        var told = Date()
+        while let url = walker.nextObject() as? URL {
+            let item = FileItem(url: url, foreign: foreign)
+            if foreign && !showHidden && item.isHidden { continue }
+            found.append(item)
+            if let step, Date().timeIntervalSince(told) > 0.5 {
+                told = Date()
+                step(found)
+            }
+        }
+        if failed && found.isEmpty {
+            // Not readable (no permission, gone): the error the list explains, as reading it whole gives it.
+            _ = try FileManager.default.contentsOfDirectory(at: folder, includingPropertiesForKeys: nil)
+        }
+        return found
     }
 
     static func volumes() -> [FileItem] {

@@ -52,8 +52,21 @@ final class ExplorerTab: NSViewController, NSSplitViewDelegate {
     /// address; a fast one reads the folder first and nothing blinks.
     private var opening: DispatchWorkItem?
     private(set) var waitingForFolder = false
-    /// Reads a folder for the list; tests stand a slow disk in for it.
-    static var readFolder: (URL, Bool) throws -> [FileItem] = FileItem.contents(of:showHidden:)
+    /// Reads a folder for the list, handing over what it has so far as it
+    /// goes; tests stand a slow disk in for it.
+    static var readFolderInSteps: (URL, Bool, @escaping ([FileItem]) -> Void) throws -> [FileItem] = { url, hidden, step in
+        try FileItem.contents(of: url, showHidden: hidden, step: step)
+    }
+    /// The same without the steps, as most tests stand it in.
+    static var readFolder: (URL, Bool) throws -> [FileItem] {
+        get {
+            let steps = readFolderInSteps
+            return { url, hidden in try steps(url, hidden, { _ in }) }
+        }
+        set { readFolderInSteps = { url, hidden, _ in try newValue(url, hidden) } }
+    }
+    /// The read whose items so far are on screen, a folder still being read.
+    private var shownSoFar = 0
     /// Items taken off the list as they went to the Trash. A read begun
     /// before, or a slow disk's stale answer, that still has one leaves it
     /// out when it is no longer on the disk (one put back is shown again).
@@ -745,13 +758,16 @@ final class ExplorerTab: NSViewController, NSSplitViewDelegate {
             let order = sort
             // Folder sizes measured before go in here too, so sorting by size is right the first time.
             let sizes = Prefs.folderSizes ? UsageCache.node(for: url).map(Self.folderSizes(in:)) : nil
-            let read = Self.readFolder
+            let read = Self.readFolderInSteps
             let removed = justRemoved
             folderRead = (generation, Date())
             // Sorting a big folder takes a while; it happens here, off the main thread.
             DispatchQueue.global(qos: .userInitiated).async { [weak self] in
                 let result = Result { () -> [FileItem] in
-                    var found = try read(url, hidden)
+                    var found = try read(url, hidden) { soFar in
+                        let shown = soFar.filter { !removed.contains($0.key) }.sorted(by: order)
+                        DispatchQueue.main.async { self?.showSoFar(shown, generation: generation) }
+                    }
                     if !removed.isEmpty {
                         found.removeAll { removed.contains($0.key) && !FileManager.default.fileExists(atPath: $0.url.path) }
                     }
@@ -768,6 +784,24 @@ final class ExplorerTab: NSViewController, NSSplitViewDelegate {
                 }
             }
         }
+    }
+
+    /// A folder still being read on a slow disk shows what has been read so
+    /// far, rather than "Working on it…" till the last item: the first
+    /// pictures come while the rest are read. Only once the folder left
+    /// behind has gone from the screen; a folder read again keeps its list
+    /// till the read is done.
+    private func showSoFar(_ soFar: [FileItem], generation: Int) {
+        guard generation == loadGeneration, waitingForFolder, renamingKey == nil, !isSearching, !soFar.isEmpty else { return }
+        shownSoFar = generation
+        items = soFar
+        if shownMode != .usage {
+            selectingQuietly = true
+            reloadVisibleList()
+            selectingQuietly = false
+        }
+        updateEmptyState()
+        selectionChanged()
     }
 
     /// Answers the folder watcher. A change seen while the folder is read, or
@@ -831,6 +865,12 @@ final class ExplorerTab: NSViewController, NSSplitViewDelegate {
         if renamingKey != nil {
             reloadDeferred = true
             return
+        }
+        if shownSoFar == loadGeneration {
+            // Picked while the folder was still being read: kept, and the list stays where it was scrolled to.
+            let picked = Set(selectedItems.map(\.key))
+            if !picked.isEmpty { pendingSelection = picked }
+            if (pendingSelection ?? []).isEmpty { scrollToTop = false }
         }
         loadError = error
         opening?.cancel()
@@ -1206,6 +1246,8 @@ final class ExplorerTab: NSViewController, NSSplitViewDelegate {
             parts.append(found)
         } else if !waitingForFolder {
             parts.append(Format.items(items.count))
+        } else if !items.isEmpty {
+            parts.append("Reading… \(Format.items(items.count)) so far")
         }
         let selected = selectedItems
         if selected.count == 1, let item = selected.first {

@@ -415,6 +415,26 @@ extension ExplorerTab: NSMenuItemValidation {
         }
     }
 
+    /// The picture itself rather than the file, for an editor or a document.
+    @objc func copyImage(_ sender: Any?) {
+        guard selectedItems.count == 1, let item = selectedItems.first, isPicture(item) else { return NSSound.beep() }
+        let url = item.url
+        DispatchQueue.global(qos: .userInitiated).async {
+            let data = ImageFiles.clipboardPicture(url, quarterTurns: 0)
+            DispatchQueue.main.async {
+                let pasteboard = NSPasteboard.general
+                pasteboard.clearContents()
+                if let data {
+                    pasteboard.setData(data, forType: .tiff)
+                } else if let vector = NSImage(contentsOf: url) {
+                    pasteboard.writeObjects([vector])
+                } else {
+                    NSSound.beep()
+                }
+            }
+        }
+    }
+
     @objc func share(_ sender: Any?) {
         let urls = selectedURLs
         guard !urls.isEmpty else { return }
@@ -956,6 +976,7 @@ extension ExplorerTab: NSMenuItemValidation {
         menu.addItem(item("Copy as path", "link", #selector(copyPath(_:)), key: "c", mods: [.command, .shift]))
         menu.addItem(item("Share", "square.and.arrow.up", #selector(share(_:))))
         if chosen.count == 1, isPicture(chosen[0]) {
+            menu.addItem(item("Copy image", "photo.on.rectangle", #selector(copyImage(_:)), key: "c", mods: [.command, .option]))
             menu.addItem(item("Copy text from image", "text.viewfinder", #selector(copyTextFromImage(_:))))
         }
         menu.addItem(item("AirDrop", "airplayaudio", #selector(airDrop(_:))))
@@ -1019,6 +1040,8 @@ extension ExplorerTab: NSMenuItemValidation {
             return window?.attachedSheet == nil
         case #selector(copyTextFromImage(_:)):
             return !editing && chosen.count == 1 && isPicture(chosen[0]) && window?.attachedSheet == nil
+        case #selector(copyImage(_:)):
+            return !editing && chosen.count == 1 && isPicture(chosen[0])
         case #selector(goBack(_:)): return !backStack.isEmpty
         case #selector(goForward(_:)): return !forwardStack.isEmpty
         case #selector(goUp(_:)): return parentLocation != nil

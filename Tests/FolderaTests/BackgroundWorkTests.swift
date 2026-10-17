@@ -163,6 +163,68 @@ import Testing
         gate.signal()
     }
 
+    /// On a slow disk the first items show while the rest are read, instead
+    /// of "Working on it…" until the last one.
+    @Test func aSlowFolderShowsWhatHasBeenReadSoFar() async throws {
+        _ = NSApplication.shared
+        let fm = FileManager.default
+        let root = fm.temporaryDirectory.appendingPathComponent("FolderaSoFar-\(UUID().uuidString)")
+        let first = root.appendingPathComponent("First"), slow = root.appendingPathComponent("Slow")
+        for folder in [first, slow] { try fm.createDirectory(at: folder, withIntermediateDirectories: true) }
+        defer { try? fm.removeItem(at: root) }
+        try "a".write(to: first.appendingPathComponent("a.txt"), atomically: true, encoding: .utf8)
+        for name in ["p1.jpg", "p2.jpg", "p3.jpg"] {
+            try "x".write(to: slow.appendingPathComponent(name), atomically: true, encoding: .utf8)
+        }
+        // A slow disk that hands over two pictures, then takes its time over the third.
+        let gate = DispatchSemaphore(value: 0)
+        let original = ExplorerTab.readFolderInSteps
+        ExplorerTab.readFolderInSteps = { url, hidden, step in
+            guard url.key == slow.key else { return try original(url, hidden, step) }
+            let all = try original(url, hidden, { _ in })
+            Thread.sleep(forTimeInterval: 0.4)
+            step(Array(all.prefix(2)))
+            _ = gate.wait(timeout: .now() + 5)
+            return all
+        }
+        defer {
+            ExplorerTab.readFolderInSteps = original
+            for _ in 0..<4 { gate.signal() }
+        }
+
+        let tab = ExplorerTab(location: .folder(first))
+        defer { tab.watcher.stop() }
+        try await eventually("first folder") { tab.items.map(\.name) == ["a.txt"] }
+        tab.navigate(to: .folder(slow))
+        try await eventually("the first two, while the third is read") { tab.items.count == 2 && tab.waitingForFolder }
+        #expect(tab.emptyLabel.isHidden)
+        #expect(tab.statusLabel.stringValue.contains("Reading…"))
+        gate.signal()
+        try await eventually("all of it") { tab.items.count == 3 && !tab.waitingForFolder }
+        #expect(!tab.statusLabel.stringValue.contains("Reading…"))
+    }
+
+    /// On exFAT, FAT or a share, what lives in "._" files is told from the name.
+    @Test func itemsOnAForeignDiskAreToldByTheirNames() throws {
+        let fm = FileManager.default
+        let root = fm.temporaryDirectory.appendingPathComponent("FolderaByName-\(UUID().uuidString)")
+        try fm.createDirectory(at: root.appendingPathComponent("Tool.app"), withIntermediateDirectories: true)
+        try fm.createDirectory(at: root.appendingPathComponent("System Volume Information"), withIntermediateDirectories: true)
+        try fm.createDirectory(at: root.appendingPathComponent("Projects"), withIntermediateDirectories: true)
+        defer { try? fm.removeItem(at: root) }
+        for name in ["photo.jpg", ".notes"] { try "x".write(to: root.appendingPathComponent(name), atomically: true, encoding: .utf8) }
+        func item(_ name: String) -> FileItem { FileItem(url: root.appendingPathComponent(name), foreign: true) }
+
+        let photo = item("photo.jpg")
+        #expect(photo.kind == FileItem(url: root.appendingPathComponent("photo.jpg")).kind)
+        #expect(!photo.isHidden && !photo.isFolder && photo.size == 1)
+        #expect(item(".notes").isHidden && item("System Volume Information").isHidden)
+        let tool = item("Tool.app")
+        #expect(tool.isPackage && !tool.isFolder)
+        let projects = item("Projects")
+        #expect(projects.isFolder && projects.kind == "Folder")
+    }
+
     @Test func expandedSidebarTracksNewFoldersAndRefreshPreservesBranches() async throws {
         _ = NSApplication.shared
         let fm = FileManager.default
@@ -196,6 +258,51 @@ import Testing
         try await eventually("removed child disappeared") { child.children?.isEmpty == true && !child.loading }
         #expect(node.children?.first === child)
         #expect(outline.isItemExpanded(node))
+    }
+
+    /// Pictures thrown away left the list only when the folder had been read
+    /// again, seconds later on an exFAT disk. Now they leave at once, and a
+    /// read still listing them (begun before, or a slow disk's stale answer)
+    /// doesn't bring them back.
+    @Test func itemsGoneFromTheDiskLeaveTheListAtOnceAndStayGone() async throws {
+        _ = NSApplication.shared
+        let fm = FileManager.default
+        let folder = fm.temporaryDirectory.appendingPathComponent("FolderaGone-\(UUID().uuidString)")
+        try fm.createDirectory(at: folder, withIntermediateDirectories: true)
+        defer { try? fm.removeItem(at: folder) }
+        for name in ["a.jpg", "b.jpg", "c.jpg"] {
+            try "x".write(to: folder.appendingPathComponent(name), atomically: true, encoding: .utf8)
+        }
+        let tab = ExplorerTab(location: .folder(folder))
+        defer { tab.watcher.stop() }
+        try await eventually("read") { tab.items.count == 3 }
+        tab.select(keys: [folder.appendingPathComponent("c.jpg").key])
+
+        // From now on the disk is slow, and answers with what was there before.
+        let before = tab.items.map(\.url)
+        let gate = DispatchSemaphore(value: 0)
+        let original = ExplorerTab.readFolder
+        ExplorerTab.readFolder = { url, hidden in
+            guard url.key == folder.key else { return try original(url, hidden) }
+            _ = gate.wait(timeout: .now() + 5)
+            return before.map { FileItem(url: $0) }
+        }
+        defer {
+            ExplorerTab.readFolder = original
+            for _ in 0..<4 { gate.signal() }
+        }
+
+        let gone = folder.appendingPathComponent("a.jpg")
+        try fm.removeItem(at: gone)
+        FileOps.announceRemoved([gone])
+        // Every read is held at the gate: this is the list dropping it, before any read.
+        try await eventually("off the list") { tab.items.map(\.name) == ["b.jpg", "c.jpg"] }
+        #expect(tab.selectedItems.map(\.name) == ["c.jpg"])
+
+        tab.reload()
+        for _ in 0..<4 { gate.signal() }
+        try await Task.sleep(for: .milliseconds(600))
+        #expect(tab.items.map(\.name) == ["b.jpg", "c.jpg"])
     }
 
     /// A folder reached from the list is highlighted in the tree, opened to

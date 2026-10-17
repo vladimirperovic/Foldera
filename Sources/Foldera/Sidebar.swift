@@ -402,16 +402,25 @@ final class Sidebar: NSObject, NSOutlineViewDataSource, NSOutlineViewDelegate {
         guard !stopped, !node.loading, node.isExpandable, node.kind != .network else { return }
         node.loading = true
         let generation = node.generation
+        let started = Date()
         Self.reads.addOperation { [weak self, weak node] in
             guard let self, let node else { return }
             let made = self.readChildren(node)
             DispatchQueue.main.async { [weak self, weak node] in
                 guard let self, let node, !self.stopped else { return }
-                node.loading = false
                 guard generation == node.generation else {
-                    if self.outline.isItemExpanded(node) { self.load(node) }
+                    // Changed while it was read: rest as long as the read
+                    // took, still loading so no other read starts, then read
+                    // again. A folder that keeps changing on a slow disk is
+                    // not read back to back.
+                    DispatchQueue.main.asyncAfter(deadline: .now() + Date().timeIntervalSince(started)) { [weak self, weak node] in
+                        guard let self, let node else { return }
+                        node.loading = false
+                        if !self.stopped, self.outline.isItemExpanded(node) { self.load(node) }
+                    }
                     return
                 }
+                node.loading = false
                 let old = Dictionary((node.children ?? []).map { ($0.identity, $0) }, uniquingKeysWith: { first, _ in first })
                 node.children = made.map { old[$0.identity] ?? $0 }
                 node.needsReload = false
@@ -685,6 +694,11 @@ final class Sidebar: NSObject, NSOutlineViewDataSource, NSOutlineViewDelegate {
         add("Copy as Path", "link", #selector(copyPath(_:)))
         if !node.isFile { add("Open in Terminal", "terminal", #selector(openTerminal(_:))) }
         add("Show in Finder", "folder", #selector(showInFinder(_:)))
+        // Folders in the tree only: drives, home and cloud roots stay put.
+        if node.kind == .folder {
+            menu.addItem(.separator())
+            add("Move to Trash", "trash", #selector(moveToTrash(_:)))
+        }
         menu.addItem(.separator())
         add("Properties", "info.circle", #selector(properties(_:)))
         return menu
@@ -713,6 +727,29 @@ final class Sidebar: NSObject, NSOutlineViewDataSource, NSOutlineViewDelegate {
     @objc private func openTerminal(_ sender: Any?) { if let url = node(sender)?.url { FileOps.openTerminal(at: url) } }
     @objc private func showInFinder(_ sender: Any?) { if let url = node(sender)?.url { FileOps.showInFinder([url]) } }
     @objc private func properties(_ sender: Any?) { if let url = node(sender)?.url { PropertiesWindow.show([url]) } }
+
+    /// To the Trash, as Delete does in the list (⌘Z brings it back). A window
+    /// showing that folder, or one inside it, goes up to where it was.
+    @objc func moveToTrash(_ sender: Any?) {
+        if let url = node(sender)?.url { trash(url) }
+    }
+
+    /// The folder picked in the tree while the tree has the keyboard: the
+    /// trash button and Delete act on it then, as in Windows' navigation pane.
+    var focusedFolder: URL? {
+        guard outline.window?.firstResponder === outline, outline.selectedRow >= 0,
+              let node = outline.item(atRow: outline.selectedRow) as? SidebarNode, node.kind == .folder else { return nil }
+        return node.url
+    }
+
+    func trash(_ url: URL) {
+        FileOps.trash([url]) { [weak self] removed in
+            guard let self, removed.contains(where: { $0.key == url.key }), let shown = self.current.url?.key else { return }
+            if shown == url.key || shown.hasPrefix(url.key + "/") {
+                self.onNavigate?(.folder(url.deletingLastPathComponent()))
+            }
+        }
+    }
 
     /// Empties ~/.Trash for good, after asking. Reading the Trash needs Full Disk Access.
     @objc private func emptyTrash(_ sender: Any?) {

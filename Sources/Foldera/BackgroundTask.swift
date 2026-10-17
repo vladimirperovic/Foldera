@@ -23,6 +23,11 @@ final class BackgroundTask {
         operation = nil
     }
 
+    /// Ahead of the queue's other work, as for the picture on screen.
+    func hurry() {
+        operation?.queuePriority = .veryHigh
+    }
+
     func run<Value>(_ work: @escaping () -> Value, then deliver: @escaping (Value) -> Void) {
         cancel()
         let generation = self.generation

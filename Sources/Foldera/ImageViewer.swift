@@ -51,15 +51,15 @@ enum ImageFiles {
     static func decodeBitmap(_ url: URL, maxPixels: Int? = nil) -> Loaded? {
         guard let source = CGImageSourceCreateWithURL(url as CFURL, [kCGImageSourceShouldCache: false] as CFDictionary),
               CGImageSourceGetCount(source) > 0 else { return nil }
-        // Animations (GIF, animated WebP) stay NSImages, which NSImageView plays.
-        if CGImageSourceGetCount(source) > 1, let image = NSImage(contentsOf: url),
+        // Animations (GIF, animated WebP) stay NSImages, which NSImageView
+        // plays. A JPEG with more than one picture holds a camera's preview
+        // (MPF) or a stereo pair: the photo is the first, decoded as any other.
+        if CGImageSourceGetCount(source) > 1, !isJPEG(source), let image = NSImage(contentsOf: url),
            let rep = image.representations.first as? NSBitmapImageRep {
             return Loaded(image: image, pixels: NSSize(width: rep.pixelsWide, height: rep.pixelsHigh))
         }
-        let properties = CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [CFString: Any]
-        let width = properties?[kCGImagePropertyPixelWidth] as? Int ?? 0
-        let height = properties?[kCGImagePropertyPixelHeight] as? Int ?? 0
-        let largest = max(width, height, 1)
+        let upright = uprightSize(of: source)
+        let largest = Int(max(upright?.width ?? 1, upright?.height ?? 1))
         let options: [CFString: Any] = [
             kCGImageSourceCreateThumbnailFromImageAlways: true,
             kCGImageSourceCreateThumbnailWithTransform: true,
@@ -68,11 +68,124 @@ enum ImageFiles {
         ]
         guard let cg = CGImageSourceCreateThumbnailAtIndex(source, 0, options as CFDictionary) else { return nil }
         let size = NSSize(width: cg.width, height: cg.height)
+        return Loaded(image: NSImage(cgImage: cg, size: size), pixels: size, full: upright ?? size)
+    }
+
+    private static func isJPEG(_ source: CGImageSource) -> Bool {
+        guard let found = CGImageSourceGetType(source) else { return false }
+        let id = found as String
+        return UTType(id)?.conforms(to: .jpeg) == true || id == "public.mpo-image"
+    }
+
+    /// The picture's pixel size standing up, as the camera's orientation turns it.
+    static func uprightSize(of source: CGImageSource) -> NSSize? {
+        guard let p = CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [CFString: Any],
+              let width = p[kCGImagePropertyPixelWidth] as? Int, let height = p[kCGImagePropertyPixelHeight] as? Int,
+              width > 0, height > 0 else { return nil }
         // Orientations 5–8 stand the picture on its side.
-        let sideways = (properties?[kCGImagePropertyOrientation] as? Int).map { $0 >= 5 } ?? false
-        let full = width > 0 && height > 0
-            ? (sideways ? NSSize(width: height, height: width) : NSSize(width: width, height: height)) : size
-        return Loaded(image: NSImage(cgImage: cg, size: size), pixels: size, full: full)
+        let sideways = (p[kCGImagePropertyOrientation] as? Int).map { $0 >= 5 } ?? false
+        return sideways ? NSSize(width: height, height: width) : NSSize(width: width, height: height)
+    }
+
+    /// The small picture a camera or phone keeps inside the file (EXIF, or a
+    /// RAW file's preview), standing up and at most `maxPixels` across. It is
+    /// read from the first part of the file without decoding the photo, so it
+    /// costs next to nothing even on a slow disk. Nil when there is none, or
+    /// when its shape says it isn't of this photo. Safe off the main thread.
+    static func storedThumbnail(_ url: URL, in source: CGImageSource, maxPixels: Int) -> CGImage? {
+        guard keepsThumbnail(url, source) else { return nil }
+        guard let stored = CGImageSourceCreateThumbnailAtIndex(source, 0, [
+            kCGImageSourceCreateThumbnailWithTransform: true,
+            kCGImageSourceShouldCacheImmediately: true,
+            kCGImageSourceThumbnailMaxPixelSize: maxPixels,
+        ] as CFDictionary) else { return nil }
+        guard let upright = uprightSize(of: source) else { return stored }
+        return trimmed(stored, toShapeOf: upright)
+    }
+
+    /// The same, as a picture to show, and nil when the file is not one ImageIO reads.
+    static func storedThumbnail(_ url: URL, maxPixels: Int) -> NSImage? {
+        guard let source = CGImageSourceCreateWithURL(url as CFURL, [kCGImageSourceShouldCache: false] as CFDictionary),
+              CGImageSourceGetCount(source) > 0,
+              let stored = storedThumbnail(url, in: source, maxPixels: maxPixels) else { return nil }
+        return NSImage(cgImage: stored, size: NSSize(width: stored.width, height: stored.height))
+    }
+
+    /// Whether the file carries a picture of its own. Asked for one a JPEG
+    /// doesn't have, ImageIO decodes the whole photo to make it, so a JPEG's
+    /// EXIF is looked at first; HEIC and RAW files always have theirs.
+    private static func keepsThumbnail(_ url: URL, _ source: CGImageSource) -> Bool {
+        guard let found = CGImageSourceGetType(source) else { return false }
+        let id = found as String
+        guard let type = UTType(id) else { return false }
+        if type.conforms(to: .jpeg) || id == "public.mpo-image" { return jpegKeepsThumbnail(url) }
+        return [UTType.heic, .heif, .rawImage].contains { type.conforms(to: $0) }
+    }
+
+    /// Whether a JPEG's EXIF holds a thumbnail, read from the start of the file.
+    static func jpegKeepsThumbnail(_ url: URL) -> Bool {
+        guard let handle = try? FileHandle(forReadingFrom: url) else { return false }
+        defer { try? handle.close() }
+        // EXIF comes before the picture, in a segment of 64 KB at most.
+        guard let head = try? handle.read(upToCount: 128 * 1024) else { return false }
+        return jpegKeepsThumbnail(head)
+    }
+
+    static func jpegKeepsThumbnail(_ data: Data) -> Bool {
+        let bytes = [UInt8](data)
+        guard bytes.count > 4, bytes[0] == 0xFF, bytes[1] == 0xD8 else { return false }
+        var at = 2
+        while at + 4 <= bytes.count, bytes[at] == 0xFF {
+            let marker = bytes[at + 1]
+            // Fill bytes, and markers without a length.
+            if marker == 0xFF { at += 1; continue }
+            if marker == 0x01 || (0xD0...0xD7).contains(marker) { at += 2; continue }
+            // The picture itself starts: no EXIF before it.
+            if marker == 0xDA || marker == 0xD9 { return false }
+            let length = Int(bytes[at + 2]) << 8 | Int(bytes[at + 3])
+            guard length >= 2 else { return false }
+            let start = at + 4, end = min(at + 2 + length, bytes.count)
+            if marker == 0xE1, end - start > 14, Array(bytes[start..<start + 6]) == [0x45, 0x78, 0x69, 0x66, 0, 0] {
+                return exifKeepsThumbnail(Array(bytes[(start + 6)..<end]))
+            }
+            at += 2 + length
+        }
+        return false
+    }
+
+    /// EXIF is laid out as TIFF: the thumbnail is the second directory
+    /// (IFD1), with a pointer to its JPEG data (tag 0x201).
+    private static func exifKeepsThumbnail(_ tiff: [UInt8]) -> Bool {
+        guard tiff.count >= 8 else { return false }
+        let little = tiff[0] == 0x49 && tiff[1] == 0x49
+        guard little || (tiff[0] == 0x4D && tiff[1] == 0x4D) else { return false }
+        func number(_ at: Int, _ size: Int) -> Int? {
+            guard at >= 0, at + size <= tiff.count else { return nil }
+            let digits = tiff[at..<at + size].map(Int.init)
+            let ordered = little ? Array(digits.reversed()) : digits
+            return ordered.reduce(0) { $0 << 8 | $1 }
+        }
+        guard let first = number(4, 4), let entries = number(first, 2),
+              let second = number(first + 2 + entries * 12, 4), second > 0,
+              let count = number(second, 2) else { return false }
+        return (0..<count).contains { number(second + 2 + $0 * 12, 2) == 0x201 }
+    }
+
+    /// A thumbnail of another shape than its photo, as when a camera pads a
+    /// 3:2 photo's 4:3 thumbnail with black bars, cut to the photo's shape.
+    /// Nil when the shapes are too far apart to be the same picture.
+    static func trimmed(_ image: CGImage, toShapeOf size: NSSize) -> CGImage? {
+        let width = CGFloat(image.width), height = CGFloat(image.height)
+        guard width > 0, height > 0, size.width > 0, size.height > 0 else { return nil }
+        let wanted = size.width / size.height
+        let ratio = width / height / wanted
+        if abs(ratio - 1) < 0.02 { return image }
+        // 4:3 for 3:2 or 16:9 is padding; a tall thumbnail for a wide photo is another picture.
+        guard ratio > 0.7, ratio < 1.43 else { return nil }
+        let crop = ratio > 1
+            ? CGRect(x: ((width - height * wanted) / 2).rounded(), y: 0, width: (height * wanted).rounded(), height: height)
+            : CGRect(x: 0, y: ((height - width / wanted) / 2).rounded(), width: width, height: (width / wanted).rounded())
+        return image.cropping(to: crop)
     }
 
     /// Vector formats and anything ImageIO passed on. Main thread.
@@ -157,6 +270,19 @@ final class CenteringClipView: NSClipView {
     func scrollConstrained(to point: NSPoint) {
         scroll(to: constrainBoundsRect(NSRect(origin: point, size: bounds.size)).origin)
     }
+
+    // A click on the dark around a picture counts as one on the picture.
+    private var viewer: ImageViewer? { (enclosingScrollView as? ViewerScrollView)?.viewer }
+
+    override func mouseDown(with event: NSEvent) {
+        guard let viewer else { return super.mouseDown(with: event) }
+        if event.clickCount == 2 { viewer.doubleClicked() }
+    }
+
+    override func mouseUp(with event: NSEvent) {
+        guard let viewer else { return super.mouseUp(with: event) }
+        if event.clickCount == 1 { viewer.clicked() }
+    }
 }
 
 /// While the whole picture fits, the wheel turns pages, as in FastStone;
@@ -194,8 +320,8 @@ final class ViewerScrollView: NSScrollView {
     }
 }
 
-/// The picture. A click switches between fitting the window and actual
-/// size at that spot; dragging pans; a double-click goes full screen.
+/// The picture. A click shows or hides the thumbnails (or, zoomed in, fits
+/// the picture again); dragging pans; a double-click goes full screen.
 final class ViewerCanvas: NSImageView {
     weak var viewer: ImageViewer?
     private var start: NSPoint?
@@ -214,7 +340,7 @@ final class ViewerCanvas: NSImageView {
 
     override func mouseDown(with event: NSEvent) {
         if event.clickCount == 2 {
-            viewer?.toggleFullScreen(nil)
+            viewer?.doubleClicked()
             start = nil
             return
         }
@@ -238,7 +364,7 @@ final class ViewerCanvas: NSImageView {
 
     override func mouseUp(with event: NSEvent) {
         if start != nil && !dragged && event.clickCount == 1 {
-            viewer?.toggleZoom(at: convert(event.locationInWindow, from: nil))
+            viewer?.clicked()
         }
         if dragged { NSCursor.arrow.set() }
         start = nil
@@ -270,10 +396,19 @@ final class ImageViewer: NSWindowController, NSWindowDelegate, NSMenuItemValidat
     private var shown: ImageFiles.Loaded?
     private var turns = 0
     private(set) var fitMode = true
+    var magnification: CGFloat { scroll.magnification }
+    /// Where the picture can go, above the thumbnails when they show.
+    var pictureArea: NSSize { scroll.frame.size }
     private var cache: [String: ImageFiles.Loaded] = [:]
-    private static let decodes = BackgroundTask.queue("Foldera.image-decoding")
+    /// The picture on screen and the ones read ahead, side by side.
+    private static let decodes = BackgroundTask.queue("Foldera.image-decoding", limit: 3)
     private var inFlight: [String: BackgroundTask] = [:]
     private let sharpen = BackgroundTask(queue: ImageViewer.decodes)
+    /// The rough picture shown while the right one decodes.
+    private static let previews = BackgroundTask.queue("Foldera.image-previews")
+    private let rough = BackgroundTask(queue: ImageViewer.previews)
+    /// Which way the pages are turning (1 or −1), to read ahead that way.
+    private var heading = 1
     /// True while the full-resolution picture is being decoded for zooming in.
     private var sharpening = false
     private var slideshow: Timer?
@@ -289,6 +424,14 @@ final class ImageViewer: NSWindowController, NSWindowDelegate, NSMenuItemValidat
     private let infoPanel = NSVisualEffectView()
     private let infoText = NSTextField(wrappingLabelWithString: "")
     private let playButton = ToolButton(symbol: "play.fill", tip: "Slideshow (S)", iconSize: 13)
+    private let fullScreenButton = ToolButton(symbol: "arrow.up.left.and.arrow.down.right", label: "Full screen",
+                                              tip: "Full screen (F)", iconSize: 13)
+    private let thumbnailsButton = ToolButton(symbol: "film", tip: "Thumbnails (T)", iconSize: 13)
+    let filmstrip = Filmstrip()
+    private var scrollBottom: NSLayoutConstraint?
+    private var barBottom: NSLayoutConstraint?
+    /// A single click, waiting to see whether it becomes a double one.
+    private var pendingClick: DispatchWorkItem?
 
     /// Opens the viewer on `urls[index]`, reusing the window if it is open.
     static func show(_ urls: [URL], at index: Int) {
@@ -296,6 +439,7 @@ final class ImageViewer: NSWindowController, NSWindowDelegate, NSMenuItemValidat
         let viewer = shared ?? ImageViewer()
         shared = viewer
         viewer.urls = urls
+        viewer.filmstrip.urls = urls
         viewer.cancelLoads()
         viewer.cache = [:]
         viewer.go(to: min(max(index, 0), urls.count - 1))
@@ -380,6 +524,10 @@ final class ImageViewer: NSWindowController, NSWindowDelegate, NSMenuItemValidat
         }
         playButton.target = self
         playButton.action = #selector(toggleSlideshow(_:))
+        fullScreenButton.target = self
+        fullScreenButton.action = #selector(toggleFullScreen(_:))
+        thumbnailsButton.target = self
+        thumbnailsButton.action = #selector(toggleThumbnails(_:))
         let views: [NSView] = [
             button("chevron.left", "Previous (←)", #selector(previous(_:))),
             button("chevron.right", "Next (→)", #selector(next(_:))),
@@ -391,8 +539,9 @@ final class ImageViewer: NSWindowController, NSWindowDelegate, NSMenuItemValidat
             button("rotate.left", "Rotate left (L)", #selector(rotateLeft(_:))),
             button("rotate.right", "Rotate right (R)", #selector(rotateRight(_:))),
             button("info.circle", "Information (I)", #selector(toggleInfo(_:))),
+            thumbnailsButton,
             playButton,
-            button("arrow.up.left.and.arrow.down.right", "Full screen (F)", #selector(toggleFullScreen(_:))),
+            fullScreenButton,
             button("arrow.up.forward.app", "Open in the default app (E)", #selector(openExternally(_:))),
             button("trash", "Move to Trash (Delete)", #selector(delete(_:))),
         ]
@@ -424,19 +573,34 @@ final class ImageViewer: NSWindowController, NSWindowDelegate, NSMenuItemValidat
             infoText.widthAnchor.constraint(equalToConstant: 260),
         ])
 
-        pin(scroll, in: content)
-        for v in [spinner, message, bar, infoPanel] as [NSView] {
+        scroll.translatesAutoresizingMaskIntoConstraints = false
+        content.addSubview(scroll)
+        let scrollBottom = scroll.bottomAnchor.constraint(equalTo: content.bottomAnchor)
+        let barBottom = bar.bottomAnchor.constraint(equalTo: content.bottomAnchor, constant: -18)
+        self.scrollBottom = scrollBottom
+        self.barBottom = barBottom
+        filmstrip.isHidden = true
+        filmstrip.onPick = { [weak self] index in self?.go(to: index) }
+        for v in [spinner, message, filmstrip, bar, infoPanel] as [NSView] {
             v.translatesAutoresizingMaskIntoConstraints = false
             content.addSubview(v)
         }
         NSLayoutConstraint.activate([
+            scroll.leadingAnchor.constraint(equalTo: content.leadingAnchor),
+            scroll.trailingAnchor.constraint(equalTo: content.trailingAnchor),
+            scroll.topAnchor.constraint(equalTo: content.topAnchor),
+            scrollBottom,
+            filmstrip.leadingAnchor.constraint(equalTo: content.leadingAnchor),
+            filmstrip.trailingAnchor.constraint(equalTo: content.trailingAnchor),
+            filmstrip.bottomAnchor.constraint(equalTo: content.bottomAnchor),
+            filmstrip.heightAnchor.constraint(equalToConstant: Filmstrip.height),
             spinner.centerXAnchor.constraint(equalTo: content.centerXAnchor),
             spinner.centerYAnchor.constraint(equalTo: content.centerYAnchor),
             message.centerXAnchor.constraint(equalTo: content.centerXAnchor),
             message.centerYAnchor.constraint(equalTo: content.centerYAnchor),
             message.widthAnchor.constraint(lessThanOrEqualTo: content.widthAnchor, constant: -40),
             bar.centerXAnchor.constraint(equalTo: content.centerXAnchor),
-            bar.bottomAnchor.constraint(equalTo: content.bottomAnchor, constant: -18),
+            barBottom,
             bar.widthAnchor.constraint(lessThanOrEqualTo: content.widthAnchor, constant: -24),
             infoPanel.trailingAnchor.constraint(equalTo: content.trailingAnchor, constant: -16),
             infoPanel.topAnchor.constraint(equalTo: content.topAnchor, constant: 44),
@@ -475,10 +639,13 @@ final class ImageViewer: NSWindowController, NSWindowDelegate, NSMenuItemValidat
             canvas.image = nil
             spinner.startAnimation(nil)
             load(url)
+            inFlight[url.key]?.hurry()
+            showRough(url)
         }
         prefetch()
         updateLabels()
         showChrome()
+        filmstrip.current = index
     }
 
     func step(_ delta: Int) {
@@ -488,7 +655,31 @@ final class ImageViewer: NSWindowController, NSWindowDelegate, NSMenuItemValidat
             NSSound.beep()
             return
         }
+        heading = delta < 0 ? -1 : 1
         go(to: target)
+    }
+
+    /// Something to look at at once while the photo decodes, as FastStone
+    /// does: the thumbnail the folder's grid made, else the small picture the
+    /// file keeps. It is stretched to fit, and gives way to the photo.
+    private func showRough(_ url: URL) {
+        rough.cancel()
+        if let image = Thumbnails.shared.anyPicture(of: url) { return showRough(image) }
+        rough.run({ ImageFiles.storedThumbnail(url, maxPixels: 1024) }) { [weak self] image in
+            guard let self, let image, self.original == nil, url.key == self.current?.key else { return }
+            self.showRough(image)
+        }
+    }
+
+    private func showRough(_ image: NSImage) {
+        let size = image.size
+        guard size.width > 0, size.height > 0 else { return }
+        spinner.stopAnimation(nil)
+        canvas.image = image
+        // Window-sized, so fitting it stays within the zoom's limits.
+        let across = 1000 / max(size.width, size.height)
+        canvas.frame = NSRect(x: 0, y: 0, width: size.width * across, height: size.height * across)
+        applyFit()
     }
 
     private func load(_ url: URL) {
@@ -508,15 +699,21 @@ final class ImageViewer: NSWindowController, NSWindowDelegate, NSMenuItemValidat
         }
     }
 
-    /// Decodes the neighbours ahead of time, so the next picture is instant;
-    /// forgets the ones further away.
+    /// The pictures decoded ahead of time, so turning the page is instant:
+    /// two the way the pages are turning, and the one behind.
+    static func readAhead(from index: Int, heading: Int, count: Int) -> [Int] {
+        [index + heading, index + 2 * heading, index - heading].filter { $0 >= 0 && $0 < count }
+    }
+
+    /// Decodes the neighbours ahead of time; forgets the ones further away.
     private func prefetch() {
-        let keep = Set([index - 1, index, index + 1].filter { $0 >= 0 && $0 < urls.count }.map { urls[$0].key })
+        let ahead = Self.readAhead(from: index, heading: heading, count: urls.count)
+        let keep = Set(([index] + ahead).map { urls[$0].key })
         cache = cache.filter { keep.contains($0.key) }
         for key in Array(inFlight.keys) where !keep.contains(key) {
             inFlight.removeValue(forKey: key)?.cancel()
         }
-        for i in [index + 1, index - 1] where i >= 0 && i < urls.count && cache[urls[i].key] == nil {
+        for i in ahead where cache[urls[i].key] == nil {
             load(urls[i])
         }
     }
@@ -526,9 +723,11 @@ final class ImageViewer: NSWindowController, NSWindowDelegate, NSMenuItemValidat
         inFlight.removeAll()
         sharpen.cancel()
         sharpening = false
+        rough.cancel()
     }
 
     private func failed(_ url: URL) {
+        rough.cancel()
         spinner.stopAnimation(nil)
         canvas.image = nil
         message.stringValue = "Foldera can't display “\(url.lastPathComponent)”.\nPress E to open it in its own app."
@@ -536,6 +735,7 @@ final class ImageViewer: NSWindowController, NSWindowDelegate, NSMenuItemValidat
     }
 
     private func display(_ loaded: ImageFiles.Loaded) {
+        rough.cancel()
         spinner.stopAnimation(nil)
         message.stringValue = ""
         original = loaded
@@ -582,28 +782,55 @@ final class ImageViewer: NSWindowController, NSWindowDelegate, NSMenuItemValidat
 
     // MARK: Zoom
 
-    /// Big pictures shrink to fit; small ones stay at actual size, as in FastStone.
+    /// The picture as large as the window lets it be, small ones too.
     private func applyFit() {
         let size = canvas.frame.size
         let visible = scroll.contentSize
         guard size.width > 0, size.height > 0, visible.width > 0 else { return }
-        let scale = min(visible.width / size.width, visible.height / size.height, 1)
+        let scale = min(visible.width / size.width, visible.height / size.height)
         scroll.magnification = scale
         (scroll.contentView as? CenteringClipView)?.scrollConstrained(to: .zero)
         scroll.reflectScrolledClipView(scroll.contentView)
         updateLabels()
     }
 
-    func toggleZoom(at point: NSPoint) {
-        if fitMode && scroll.magnification < 0.999 {
-            fitMode = false
-            scroll.setMagnification(1, centeredAt: point)
-            sharpenIfNeeded()
-        } else {
-            fitMode = true
-            applyFit()
+    /// While the picture fits, a click shows or hides the thumbnails; zoomed
+    /// in, it fits the picture again. It waits a double click's time, since
+    /// a double click goes full screen instead.
+    func clicked() {
+        // A click still waiting when another comes was a click of its own
+        // (a double click comes to doubleClicked instead), late only because
+        // the Mac was busy: it is done now, not dropped.
+        if let earlier = pendingClick {
+            earlier.perform()
+            earlier.cancel()
         }
-        updateLabels()
+        let work = DispatchWorkItem { [weak self] in
+            guard let self else { return }
+            self.pendingClick = nil
+            if self.fitMode { self.toggleThumbnails(nil) } else { self.fit(nil) }
+        }
+        pendingClick = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + NSEvent.doubleClickInterval, execute: work)
+    }
+
+    func doubleClicked() {
+        pendingClick?.cancel()
+        pendingClick = nil
+        toggleFullScreen(nil)
+    }
+
+    /// The folder's pictures along the bottom; the picture makes room for them.
+    @objc func toggleThumbnails(_ sender: Any?) {
+        let show = filmstrip.isHidden
+        filmstrip.isHidden = !show
+        thumbnailsButton.isOn = show
+        scrollBottom?.constant = show ? -Filmstrip.height : 0
+        barBottom?.constant = show ? -Filmstrip.height - 10 : -18
+        window?.contentView?.layoutSubtreeIfNeeded()
+        if show { filmstrip.current = index }
+        if fitMode { applyFit() }
+        showChrome()
     }
 
     func zoom(by factor: CGFloat, at event: NSEvent? = nil) {
@@ -750,6 +977,7 @@ final class ImageViewer: NSWindowController, NSWindowDelegate, NSMenuItemValidat
         FileOps.trash([url]) { [weak self] removed in
             guard let self, !removed.isEmpty else { return }
             self.urls.removeAll { $0.key == url.key }
+            self.filmstrip.urls = self.urls
             self.cache[url.key] = nil
             if self.urls.isEmpty {
                 self.close()
@@ -784,6 +1012,7 @@ final class ImageViewer: NSWindowController, NSWindowDelegate, NSMenuItemValidat
         case "r": rotateRight(nil)
         case "l": rotateLeft(nil)
         case "i": toggleInfo(nil)
+        case "t": toggleThumbnails(nil)
         case "s": toggleSlideshow(nil)
         case "e": openExternally(nil)
         case "+", "=": zoomIn(nil)
@@ -803,11 +1032,15 @@ final class ImageViewer: NSWindowController, NSWindowDelegate, NSMenuItemValidat
 
     func windowDidEnterFullScreen(_ notification: Notification) {
         UserDefaults.standard.set(true, forKey: "viewerFullScreen")
+        fullScreenButton.label = "Exit full screen"
+        fullScreenButton.setSymbol("arrow.down.right.and.arrow.up.left", iconSize: 13)
         fit(nil)
     }
 
     func windowDidExitFullScreen(_ notification: Notification) {
         UserDefaults.standard.set(false, forKey: "viewerFullScreen")
+        fullScreenButton.label = "Full screen"
+        fullScreenButton.setSymbol("arrow.up.left.and.arrow.down.right", iconSize: 13)
         fit(nil)
     }
 
@@ -822,10 +1055,178 @@ final class ImageViewer: NSWindowController, NSWindowDelegate, NSMenuItemValidat
         slideshow = nil
         playButton.isOn = false
         hideWork?.cancel()
+        pendingClick?.cancel()
+        filmstrip.urls = []
         cache = [:]
         canvas.image = nil
         original = nil
         shown = nil
         Self.shared = nil
+    }
+}
+
+/// The folder's pictures in a row along the bottom of the viewer; a click
+/// on one shows it. Thumbnails are made only for the ones in sight.
+final class Filmstrip: NSVisualEffectView, NSCollectionViewDataSource, NSCollectionViewDelegate {
+    static let height: CGFloat = 104
+    static let side: CGFloat = 84
+
+    var urls: [URL] = [] { didSet { grid.reloadData() } }
+    /// The picture shown above, framed and kept in sight.
+    var current = 0 {
+        didSet {
+            guard !isHidden, current < urls.count else { return }
+            for tile in grid.visibleItems() { (tile as? FilmstripItem)?.refreshMark(current: current) }
+            grid.layoutSubtreeIfNeeded()
+            grid.scrollToItems(at: [IndexPath(item: current, section: 0)], scrollPosition: .centeredHorizontally)
+        }
+    }
+    var onPick: ((Int) -> Void)?
+
+    private let scroll = SidewaysScrollView()
+    private let grid = KeylessCollectionView()
+
+    override init(frame: NSRect) {
+        super.init(frame: frame)
+        material = .hudWindow
+        blendingMode = .withinWindow
+        state = .active
+        let layout = NSCollectionViewFlowLayout()
+        layout.scrollDirection = .horizontal
+        layout.itemSize = NSSize(width: Self.side, height: Self.side)
+        layout.minimumLineSpacing = 6
+        layout.sectionInset = NSEdgeInsets(top: 10, left: 10, bottom: 10, right: 10)
+        grid.collectionViewLayout = layout
+        grid.backgroundColors = [.clear]
+        grid.isSelectable = false
+        grid.dataSource = self
+        grid.delegate = self
+        grid.register(FilmstripItem.self, forItemWithIdentifier: Self.item)
+        scroll.documentView = grid
+        scroll.drawsBackground = false
+        scroll.hasHorizontalScroller = true
+        scroll.hasVerticalScroller = false
+        scroll.autohidesScrollers = true
+        scroll.scrollerStyle = .overlay
+        scroll.translatesAutoresizingMaskIntoConstraints = false
+        addSubview(scroll)
+        NSLayoutConstraint.activate([
+            scroll.leadingAnchor.constraint(equalTo: leadingAnchor),
+            scroll.trailingAnchor.constraint(equalTo: trailingAnchor),
+            scroll.topAnchor.constraint(equalTo: topAnchor),
+            scroll.bottomAnchor.constraint(equalTo: bottomAnchor),
+        ])
+    }
+
+    required init?(coder: NSCoder) { fatalError("not used") }
+
+    private static let item = NSUserInterfaceItemIdentifier("FilmstripItem")
+
+    func collectionView(_ collectionView: NSCollectionView, numberOfItemsInSection section: Int) -> Int { urls.count }
+
+    func collectionView(_ collectionView: NSCollectionView, itemForRepresentedObjectAt indexPath: IndexPath) -> NSCollectionViewItem {
+        let tile = collectionView.makeItem(withIdentifier: Self.item, for: indexPath)
+        if let tile = tile as? FilmstripItem, indexPath.item < urls.count {
+            tile.configure(urls[indexPath.item], index: indexPath.item, current: current)
+            tile.onClick = { [weak self] index in self?.onPick?(index) }
+        }
+        return tile
+    }
+
+    func collectionView(_ collectionView: NSCollectionView, didEndDisplaying item: NSCollectionViewItem,
+                        forRepresentedObjectAt indexPath: IndexPath) {
+        guard collectionView.indexPath(for: item) == nil else { return }
+        (item as? FilmstripItem)?.stopThumbnail()
+    }
+}
+
+/// Keys stay with the viewer, which turns the pages.
+final class KeylessCollectionView: NSCollectionView {
+    override var acceptsFirstResponder: Bool { false }
+}
+
+/// A row that scrolls sideways under a mouse wheel too.
+final class SidewaysScrollView: NSScrollView {
+    override func scrollWheel(with event: NSEvent) {
+        guard abs(event.scrollingDeltaY) > abs(event.scrollingDeltaX), let document = documentView else {
+            return super.scrollWheel(with: event)
+        }
+        let step = event.hasPreciseScrollingDeltas ? event.scrollingDeltaY : event.scrollingDeltaY * 12
+        var origin = contentView.bounds.origin
+        origin.x = min(max(origin.x - step, 0), max(document.frame.width - contentView.bounds.width, 0))
+        contentView.scroll(to: origin)
+        reflectScrolledClipView(contentView)
+    }
+}
+
+/// One thumbnail in the strip; the picture shown above is framed.
+final class FilmstripItem: NSCollectionViewItem {
+    private let picture = NSImageView()
+    private var url: URL?
+    private var index = 0
+    private var thumbnail: Thumbnails.Ticket?
+    var onClick: ((Int) -> Void)?
+
+    override func loadView() {
+        let tile = ClickView()
+        tile.wantsLayer = true
+        tile.layer?.cornerRadius = 4
+        tile.onClick = { [weak self] in
+            guard let self else { return }
+            self.onClick?(self.index)
+        }
+        picture.imageScaling = .scaleProportionallyUpOrDown
+        picture.translatesAutoresizingMaskIntoConstraints = false
+        tile.addSubview(picture)
+        NSLayoutConstraint.activate([
+            picture.leadingAnchor.constraint(equalTo: tile.leadingAnchor, constant: 3),
+            picture.trailingAnchor.constraint(equalTo: tile.trailingAnchor, constant: -3),
+            picture.topAnchor.constraint(equalTo: tile.topAnchor, constant: 3),
+            picture.bottomAnchor.constraint(equalTo: tile.bottomAnchor, constant: -3),
+        ])
+        view = tile
+    }
+
+    func configure(_ url: URL, index: Int, current: Int) {
+        // Drawn again for the same picture: the thumbnail on its way stays on its way.
+        let coming = self.url?.key == url.key && thumbnail != nil
+        if !coming { stopThumbnail() }
+        self.url = url
+        self.index = index
+        view.toolTip = url.lastPathComponent
+        refreshMark(current: current)
+        guard !coming else { return }
+        // By its name, not the file: a slow disk is asked only for the thumbnail.
+        picture.image = NSWorkspace.shared.icon(for: UTType(filenameExtension: url.pathExtension) ?? .image)
+        let scale = view.window?.backingScaleFactor ?? 2
+        thumbnail = Thumbnails.shared.image(for: url, side: Filmstrip.side, scale: scale, version: nil, early: { [weak self] image in
+            guard let self, self.url?.key == url.key else { return }
+            self.picture.image = image
+        }) { [weak self] image in
+            guard let self, self.url?.key == url.key else { return }
+            self.thumbnail = nil
+            self.picture.image = image
+        }
+    }
+
+    func refreshMark(current: Int) {
+        let shown = index == current
+        view.layer?.borderWidth = shown ? 3 : 0
+        view.layer?.borderColor = NSColor.controlAccentColor.cgColor
+        picture.alphaValue = shown ? 1 : 0.75
+    }
+
+    func stopThumbnail() {
+        if let thumbnail { Thumbnails.shared.cancel(thumbnail) }
+        thumbnail = nil
+    }
+}
+
+/// Answers a click, for a tile that isn't a button.
+final class ClickView: NSView {
+    var onClick: (() -> Void)?
+    override func mouseDown(with event: NSEvent) {}
+    override func mouseUp(with event: NSEvent) {
+        if bounds.contains(convert(event.locationInWindow, from: nil)) { onClick?() }
     }
 }

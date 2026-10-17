@@ -1,5 +1,7 @@
 import AppKit
+import ImageIO
 import QuickLookThumbnailing
+import UniformTypeIdentifiers
 
 /// Draws a template image in `color`, resolved when it is drawn, so light and
 /// dark mode both come out right.
@@ -394,55 +396,215 @@ final class SelectionBackground: NSView {
     }
 }
 
+/// The selection over a picture that fills its tile, where the one behind can't show.
+final class SelectionFrame: NSView {
+    override func draw(_ dirtyRect: NSRect) {
+        NSColor.selectedContentBackgroundColor.withAlphaComponent(0.25).setFill()
+        bounds.fill()
+        NSColor.selectedContentBackgroundColor.setStroke()
+        let edge = NSBezierPath(rect: bounds.insetBy(dx: 2, dy: 2))
+        edge.lineWidth = 4
+        edge.stroke()
+    }
+}
+
+/// Where things go in the large icons view. The gaps shrink as the pictures
+/// grow, and at the largest size there are none: the pictures fill their
+/// tiles edge to edge, without names (they are in the tooltips), as a
+/// contact sheet. The tiles always widen to fill their row, so what a row
+/// leaves over isn't spread between them as gaps.
+struct IconGeometry: Equatable {
+    static let largest: CGFloat = 256
+
+    /// The picture's side, and the tile it is in.
+    var side: CGFloat = 64
+    var tile = NSSize(width: 108, height: 120)
+    /// Between the tiles, across and down.
+    var gap: CGFloat = 4
+    /// Around them all; the sides also take what is left of a pixel-aligned row.
+    var margin: CGFloat = 10
+    var left: CGFloat = 10
+    var right: CGFloat = 10
+    /// Above the picture in its tile.
+    var top: CGFloat = 8
+    /// False at the largest size: pictures only, filling their tiles.
+    var names = true
+
+    var insets: NSEdgeInsets { NSEdgeInsets(top: margin, left: left, bottom: margin, right: right) }
+
+    /// The size to make thumbnails at: a picture cut square needs its short
+    /// side as long as the tile. In steps, so resizing the window doesn't
+    /// have every picture made again.
+    var thumbnailSide: CGFloat {
+        ((names ? side : side * 1.8) / 32).rounded(.up) * 32
+    }
+
+    init() {}
+
+    /// `wanted` is the slider's size; `width` the room across the view.
+    init(side wanted: CGFloat, width: CGFloat, scale: CGFloat) {
+        names = wanted < Self.largest
+        // 0 at the usual size, 1 at the largest.
+        let t = min(max((wanted - 64) / (Self.largest - 64), 0), 1)
+        let names = self.names
+        func shrink(_ value: CGFloat) -> CGFloat { names ? (value * (1 - t)).rounded() : 0 }
+        gap = shrink(4)
+        margin = shrink(10)
+        top = shrink(8)
+        // Room beside a picture for its name, and the narrowest a named tile goes.
+        let natural = names ? max(wanted + shrink(44), 108) : wanted
+        let room = width - 2 * margin
+        var across = natural
+        left = margin
+        right = margin
+        if room >= natural {
+            let columns = ((room + gap) / (natural + gap)).rounded(.down)
+            across = ((room - gap * (columns - 1)) / columns * scale).rounded(.down) / scale
+            let spare = room - across * columns - gap * (columns - 1)
+            left += (spare / 2 * scale).rounded(.down) / scale
+            right += spare - (left - margin)
+        } else if room > 0 {
+            // A narrow pane: one tile, as wide as there is room.
+            across = max((room * scale).rounded(.down) / scale, 40)
+        }
+        side = max(across - (natural - wanted), 16)
+        tile = NSSize(width: across, height: names ? top + side + 4 + 30 + 2 + shrink(12) : across)
+    }
+}
+
+/// The large icons view's layout: a flow layout set out by IconGeometry for
+/// the width it has. The flow asks the view's delegate for the sizes, which
+/// hands back this geometry (`geometry(of:)`).
+final class IconLayout: NSCollectionViewFlowLayout {
+    /// The picture size from the slider.
+    var side: CGFloat = 64 { didSet { if side != oldValue { invalidateLayout() } } }
+    private(set) var geometry = IconGeometry()
+    /// Called during layout when the geometry changes, for the tiles on screen.
+    var onChange: ((IconGeometry) -> Void)?
+    private var laidOutWidth: CGFloat = -1
+
+    override func prepare() {
+        let view = collectionView
+        // The width the flow lays the rows out in, so the tiles fill exactly that.
+        let width = view?.bounds.width ?? 0
+        laidOutWidth = width
+        let fresh = IconGeometry(side: side, width: width, scale: view?.window?.backingScaleFactor ?? 2)
+        let changed = fresh != geometry
+        geometry = fresh
+        super.prepare()
+        if changed { onChange?(fresh) }
+    }
+
+    /// For the view's delegate (NSCollectionViewDelegateFlowLayout).
+    static func geometry(of layout: NSCollectionViewLayout) -> IconGeometry {
+        (layout as? IconLayout)?.geometry ?? IconGeometry()
+    }
+
+    override func shouldInvalidateLayout(forBoundsChange newBounds: NSRect) -> Bool {
+        newBounds.width != laidOutWidth || super.shouldInvalidateLayout(forBoundsChange: newBounds)
+    }
+
+    /// Another width means other tiles. Left to itself, the flow only spreads
+    /// the sizes it already has across the new width: tiles made while the
+    /// view was narrow (still hidden, say) stayed 40 points wide in rows of 819.
+    override func invalidationContext(forBoundsChange newBounds: NSRect) -> NSCollectionViewLayoutInvalidationContext {
+        let context = super.invalidationContext(forBoundsChange: newBounds)
+        if newBounds.width != laidOutWidth, let flow = context as? NSCollectionViewFlowLayoutInvalidationContext {
+            flow.invalidateFlowLayoutDelegateMetrics = true
+            flow.invalidateFlowLayoutAttributes = true
+        }
+        return context
+    }
+}
+
 /// One tile in the large icons view: a picture of the file and its name.
 final class IconItem: NSCollectionViewItem {
     private let background = SelectionBackground()
     private let picture = NSImageView()
     private let label = NSTextField(wrappingLabelWithString: "")
+    private let selectionFrame = SelectionFrame()
     private var key: String?
+    /// The file's own picture, before it is cut square for a contact sheet.
+    private var shown: NSImage?
     /// The thumbnail being made for this tile, given up if the tile moves on first.
     private var thumbnail: Thumbnails.Ticket?
+    private lazy var pictureTop = picture.topAnchor.constraint(equalTo: background.topAnchor, constant: 8)
     private lazy var pictureWidth = picture.widthAnchor.constraint(equalToConstant: 64)
     private lazy var pictureHeight = picture.heightAnchor.constraint(equalToConstant: 64)
 
-    /// The picture size, from the slider under the list.
-    var side: CGFloat = 64 {
+    /// Where the picture and the name go, from the view's layout.
+    var geometry = IconGeometry() {
         didSet {
-            guard side != oldValue else { return }
-            pictureWidth.constant = side
-            pictureHeight.constant = side
-            label.preferredMaxLayoutWidth = ExplorerTab.tileSize(side).width - 8
+            guard geometry != oldValue else { return }
+            pictureTop.constant = geometry.top
+            pictureWidth.constant = geometry.side
+            pictureHeight.constant = geometry.side
+            label.preferredMaxLayoutWidth = geometry.tile.width - 8
+            label.isHidden = !geometry.names
+            // A wide picture sits on its name, as in Finder.
+            picture.imageAlignment = geometry.names ? .alignBottom : .alignCenter
+            if geometry.names != oldValue.names { show(shown) }
+            updateSelection()
         }
     }
 
     override func loadView() {
         view = background
         picture.imageScaling = .scaleProportionallyUpOrDown
+        picture.imageAlignment = .alignBottom
         label.alignment = .center
         label.font = .systemFont(ofSize: 12)
         label.maximumNumberOfLines = 2
         label.lineBreakMode = .byWordWrapping
         label.cell?.truncatesLastVisibleLine = true
         label.preferredMaxLayoutWidth = 100
-        for v in [picture, label] as [NSView] {
+        selectionFrame.isHidden = true
+        for v in [picture, label, selectionFrame] as [NSView] {
             v.translatesAutoresizingMaskIntoConstraints = false
             background.addSubview(v)
         }
         NSLayoutConstraint.activate([
-            picture.topAnchor.constraint(equalTo: background.topAnchor, constant: 8),
+            pictureTop,
             picture.centerXAnchor.constraint(equalTo: background.centerXAnchor),
             pictureWidth,
             pictureHeight,
             label.topAnchor.constraint(equalTo: picture.bottomAnchor, constant: 4),
             label.leadingAnchor.constraint(equalTo: background.leadingAnchor, constant: 4),
             label.trailingAnchor.constraint(equalTo: background.trailingAnchor, constant: -4),
+            selectionFrame.topAnchor.constraint(equalTo: picture.topAnchor),
+            selectionFrame.bottomAnchor.constraint(equalTo: picture.bottomAnchor),
+            selectionFrame.leadingAnchor.constraint(equalTo: picture.leadingAnchor),
+            selectionFrame.trailingAnchor.constraint(equalTo: picture.trailingAnchor),
         ])
         imageView = picture
         textField = label
     }
 
     override var isSelected: Bool {
-        didSet { background.selected = isSelected }
+        didSet { updateSelection() }
+    }
+
+    private func updateSelection() {
+        background.selected = isSelected
+        selectionFrame.isHidden = !(isSelected && !geometry.names)
+    }
+
+    /// The picture as it is, or cut square to fill a contact sheet's tile.
+    private func show(_ image: NSImage?) {
+        shown = image
+        picture.image = image.map { geometry.names ? $0 : Self.squared($0) }
+    }
+
+    /// The middle square of a picture, drawn when shown so it stays sharp.
+    private static func squared(_ image: NSImage) -> NSImage {
+        let size = image.size
+        guard size.width > 0, size.height > 0, size.width != size.height else { return image }
+        let edge = min(size.width, size.height)
+        let from = NSRect(x: (size.width - edge) / 2, y: (size.height - edge) / 2, width: edge, height: edge)
+        return NSImage(size: NSSize(width: edge, height: edge), flipped: false) { rect in
+            image.draw(in: rect, from: from, operation: .copy, fraction: 1)
+            return true
+        }
     }
 
     /// The tile went out of sight (or is shown for another file): its thumbnail is no longer wanted.
@@ -453,36 +615,82 @@ final class IconItem: NSCollectionViewItem {
 
     func configure(_ item: FileItem, dimmed: Bool) {
         let scale = view.window?.backingScaleFactor ?? 2
+        let side = geometry.thumbnailSide
         let wanted = item.isFolder ? nil : Thumbnails.cacheKey(for: item.url, side: side, scale: scale, version: item.modified)
-        // Drawn again for the same file (a cut, a refresh): the picture on its way stays on its way.
-        if thumbnail?.key != wanted { stopThumbnail() }
+        // Drawn again for the same file (a cut, a refresh): the picture on its
+        // way stays on its way, and the rough one meanwhile stays up.
+        let coming = thumbnail != nil && thumbnail?.key == wanted
+        if !coming { stopThumbnail() }
         key = item.key
-        picture.image = item.icon
+        if !coming { show(item.icon) }
         picture.alphaValue = dimmed || item.isHidden ? 0.45 : 1
         label.stringValue = item.name
-        background.selected = isSelected
+        background.toolTip = geometry.names ? nil : item.name
+        updateSelection()
         guard !item.isFolder, thumbnail == nil else { return }
-        thumbnail = Thumbnails.shared.image(for: item.url, side: side, scale: scale, version: item.modified) { [weak self] image in
+        thumbnail = Thumbnails.shared.image(for: item.url, side: side, scale: scale, version: item.modified, early: { [weak self] image in
+            guard let self, self.key == item.key else { return }
+            self.show(image)
+        }) { [weak self] image in
             guard let self, self.key == item.key else { return }
             self.thumbnail = nil
-            self.picture.image = image
+            self.show(image)
         }
     }
 }
 
-/// Pictures of photos, PDFs and videos for the icons view, made by Quick Look.
-/// On the main thread.
+/// Pictures of photos, PDFs and videos for the icons view. Photos are read
+/// here with ImageIO, the way FastStone and XnView read theirs: first the
+/// small picture a camera or phone keeps inside the file, which takes only a
+/// small part of it to read; then, when the tile is bigger than that, the
+/// photo decoded straight to the tile's size, a few at a time. A picture
+/// already made at another size stands in meanwhile, or does if it is larger.
+/// PDFs, videos and the rest, and photos kept only in iCloud, are made by
+/// Quick Look. On the main thread.
 final class Thumbnails {
     static let shared = Thumbnails()
     private let cache = NSCache<NSString, NSImage>()
 
-    /// One request for a picture being made, with the tiles waiting for it.
+    /// One picture being made, with the tiles waiting for it.
     private struct Pending {
-        let request: QLThumbnailGenerator.Request
-        var waiting: [UUID: (NSImage) -> Void]
+        let id = UUID()
+        var waiting: [UUID: Waiting] = [:]
+        /// The rough picture shown until it comes, once there is one.
+        var early: NSImage?
+        var earlyPixels = 0
+        /// Stops whatever is making it.
+        var stop: () -> Void = {}
+    }
+    private struct Waiting {
+        let early: ((NSImage) -> Void)?
+        let done: (NSImage) -> Void
     }
     /// A picture asked for again while it is being made isn't made twice.
     private var pending: [NSString: Pending] = [:]
+
+    /// What has been made of each file, by path, so another size can stand in.
+    private struct Made {
+        let pixels: Int
+        let version: TimeInterval?
+    }
+    private var made: [String: [NSString: Made]] = [:]
+
+    /// One picture to make, and how far it has got.
+    private struct Job {
+        let url: URL
+        let side: CGFloat
+        let scale: CGFloat
+        let key: NSString
+        let id: UUID
+        let made: Made
+        var readHere = false
+        var quickLooked = false
+        var pixels: Int { made.pixels }
+
+        func picture(_ image: CGImage) -> NSImage {
+            NSImage(cgImage: image, size: NSSize(width: CGFloat(image.width) / scale, height: CGFloat(image.height) / scale))
+        }
+    }
 
     /// Hands back a picture still being made, to stop waiting for it.
     struct Ticket {
@@ -490,54 +698,242 @@ final class Thumbnails {
         fileprivate let id: UUID
     }
 
-    /// Bounded by memory, not count: 2,000 thumbnails at 128×128 would be 128 MB.
-    init() { cache.totalCostLimit = 48 * 1024 * 1024 }
+    /// Opening files and reading the pictures they keep: mostly waiting for the disk.
+    private static let peeks = BackgroundTask.queue("Foldera.thumbnail-reading", limit: 4)
+    /// Decoding photos, which keeps a core busy each.
+    private static let decodes = BackgroundTask.queue(
+        "Foldera.thumbnail-decoding", limit: max(2, min(ProcessInfo.processInfo.activeProcessorCount / 2, 4)))
+
+    /// Bounded by memory, not count: a screenful of a contact sheet's pictures
+    /// is about 40 MB, and scrolling back shouldn't make them all again. A
+    /// thirty-second of the Mac's memory, between 96 and 512 MB.
+    init() {
+        let share = Int(clamping: ProcessInfo.processInfo.physicalMemory / 32)
+        cache.totalCostLimit = min(max(share, 96 << 20), 512 << 20)
+    }
 
     /// `version` is the file's modification date, so an edited picture gets a new thumbnail.
     static func cacheKey(for url: URL, side: CGFloat, scale: CGFloat, version: Date?) -> NSString {
         "\(url.path)|\(side)@\(scale)|\(version?.timeIntervalSince1970 ?? 0)" as NSString
     }
 
-    /// Returns nil when the picture was ready (and `done` called).
+    /// Returns nil when the picture was ready (and `done` called). `early`
+    /// gets a rough picture to show meanwhile, when there is one.
     @discardableResult
-    func image(for url: URL, side: CGFloat, scale: CGFloat, version: Date?, done: @escaping (NSImage) -> Void) -> Ticket? {
-        let cacheKey = Self.cacheKey(for: url, side: side, scale: scale, version: version)
-        if let image = cache.object(forKey: cacheKey) {
+    func image(for url: URL, side: CGFloat, scale: CGFloat, version: Date?,
+               early: ((NSImage) -> Void)? = nil, done: @escaping (NSImage) -> Void) -> Ticket? {
+        let key = Self.cacheKey(for: url, side: side, scale: scale, version: version)
+        if let image = cache.object(forKey: key) {
             done(image)
             return nil
         }
-        let ticket = Ticket(key: cacheKey, id: UUID())
-        if pending[cacheKey] != nil {
-            pending[cacheKey]?.waiting[ticket.id] = done
-            return ticket
+        let pixels = Int((side * scale).rounded(.up))
+        let stamp = version?.timeIntervalSince1970
+        let before = largest(url, version: stamp)
+        // Made larger before (the pictures were made smaller since): that one will do.
+        if let before, before.pixels >= pixels {
+            done(before.image)
+            return nil
         }
-        let request = QLThumbnailGenerator.Request(
-            fileAt: url, size: CGSize(width: side, height: side), scale: scale, representationTypes: .thumbnail)
-        pending[cacheKey] = Pending(request: request, waiting: [ticket.id: done])
-        QLThumbnailGenerator.shared.generateBestRepresentation(for: request) { [weak self] representation, _ in
-            let image = representation?.nsImage
-            let cost = Int(representation?.cgImage.width ?? 0) * Int(representation?.cgImage.height ?? 0) * 4
-            DispatchQueue.main.async {
-                // A request given up and asked for again since is a new one; this answer isn't for it.
-                guard let self, let entry = self.pending[cacheKey], entry.request === request else { return }
-                self.pending[cacheKey] = nil
-                guard let image else { return }
-                self.cache.setObject(image, forKey: cacheKey, cost: cost)
-                entry.waiting.values.forEach { $0(image) }
-            }
+        let ticket = Ticket(key: key, id: UUID())
+        let starting = pending[key] == nil
+        var entry = pending[key] ?? Pending()
+        if let before, before.pixels > entry.earlyPixels {
+            entry.early = before.image
+            entry.earlyPixels = before.pixels
         }
+        entry.waiting[ticket.id] = Waiting(early: early, done: done)
+        pending[key] = entry
+        if let rough = entry.early { early?(rough) }
+        guard starting else { return ticket }
+        let job = Job(url: url, side: side, scale: scale, key: key, id: entry.id, made: Made(pixels: pixels, version: stamp))
+        if Self.readsHere(url) { read(job) } else { quickLook(job) }
         return ticket
     }
 
+    /// Any picture made of the file so far, for the viewer to show while it reads the photo.
+    func anyPicture(of url: URL) -> NSImage? {
+        largest(url, version: nil)?.image
+    }
+
+    /// The largest picture of the file made so far, of this version unless any will do.
+    private func largest(_ url: URL, version: TimeInterval?) -> (image: NSImage, pixels: Int)? {
+        let path = url.path
+        guard let sizes = made[path] else { return nil }
+        var best: (image: NSImage, pixels: Int)?
+        for (key, size) in sizes {
+            guard let image = cache.object(forKey: key) else {
+                // Let go of, to make room.
+                made[path]?[key] = nil
+                continue
+            }
+            guard version == nil || size.version == version else { continue }
+            if size.pixels > best?.pixels ?? 0 { best = (image, size.pixels) }
+        }
+        if made[path]?.isEmpty == true { made[path] = nil }
+        return best
+    }
+
+    private func isCurrent(_ job: Job) -> Bool {
+        // A picture given up and asked for again since is a new one; an answer for the old one isn't for it.
+        pending[job.key]?.id == job.id
+    }
+
+    /// The picture is made: kept, and handed to everyone waiting for it.
+    private func finish(_ job: Job, _ image: NSImage?, cost: Int) {
+        guard let entry = pending[job.key], entry.id == job.id else { return }
+        pending[job.key] = nil
+        guard let image else { return }
+        cache.setObject(image, forKey: job.key, cost: cost)
+        made[job.url.path, default: [:]][job.key] = job.made
+        entry.waiting.values.forEach { $0.done(image) }
+    }
+
+    private func finish(_ job: Job, _ image: CGImage) {
+        finish(job, job.picture(image), cost: image.bytesPerRow * image.height)
+    }
+
+    /// A rough picture to show until the right one comes, if it is better than what shows now.
+    private func preview(_ job: Job, _ image: CGImage) {
+        guard var entry = pending[job.key], entry.id == job.id else { return }
+        let pixels = max(image.width, image.height)
+        guard pixels > entry.earlyPixels else { return }
+        let picture = job.picture(image)
+        entry.early = picture
+        entry.earlyPixels = pixels
+        pending[job.key] = entry
+        entry.waiting.values.forEach { $0.early?(picture) }
+    }
+
+    // MARK: Read here, with ImageIO
+
+    /// Pictures ImageIO reads, told by their names. Quick Look makes the rest.
+    static func readsHere(_ url: URL) -> Bool {
+        guard let type = UTType(filenameExtension: url.pathExtension), type.conforms(to: .image),
+              !type.conforms(to: .svg) else { return false }
+        return readable.contains(type.identifier)
+    }
+
+    private static let readable = Set(CGImageSourceCopyTypeIdentifiers() as? [String] ?? [])
+
+    /// What a first look into a file found.
+    enum Peek {
+        /// Not a picture ImageIO reads, or kept only in iCloud: Quick Look's turn.
+        case elsewhere
+        /// The picture the file keeps, large enough for the tile.
+        case enough(CGImage)
+        /// The photo has to be decoded; the smaller picture the file keeps, if any, shows meanwhile.
+        case decode(rough: CGImage?)
+    }
+
+    /// Opens the file and reads the picture it keeps, if any. Safe off the main thread.
+    static func peek(_ url: URL, pixels: Int) -> Peek {
+        // Reading a file iCloud hasn't brought down would bring it down.
+        if (try? url.resourceValues(forKeys: [.ubiquitousItemDownloadingStatusKey]))?.ubiquitousItemDownloadingStatus == .notDownloaded {
+            return .elsewhere
+        }
+        guard let source = CGImageSourceCreateWithURL(url as CFURL, [kCGImageSourceShouldCache: false] as CFDictionary),
+              CGImageSourceGetCount(source) > 0 else { return .elsewhere }
+        guard let kept = ImageFiles.storedThumbnail(url, in: source, maxPixels: pixels) else { return .decode(rough: nil) }
+        // Within a tenth of the tile, or the whole picture: the difference doesn't show.
+        let across = CGFloat(max(kept.width, kept.height))
+        let whole = ImageFiles.uprightSize(of: source).map { max($0.width, $0.height) } ?? .infinity
+        return across >= min(CGFloat(pixels), whole) * 0.9 ? .enough(kept) : .decode(rough: kept)
+    }
+
+    /// The photo, `pixels` across at most. ImageIO decodes it straight to
+    /// that size, without the whole photo in memory on the way. Safe off the main thread.
+    static func decode(_ source: CGImageSource, pixels: Int) -> CGImage? {
+        CGImageSourceCreateThumbnailAtIndex(source, 0, [
+            kCGImageSourceCreateThumbnailFromImageAlways: true,
+            kCGImageSourceCreateThumbnailWithTransform: true,
+            kCGImageSourceShouldCacheImmediately: true,
+            kCGImageSourceThumbnailMaxPixelSize: pixels,
+        ] as CFDictionary)
+    }
+
+    /// The same, opening the file again: a photo waiting its turn holds nothing open meanwhile.
+    static func decode(_ url: URL, pixels: Int) -> CGImage? {
+        guard let source = CGImageSourceCreateWithURL(url as CFURL, [kCGImageSourceShouldCache: false] as CFDictionary) else { return nil }
+        return decode(source, pixels: pixels)
+    }
+
+    private func read(_ job: Job) {
+        var job = job
+        job.readHere = true
+        let operation = BlockOperation()
+        operation.addExecutionBlock { [weak operation, job] in
+            guard let operation, !operation.isCancelled else { return }
+            let found = autoreleasepool { Self.peek(job.url, pixels: job.pixels) }
+            DispatchQueue.main.async { [weak self] in
+                guard let self, self.isCurrent(job) else { return }
+                switch found {
+                case .elsewhere:
+                    if job.quickLooked { self.finish(job, nil, cost: 0) } else { self.quickLook(job) }
+                case .enough(let image):
+                    self.finish(job, image)
+                case .decode(let rough):
+                    if let rough { self.preview(job, rough) }
+                    self.decodePhoto(job)
+                }
+            }
+        }
+        pending[job.key]?.stop = { operation.cancel() }
+        Self.peeks.addOperation(operation)
+    }
+
+    private func decodePhoto(_ job: Job) {
+        let operation = BlockOperation()
+        operation.addExecutionBlock { [weak operation] in
+            guard let operation, !operation.isCancelled else { return }
+            let image = autoreleasepool { Self.decode(job.url, pixels: job.pixels) }
+            DispatchQueue.main.async { [weak self] in
+                guard let self, self.isCurrent(job) else { return }
+                if let image {
+                    self.finish(job, image)
+                } else if job.quickLooked {
+                    self.finish(job, nil, cost: 0)
+                } else {
+                    self.quickLook(job)
+                }
+            }
+        }
+        pending[job.key]?.stop = { operation.cancel() }
+        Self.decodes.addOperation(operation)
+    }
+
+    // MARK: Quick Look
+
+    /// Quick Look picks its reader by the extension, ImageIO by what is in
+    /// the file: a picture under the wrong name (a WebP named .avif, as some
+    /// sites hand out) that Quick Look gives up on is read here instead.
+    private func quickLook(_ job: Job) {
+        var job = job
+        job.quickLooked = true
+        let request = QLThumbnailGenerator.Request(
+            fileAt: job.url, size: CGSize(width: job.side, height: job.side), scale: job.scale, representationTypes: .thumbnail)
+        pending[job.key]?.stop = { QLThumbnailGenerator.shared.cancel(request) }
+        let picture = !job.readHere && UTType(filenameExtension: job.url.pathExtension)?.conforms(to: .image) == true
+        QLThumbnailGenerator.shared.generateBestRepresentation(for: request) { [weak self, job] representation, _ in
+            let image = representation?.nsImage
+            let cost = Int(representation?.cgImage.width ?? 0) * Int(representation?.cgImage.height ?? 0) * 4
+            DispatchQueue.main.async {
+                guard let self, self.isCurrent(job) else { return }
+                if image == nil && picture { return self.read(job) }
+                self.finish(job, image, cost: cost)
+            }
+        }
+    }
+
     /// The tile scrolled away before its picture came: once nobody waits
-    /// for it, Quick Look stops making it, so a fast scroll doesn't queue
-    /// up hundreds of pictures nobody will see.
+    /// for it, it stops being made, so a fast scroll doesn't queue up
+    /// hundreds of pictures nobody will see.
     func cancel(_ ticket: Ticket) {
         guard var entry = pending[ticket.key] else { return }
         entry.waiting[ticket.id] = nil
         if entry.waiting.isEmpty {
             pending[ticket.key] = nil
-            QLThumbnailGenerator.shared.cancel(entry.request)
+            entry.stop()
         } else {
             pending[ticket.key] = entry
         }

@@ -329,6 +329,7 @@ extension ExplorerTab: NSMenuItemValidation {
     }
 
     @objc func delete(_ sender: Any?) {
+        if let folder = sidebar.focusedFolder, !isInArchive { return sidebar.trash(folder) }
         let gone = deletableItems
         guard !gone.isEmpty else { return }
         FileOps.trash(gone.map(\.url)) { [weak self] removed in self?.removed(gone, only: removed) }
@@ -1027,7 +1028,9 @@ extension ExplorerTab: NSMenuItemValidation {
         case #selector(goUp(_:)): return parentLocation != nil
         case #selector(copy(_:)), #selector(share(_:)):
             return !editing && files
-        case #selector(cut(_:)), #selector(delete(_:)), #selector(deletePermanently(_:)):
+        case #selector(delete(_:)):
+            return !editing && (changeable || (sidebar.focusedFolder != nil && !isInArchive))
+        case #selector(cut(_:)), #selector(deletePermanently(_:)):
             return !editing && changeable
         case #selector(paste(_:)), #selector(pasteMove(_:)):
             return !editing && currentFolder != nil && FileClipboard.shared.hasFiles
@@ -1185,6 +1188,7 @@ extension ExplorerTab: NSMenuItemValidation {
         case 117: // Forward delete
             if listFocused && mods.isEmpty { delete(nil); return true }
             if listFocused && mods == .shift { deletePermanently(nil); return true }
+            if mods.isEmpty, sidebar.focusedFolder != nil { delete(nil); return true }
         case 49: // Space
             if listFocused && mods.isEmpty { quickLook(nil); return true }
         case 120: // F2

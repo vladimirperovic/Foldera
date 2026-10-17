@@ -163,6 +163,68 @@ import Testing
         gate.signal()
     }
 
+    /// On a slow disk the first items show while the rest are read, instead
+    /// of "Working on it…" until the last one.
+    @Test func aSlowFolderShowsWhatHasBeenReadSoFar() async throws {
+        _ = NSApplication.shared
+        let fm = FileManager.default
+        let root = fm.temporaryDirectory.appendingPathComponent("FolderaSoFar-\(UUID().uuidString)")
+        let first = root.appendingPathComponent("First"), slow = root.appendingPathComponent("Slow")
+        for folder in [first, slow] { try fm.createDirectory(at: folder, withIntermediateDirectories: true) }
+        defer { try? fm.removeItem(at: root) }
+        try "a".write(to: first.appendingPathComponent("a.txt"), atomically: true, encoding: .utf8)
+        for name in ["p1.jpg", "p2.jpg", "p3.jpg"] {
+            try "x".write(to: slow.appendingPathComponent(name), atomically: true, encoding: .utf8)
+        }
+        // A slow disk that hands over two pictures, then takes its time over the third.
+        let gate = DispatchSemaphore(value: 0)
+        let original = ExplorerTab.readFolderInSteps
+        ExplorerTab.readFolderInSteps = { url, hidden, step in
+            guard url.key == slow.key else { return try original(url, hidden, step) }
+            let all = try original(url, hidden, { _ in })
+            Thread.sleep(forTimeInterval: 0.4)
+            step(Array(all.prefix(2)))
+            _ = gate.wait(timeout: .now() + 5)
+            return all
+        }
+        defer {
+            ExplorerTab.readFolderInSteps = original
+            for _ in 0..<4 { gate.signal() }
+        }
+
+        let tab = ExplorerTab(location: .folder(first))
+        defer { tab.watcher.stop() }
+        try await eventually("first folder") { tab.items.map(\.name) == ["a.txt"] }
+        tab.navigate(to: .folder(slow))
+        try await eventually("the first two, while the third is read") { tab.items.count == 2 && tab.waitingForFolder }
+        #expect(tab.emptyLabel.isHidden)
+        #expect(tab.statusLabel.stringValue.contains("Reading…"))
+        gate.signal()
+        try await eventually("all of it") { tab.items.count == 3 && !tab.waitingForFolder }
+        #expect(!tab.statusLabel.stringValue.contains("Reading…"))
+    }
+
+    /// On exFAT, FAT or a share, what lives in "._" files is told from the name.
+    @Test func itemsOnAForeignDiskAreToldByTheirNames() throws {
+        let fm = FileManager.default
+        let root = fm.temporaryDirectory.appendingPathComponent("FolderaByName-\(UUID().uuidString)")
+        try fm.createDirectory(at: root.appendingPathComponent("Tool.app"), withIntermediateDirectories: true)
+        try fm.createDirectory(at: root.appendingPathComponent("System Volume Information"), withIntermediateDirectories: true)
+        try fm.createDirectory(at: root.appendingPathComponent("Projects"), withIntermediateDirectories: true)
+        defer { try? fm.removeItem(at: root) }
+        for name in ["photo.jpg", ".notes"] { try "x".write(to: root.appendingPathComponent(name), atomically: true, encoding: .utf8) }
+        func item(_ name: String) -> FileItem { FileItem(url: root.appendingPathComponent(name), foreign: true) }
+
+        let photo = item("photo.jpg")
+        #expect(photo.kind == FileItem(url: root.appendingPathComponent("photo.jpg")).kind)
+        #expect(!photo.isHidden && !photo.isFolder && photo.size == 1)
+        #expect(item(".notes").isHidden && item("System Volume Information").isHidden)
+        let tool = item("Tool.app")
+        #expect(tool.isPackage && !tool.isFolder)
+        let projects = item("Projects")
+        #expect(projects.isFolder && projects.kind == "Folder")
+    }
+
     @Test func expandedSidebarTracksNewFoldersAndRefreshPreservesBranches() async throws {
         _ = NSApplication.shared
         let fm = FileManager.default
@@ -223,7 +285,7 @@ import Testing
         ExplorerTab.readFolder = { url, hidden in
             guard url.key == folder.key else { return try original(url, hidden) }
             _ = gate.wait(timeout: .now() + 5)
-            return before.map(FileItem.init(url:))
+            return before.map { FileItem(url: $0) }
         }
         defer {
             ExplorerTab.readFolder = original

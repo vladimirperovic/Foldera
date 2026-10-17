@@ -168,8 +168,10 @@ final class UsageScanner {
         return !["apfs", "hfs"].contains(type)
     }
 
+    /// Asked as a folder's: an extension alone is looked up as a file's (public.data), where "app" is nothing.
     static func isPackageName(_ url: URL) -> Bool {
-        !url.pathExtension.isEmpty && UTType(filenameExtension: url.pathExtension)?.conforms(to: .package) == true
+        !url.pathExtension.isEmpty
+            && UTType(filenameExtension: url.pathExtension, conformingTo: .directory)?.conforms(to: .package) == true
     }
 
     /// `foreign` is worked out from the disk when not given.

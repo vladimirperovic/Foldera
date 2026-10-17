@@ -75,7 +75,8 @@ extension BackgroundWork {
         let original = ExplorerTab.readFolderInSteps
         let gate = DispatchSemaphore(value: 0), started = CancelFlag()
         defer { ExplorerTab.readFolderInSteps = original; gate.signal() }
-        ExplorerTab.readFolderInSteps = { url, hidden, _ in
+        ExplorerTab.readFolderInSteps = { url, hidden, step in
+            guard url.key == fixture.url.key else { return try original(url, hidden, step) }
             let before = try original(url, hidden, { _ in })
             started.set()
             _ = gate.wait(timeout: .now() + 10)

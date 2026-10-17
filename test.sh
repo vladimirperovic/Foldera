@@ -6,7 +6,7 @@ set -euo pipefail
 cd "$(dirname "$0")"
 PLUGINS="$(dirname "$(xcrun --find swift)")/../lib/swift/host/plugins/testing"
 if [ -d "$PLUGINS" ]; then
-  swift test -Xswiftc -plugin-path -Xswiftc "$PLUGINS" "$@"
+  swift test -Xswiftc -enable-testing -Xswiftc -plugin-path -Xswiftc "$PLUGINS" "$@"
 else
-  swift test "$@"
+  swift test -Xswiftc -enable-testing "$@"
 fi

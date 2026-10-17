@@ -805,6 +805,7 @@ final class ExplorerTab: NSViewController, NSSplitViewDelegate {
             let sizes = Prefs.folderSizes ? UsageCache.node(for: url).map(Self.folderSizes(in:)) : nil
             let read = Self.readFolderInSteps
             let removed = justRemoved
+            let removedKeys = Set(removed.keys)
             folderRead = (generation, Date())
             // Sorting a big folder takes a while; it happens here, off the main thread.
             DispatchQueue.global(qos: .userInitiated).async { [weak self] in
@@ -814,7 +815,7 @@ final class ExplorerTab: NSViewController, NSSplitViewDelegate {
                         DispatchQueue.main.async { self?.showSoFar(shown, generation: generation) }
                     }
                     if !removed.isEmpty {
-                        found.removeAll { Self.isAmong($0, Set(removed.keys)) && !FileOps.exists($0.url) }
+                        found.removeAll { Self.isAmong($0, removedKeys) && !FileOps.exists($0.url) }
                     }
                     if let sizes { for item in found where item.isFolder && item.volume == nil { item.folderSize = sizes[item.name] } }
                     return found.sorted(by: order)
@@ -844,7 +845,8 @@ final class ExplorerTab: NSViewController, NSSplitViewDelegate {
         guard generation == loadGeneration, waitingForFolder, renamingKey == nil, !isSearching, !soFar.isEmpty else { return }
         shownSoFar = generation
         let selected = Set(selectedItems.map(\.key))
-        items = soFar.filter { !Self.isAmong($0, Set(justRemoved.keys)) }
+        let removed = Set(justRemoved.keys)
+        items = soFar.filter { !Self.isAmong($0, removed) }
         if shownMode != .usage {
             selectingQuietly = true
             reloadVisibleList()

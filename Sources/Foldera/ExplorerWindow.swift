@@ -77,6 +77,8 @@ final class ExplorerTab: NSViewController, NSSplitViewDelegate {
     private var pictureSizeReads: Set<String> = []
     private static let pictureSizeQueue = BackgroundTask.queue("Foldera.picture-sizes")
     var observers: [NSObjectProtocol] = []
+    /// Thumbnails asked for ahead of the scroll, by picture and size.
+    private(set) var thumbnailsAhead: [String: Thumbnails.Ticket] = [:]
     /// Lists that missed a reload while hidden; they catch up when shown.
     var staleViews: Set<ViewMode> = []
     var cloudRefresh: DispatchWorkItem?
@@ -503,6 +505,48 @@ final class ExplorerTab: NSViewController, NSSplitViewDelegate {
         gridScroll.hasVerticalScroller = true
         gridScroll.autohidesScrollers = true
         gridScroll.borderType = .noBorder
+        gridScroll.contentView.postsBoundsChangedNotifications = true
+        observers.append(NotificationCenter.default.addObserver(
+            forName: NSView.boundsDidChangeNotification, object: gridScroll.contentView, queue: .main) { [weak self] _ in
+            self?.makeThumbnailsAhead()
+        })
+    }
+
+    /// Thumbnails asked for a screenful above and below what is in sight,
+    /// as FastStone reads ahead: scrolling finds them made, rather than tiles
+    /// waiting for theirs as they come in. Given up when they fall out of reach.
+    func makeThumbnailsAhead() {
+        guard shownMode == .icons, !items.isEmpty, let layout = grid.collectionViewLayout as? IconLayout else {
+            return cancelThumbnailsAhead()
+        }
+        let seen = grid.visibleRect
+        guard seen.height > 0 else { return }
+        let reach = seen.insetBy(dx: 0, dy: -seen.height)
+        let side = layout.geometry.thumbnailSide
+        let scale = view.window?.backingScaleFactor ?? 2
+        // By picture and size: a new size asks again, and drops what was asked at the old one.
+        var wanted: [String: FileItem] = [:]
+        for attributes in layout.layoutAttributesForElements(in: reach) {
+            guard let path = attributes.indexPath, path.item < items.count else { continue }
+            let item = items[path.item]
+            guard !item.isFolder, item.volume == nil else { continue }
+            wanted[Thumbnails.cacheKey(for: item.url, side: side, scale: scale, version: item.modified) as String] = item
+        }
+        for (key, ticket) in thumbnailsAhead where wanted[key] == nil {
+            Thumbnails.shared.cancel(ticket)
+            thumbnailsAhead[key] = nil
+        }
+        for (key, item) in wanted where thumbnailsAhead[key] == nil {
+            let ticket = Thumbnails.shared.image(for: item.url, side: side, scale: scale, version: item.modified) { [weak self] _ in
+                self?.thumbnailsAhead[key] = nil
+            }
+            if let ticket { thumbnailsAhead[key] = ticket }
+        }
+    }
+
+    private func cancelThumbnailsAhead() {
+        thumbnailsAhead.values.forEach(Thumbnails.shared.cancel)
+        thumbnailsAhead = [:]
     }
 
     private func setupColumns() {
@@ -897,6 +941,8 @@ final class ExplorerTab: NSViewController, NSSplitViewDelegate {
         }
         updateEmptyState()
         selectionChanged()
+        // Once the tiles are laid out.
+        DispatchQueue.main.async { [weak self] in self?.makeThumbnailsAhead() }
     }
 
     /// Only the list on screen is reloaded; the others are marked to catch up when shown.
@@ -1397,6 +1443,7 @@ final class ExplorerTab: NSViewController, NSSplitViewDelegate {
     func applyViewMode() {
         layoutLists()
         if staleViews.remove(shownMode) != nil { reload(shownMode) }
+        DispatchQueue.main.async { [weak self] in self?.makeThumbnailsAhead() }
     }
 
     private func layoutLists() {
@@ -1469,6 +1516,8 @@ final class ExplorerTab: NSViewController, NSSplitViewDelegate {
             self.grid.reloadData()
             self.grid.selectionIndexPaths = selection
             self.selectingQuietly = false
+            // Pictures at the new size, ahead of the scroll too.
+            self.makeThumbnailsAhead()
         }
         iconReload = work
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.25, execute: work)

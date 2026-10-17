@@ -65,6 +65,57 @@ import Testing
         #expect(sheet.side == sheet.tile.width)
     }
 
+    /// Pictures a little below the screen are made before they are scrolled
+    /// to, so their tiles don't come in empty.
+    @Test func picturesBelowTheScreenAreMadeAhead() async throws {
+        _ = NSApplication.shared
+        let fm = FileManager.default
+        let folder = fm.temporaryDirectory.appendingPathComponent("FolderaAhead-\(UUID().uuidString)")
+        try fm.createDirectory(at: folder, withIntermediateDirectories: true)
+        defer { try? fm.removeItem(at: folder) }
+        let context = try #require(CGContext(data: nil, width: 40, height: 30, bitsPerComponent: 8, bytesPerRow: 0,
+                                             space: CGColorSpaceCreateDeviceRGB(), bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue))
+        let image = try #require(context.makeImage())
+        for i in 0..<120 {
+            let url = folder.appendingPathComponent(String(format: "p%03d.png", i))
+            let destination = try #require(CGImageDestinationCreateWithURL(url as CFURL, "public.png" as CFString, 1, nil))
+            CGImageDestinationAddImage(destination, image, nil)
+            #expect(CGImageDestinationFinalize(destination))
+        }
+        let prefs = UserDefaults.standard
+        let oldSize = prefs.object(forKey: "iconSize"), oldMode = prefs.object(forKey: "viewMode")
+        defer {
+            prefs.set(oldSize, forKey: "iconSize")
+            prefs.set(oldMode, forKey: "viewMode")
+        }
+        prefs.set("details", forKey: "viewMode")
+        let tab = ExplorerTab(location: .folder(folder))
+        defer { tab.watcher.stop() }
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1040, height: 620), styleMask: [.titled],
+                              backing: .buffered, defer: false)
+        window.isReleasedWhenClosed = false
+        window.contentView = tab.view
+        defer { window.close() }
+        try await eventually("folder read") { tab.items.count == 120 }
+        tab.setViewMode(.icons)
+        tab.setIconSize(64)
+        tab.view.layoutSubtreeIfNeeded()
+        tab.grid.layoutSubtreeIfNeeded()
+
+        let layout = try #require(tab.grid.collectionViewLayout as? IconLayout)
+        let seen = tab.grid.visibleRect
+        let below = try #require((0..<120).first { i in
+            guard let frame = layout.layoutAttributesForItem(at: IndexPath(item: i, section: 0))?.frame else { return false }
+            return frame.minY > seen.maxY && frame.maxY < seen.maxY + seen.height
+        }, "nothing just below a screen of \(seen)")
+        tab.makeThumbnailsAhead()
+        let item = tab.items[below]
+        let side = layout.geometry.thumbnailSide, scale = window.backingScaleFactor
+        try await eventually("made before it is in sight") {
+            Thumbnails.shared.ready(for: item.url, side: side, scale: scale, version: item.modified) != nil
+        }
+    }
+
     @Test func theLargestSizeLaysPicturesEdgeToEdge() async throws {
         _ = NSApplication.shared
         let fm = FileManager.default

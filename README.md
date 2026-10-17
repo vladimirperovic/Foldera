@@ -430,6 +430,8 @@ DNG…). macOS decodes all of them itself.
 | S | slideshow |
 | Delete | to the Trash (⌘Z brings it back), then the next picture |
 | E | open in the default app (Preview, Photoshop…) |
+| ⌘C · ⌥⌘C · ⇧⌘C | copy the file · the picture itself (full size, turned as shown) · its path |
+| right-click | all of these, plus Share, Open with, Show in Foldera or Finder, and Set as desktop picture; each says what it does when you point at it |
 | Esc | leave full screen / close |
 
 Fit makes the picture as large as the window allows, small pictures too.

@@ -72,4 +72,48 @@ import Testing
         #expect(!viewer.filmstrip.isHidden)
         try await eventually("second click") { viewer.filmstrip.isHidden }
     }
+
+    @Test func thePicturesMenuCopiesAndSaysWhatEachCommandDoes() async throws {
+        _ = NSApplication.shared
+        let fm = FileManager.default
+        let folder = fm.temporaryDirectory.appendingPathComponent("FolderaViewerMenu-\(UUID().uuidString)")
+        try fm.createDirectory(at: folder, withIntermediateDirectories: true)
+        defer { try? fm.removeItem(at: folder) }
+        let url = folder.appendingPathComponent("wide.png")
+        try picture(url, width: 300, height: 200)
+        let oldFullScreen = UserDefaults.standard.object(forKey: "viewerFullScreen")
+        UserDefaults.standard.set(false, forKey: "viewerFullScreen")
+        defer { UserDefaults.standard.set(oldFullScreen, forKey: "viewerFullScreen") }
+
+        ImageViewer.show([url], at: 0)
+        let window = try #require(NSApp.windows.compactMap { $0 as? ViewerWindow }.first { $0.isVisible })
+        defer { window.close() }
+        let viewer = try #require(window.viewer)
+        try await eventually("shown") { viewer.magnification > 0.1 }
+
+        let items = viewer.pictureMenu().items.filter { !$0.isSeparatorItem }
+        let untold = items.filter { ($0.toolTip ?? "").isEmpty }.map(\.title)
+        #expect(untold.isEmpty, "without a tooltip: \(untold)")
+        let copy = try #require(items.first { $0.title == "Copy" })
+        #expect(copy.keyEquivalent == "c" && copy.keyEquivalentModifierMask == .command)
+        for title in ["Copy image", "Copy as path", "Copy text from image", "Open with", "Show in Foldera", "Move to Trash"] {
+            #expect(items.contains { $0.title == title }, "missing \(title)")
+        }
+        // Each of the viewer's own commands reaches it, and is on while a picture shows.
+        for item in items where item.target === viewer {
+            let action = try #require(item.action)
+            #expect(viewer.responds(to: action), "\(item.title)")
+            #expect(viewer.validateMenuItem(item), "\(item.title)")
+        }
+
+        // Copy image: the picture itself, full size and turned as it is shown.
+        viewer.rotateRight(nil)
+        let board = NSPasteboard.withUniqueName()
+        defer { board.releaseGlobally() }
+        var copied = false
+        viewer.copyImage(to: board) { copied = true }
+        try await eventually("copied") { copied }
+        let rep = try #require(NSImage(pasteboard: board)?.representations.first)
+        #expect(rep.pixelsWide == 200 && rep.pixelsHigh == 300)
+    }
 }

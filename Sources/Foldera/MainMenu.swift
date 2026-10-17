@@ -83,6 +83,7 @@ enum MainMenu {
             item("Paste", #selector(NSText.paste(_:)), "v"),
             item("Move Item Here", #selector(W.pasteMove(_:)), "v", [.command, .option]),
             item("Copy as Path", #selector(W.copyPath(_:)), "c", [.command, .shift]),
+            item("Copy Image", #selector(W.copyImage(_:)), "c", [.command, .option]),
             item("Copy Text from Image", #selector(W.copyTextFromImage(_:))),
             sep(),
             item("Select All", #selector(NSText.selectAll(_:)), "a"),

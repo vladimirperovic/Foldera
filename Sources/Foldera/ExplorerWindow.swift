@@ -1500,15 +1500,19 @@ final class ExplorerTab: NSViewController, NSSplitViewDelegate {
         let target = location
         usageNote = "Measuring…"
         updateStatus()
-        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
-            let tree = scanner.scan(url) { files, bytes in
-                DispatchQueue.main.async {
-                    guard let self, self.location == target else { return }
-                    self.usageNote = "Measuring… \(Format.count(Int64(files))) files, \(Format.bytes(bytes))"
-                    self.treemap.message = self.usageNote
-                    self.updateStatus()
-                }
+        // Twice a second, how far the walk has got, and the folder a slow
+        // disk keeps it on: the walk can wait on one for long, saying nothing.
+        let ticker = Timer(timeInterval: 0.5, repeats: true) { [weak self, weak scanner] timer in
+            guard let self, let scanner, self.usageScanner === scanner, self.measuring == target else {
+                return timer.invalidate()
             }
+            self.usageNote = scanner.progress.note()
+            self.treemap.message = self.usageNote
+            self.updateStatus()
+        }
+        RunLoop.main.add(ticker, forMode: .common)
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            let tree = scanner.scan(url)
             DispatchQueue.main.async {
                 guard let self, let tree, self.location == target else { return }
                 UsageCache.store(tree)

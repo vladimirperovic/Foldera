@@ -38,7 +38,7 @@ jobs:
         run: swift build -c "${{ matrix.configuration }}" --build-tests -Xswiftc -enable-testing
       - name: An exFAT volume for native hidden attributes
         run: |
-          hdiutil create -size 128m -layout NONE -type UDRW "$RUNNER_TEMP/foldera-exfat.dmg"
+          hdiutil create -size 128m -layout NONE -format UDRW "$RUNNER_TEMP/foldera-exfat.dmg"
           device=$(hdiutil attach -nomount "$RUNNER_TEMP/foldera-exfat.dmg" | awk '/^\/dev\/disk/ {print $1; exit}')
           test -n "$device"
           sudo newfs_exfat -v FolderaExFAT "$device"
@@ -51,6 +51,7 @@ jobs:
           hdiutil attach "$RUNNER_TEMP/foldera-test.dmg"
           echo "FOLDERA_TEST_VOLUME=/Volumes/FolderaTest" >> "$GITHUB_ENV"
       - name: Test
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
         # A test that hangs shouldn't hold the run for half an hour: after ten
         # minutes the test process's threads are printed, and it is stopped.
         run: |

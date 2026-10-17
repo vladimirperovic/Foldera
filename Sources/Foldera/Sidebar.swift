@@ -429,7 +429,7 @@ final class Sidebar: NSObject, NSOutlineViewDataSource, NSOutlineViewDelegate {
                     self.firstLocationsLoad = false
                     self.outline.expandItem(self.thisMac)
                 }
-                self.sync(to: self.current)
+                self.show(self.current)
             }
         }
     }
@@ -495,18 +495,66 @@ final class Sidebar: NSObject, NSOutlineViewDataSource, NSOutlineViewDelegate {
         reload(quickAccess)
     }
 
-    /// Highlights the entry for `location` when there is one, without navigating.
+    /// A folder just gone to, which the tree opens to and scrolls to once it can.
+    private var revealing: Location?
+
+    /// The window went to `location`: its entry is highlighted, without
+    /// navigating, and brought into sight. A folder deeper than the tree is
+    /// open is opened to, as Windows' "Expand to open folder" does; before,
+    /// a folder reached from the list had nothing to highlight until you
+    /// opened the way yourself.
     func sync(to location: Location) {
+        revealing = location
+        show(location)
+    }
+
+    /// Highlights the entry for `location`. Opening and scrolling happen only
+    /// for a folder just gone to, so a branch closed on purpose stays closed,
+    /// and the tree doesn't jump back while you look elsewhere in it.
+    private func show(_ location: Location) {
         current = location
         syncing = true
         defer { syncing = false }
-        for row in 0..<outline.numberOfRows {
-            if let node = outline.item(atRow: row) as? SidebarNode, !node.isSection, node.location == location {
+        while true {
+            if let row = row(of: location) {
                 outline.selectRowIndexes([row], byExtendingSelection: false)
+                if revealing == location {
+                    outline.scrollRowToVisible(row)
+                    revealing = nil
+                }
                 return
             }
+            // Open the deepest folder in sight that holds it. Its subfolders
+            // may take a moment to read; when they come, load() shows it again.
+            guard revealing == location, let holder = deepestHolder(of: location), !outline.isItemExpanded(holder) else { break }
+            outline.expandItem(holder)
+            if holder.children == nil || holder.needsReload { break }
         }
         outline.deselectAll(nil)
+    }
+
+    private func row(of location: Location) -> Int? {
+        (0..<outline.numberOfRows).first { row in
+            guard let node = outline.item(atRow: row) as? SidebarNode else { return false }
+            return !node.isSection && node.location == location
+        }
+    }
+
+    /// The deepest folder or drive in sight that `location` is inside. The
+    /// same folder pinned and under Locations is opened under Locations, the
+    /// later of the two.
+    private func deepestHolder(of location: Location) -> SidebarNode? {
+        guard let target = location.url?.key else { return nil }
+        var best: SidebarNode?
+        var depth = -1
+        for row in 0..<outline.numberOfRows {
+            guard let node = outline.item(atRow: row) as? SidebarNode, !node.isFile, node.isExpandable,
+                  let path = node.url?.key, path.count >= depth,
+                  target.hasPrefix(path == "/" ? "/" : path + "/") else { continue }
+            best = node
+            depth = path.count
+        }
+        return best
     }
 
     // MARK: Data
@@ -582,18 +630,18 @@ final class Sidebar: NSObject, NSOutlineViewDataSource, NSOutlineViewDelegate {
         switch node.kind {
         case .airDrop:
             NSWorkspace.shared.open(Places.airDrop)
-            sync(to: current)
+            show(current)
         case .network:
             neighbourhood.start()
             outline.expandItem(node)
-            sync(to: current)
+            show(current)
         case .server:
             if let url = node.url { onConnect?(url) }
-            sync(to: current)
+            show(current)
         default:
             if node.isFile, let url = node.url {
                 NSWorkspace.shared.open(url)
-                sync(to: current)
+                show(current)
             } else if let location = node.location {
                 onNavigate?(location)
             }

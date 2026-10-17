@@ -2,12 +2,17 @@ import AppKit
 
 final class SyncHistoryWindow: NSWindowController, NSWindowDelegate, NSTableViewDataSource, NSTableViewDelegate {
     private static var current: SyncHistoryWindow?
-    private let table = NSTableView()
-    private let details = NSTextView()
+    let table = NSTableView()
+    let details = NSTextView()
     private let status = NSTextField(labelWithString: "")
     private let openButton = NSButton(title: "Open Sync", target: nil, action: nil)
-    private var records: [SyncLibrary.Record] = []
+    private(set) var records: [SyncLibrary.Record] = []
     private var observer: NSObjectProtocol?
+    private static let queue = BackgroundTask.queue("Foldera.sync-history", limit: 2)
+    private let listing = BackgroundTask(queue: queue)
+    private let detailRead = BackgroundTask(queue: queue)
+    private let readRecords: () throws -> [SyncLibrary.Record]
+    private let readRecord: (SyncLibrary.Record) throws -> SyncLibrary.Record
 
     static func show() {
         if let current { current.reload(); current.showWindow(nil); return }
@@ -16,7 +21,10 @@ final class SyncHistoryWindow: NSWindowController, NSWindowDelegate, NSTableView
         controller.showWindow(nil)
     }
 
-    private init() {
+    init(readRecords: @escaping () throws -> [SyncLibrary.Record] = { try SyncLibrary.summaries() },
+         readRecord: @escaping (SyncLibrary.Record) throws -> SyncLibrary.Record = SyncLibrary.record) {
+        self.readRecords = readRecords
+        self.readRecord = readRecord
         let window = EscWindow(contentRect: NSRect(x: 0, y: 0, width: 960, height: 580),
                                styleMask: [.titled, .closable, .miniaturizable, .resizable], backing: .buffered, defer: false)
         window.title = "Sync History"
@@ -90,17 +98,25 @@ final class SyncHistoryWindow: NSWindowController, NSWindowDelegate, NSTableView
     deinit { if let observer { NotificationCenter.default.removeObserver(observer) } }
 
     private var selected: SyncLibrary.Record? { records.indices.contains(table.selectedRow) ? records[table.selectedRow] : nil }
-    private func reload() {
+    func reload() {
         let chosen = selected?.id
-        do {
-            records = try SyncLibrary.records()
-            table.reloadData()
-            if !records.isEmpty {
-                table.selectRowIndexes(IndexSet(integer: chosen.flatMap { id in records.firstIndex { $0.id == id } } ?? 0), byExtendingSelection: false)
+        let read = readRecords
+        status.stringValue = "Reading history…"
+        detailRead.cancel()
+        listing.run({ Result { try read() } }) { [weak self] result in
+            guard let self else { return }
+            switch result {
+            case .success(let records):
+                self.records = records
+                self.table.reloadData()
+                if !records.isEmpty {
+                    self.table.selectRowIndexes(IndexSet(integer: chosen.flatMap { id in records.firstIndex { $0.id == id } } ?? 0), byExtendingSelection: false)
+                }
+                self.status.stringValue = records.isEmpty ? "No sync runs yet." : "\(records.count) recent runs · up to \(SyncLibrary.historyLimit) retained"
+                self.showDetails()
+            case .failure(let error): self.status.stringValue = error.localizedDescription
             }
-            status.stringValue = records.isEmpty ? "No sync runs yet." : records.count == 1 ? "1 recent run" : "\(records.count) most recent runs"
-            showDetails()
-        } catch { status.stringValue = error.localizedDescription }
+        }
     }
     @objc private func refreshHistory(_ sender: Any?) { reload() }
     @objc private func openSync(_ sender: Any?) {
@@ -109,7 +125,11 @@ final class SyncHistoryWindow: NSWindowController, NSWindowDelegate, NSTableView
         SyncWindow.showSetup(selected.setup, profileID: current?.id)
     }
     func windowDidBecomeKey(_ notification: Notification) { reload() }
-    func windowWillClose(_ notification: Notification) { Self.current = nil }
+    func windowWillClose(_ notification: Notification) {
+        listing.cancel()
+        detailRead.cancel()
+        Self.current = nil
+    }
     func numberOfRows(in tableView: NSTableView) -> Int { records.count }
     func tableView(_ tableView: NSTableView, viewFor tableColumn: NSTableColumn?, row: Int) -> NSView? {
         let record = records[row]
@@ -121,20 +141,39 @@ final class SyncHistoryWindow: NSWindowController, NSWindowDelegate, NSTableView
     }
     func tableViewSelectionDidChange(_ notification: Notification) { showDetails() }
     private func showDetails() {
+        detailRead.cancel()
         openButton.isEnabled = selected != nil
         guard let record = selected else { details.string = "Run a synchronization to see its result here."; return }
+        details.string = "Reading run details…"
+        let read = readRecord
+        detailRead.run({ Result { Self.text(for: try read(record)) } }) { [weak self] result in
+            guard let self else { return }
+            switch result {
+            case .success(let text): self.details.string = text
+            case .failure(let error): self.details.string = error.localizedDescription
+            }
+            self.details.scrollToBeginningOfDocument(nil)
+        }
+    }
+
+    private static func text(for record: SyncLibrary.Record) -> String {
+        let date = DateFormatter()
+        date.dateStyle = .medium
+        date.timeStyle = .short
         let direction = record.setup.mode == .twoWay ? "Both directions" : record.setup.towardLeft == true ? "Right → Left" : "Left → Right"
         var lines = [record.profileName ?? "Manual sync", "\(record.automatic ? "Scheduled" : "Manual") · \(record.summary)",
-                     "Started: \(Format.date.string(from: record.started))", "Finished: \(Format.date.string(from: record.finished))",
+                     "Started: \(date.string(from: record.started))", "Finished: \(date.string(from: record.finished))",
                      "\(record.setup.mode.title) · \(direction)", "Comparison: \(record.setup.comparison.title)",
                      "Removed files: \(record.setup.permanently ? "Deleted permanently" : "Moved to Trash")", "Left: \(record.setup.left)", "Right: \(record.setup.right)"]
         if record.conflicts > 0 { lines.append("Conflicts: \(record.conflicts)") }
-        if !record.failures.isEmpty { lines += ["", "Errors / review:"] + record.failures }
+        if !record.failures.isEmpty { lines += ["", "Errors / review:"] + record.failures.prefix(1000) }
         if !record.events.isEmpty {
-            lines += ["", "Actions:"] + record.events.map { "\($0.action)  \($0.path)\($0.error.map { " — \($0)" } ?? "")" }
+            lines += ["", "Actions:"] + record.events.prefix(10000).map { "\($0.action)  \($0.path)\($0.error.map { " — \($0)" } ?? "")" }
         }
-        details.string = lines.joined(separator: "\n")
-        details.scrollToBeginningOfDocument(nil)
+        if record.events.count > 10000 || record.failures.count > 1000 {
+            lines.append("Showing the first 10,000 actions and 1,000 errors. The full run is retained in the history file.")
+        }
+        return lines.joined(separator: "\n")
     }
 }
 

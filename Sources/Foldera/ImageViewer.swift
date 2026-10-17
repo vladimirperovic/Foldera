@@ -1417,7 +1417,7 @@ final class FilmstripItem: NSCollectionViewItem {
         }) { [weak self] image in
             guard let self, self.url?.key == url.key else { return }
             self.thumbnail = nil
-            self.picture.image = image
+            self.picture.image = image ?? NSWorkspace.shared.icon(for: UTType(filenameExtension: url.pathExtension) ?? .image)
         }
     }
 

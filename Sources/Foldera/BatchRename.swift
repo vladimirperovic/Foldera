@@ -145,7 +145,8 @@ enum BatchRename {
     /// Renames on the calling thread. When a new name is one another item of
     /// the batch is giving up, every item goes by way of a temporary name,
     /// so swaps work. An item whose second step fails gets its old name back.
-    static func perform(_ rows: [Row]) -> (changes: [Change], failures: [String]) {
+    static func perform(_ rows: [Row], cancelled: CancelFlag = CancelFlag(),
+                        rename: (URL, String) throws -> URL = { try FileOps.rename($0, to: $1) }) -> (changes: [Change], failures: [String]) {
         let problems = rows.compactMap { row in row.problem.map { "“\(row.item.name)”: \($0)" } }
         guard problems.isEmpty else { return ([], problems) }
         let moving = rows.filter { $0.changes }
@@ -158,8 +159,9 @@ enum BatchRename {
         var failures: [String] = []
         guard viaTemporary else {
             for row in moving {
+                if cancelled.isSet { break }
                 do {
-                    let renamed = try FileOps.rename(row.item.url, to: row.newName)
+                    let renamed = try rename(row.item.url, row.newName)
                     changes.append(.moved(from: row.item.url, to: renamed))
                 } catch {
                     failures.append("“\(row.item.name)”: \(error.localizedDescription)")
@@ -170,18 +172,32 @@ enum BatchRename {
         var parked: [(row: Row, temporary: URL, change: Int)] = []
         let batch = UUID().uuidString
         for (index, row) in moving.enumerated() {
+            if cancelled.isSet { break }
             do {
-                let temporary = try FileOps.rename(row.item.url, to: ".foldera-rename-\(batch)-\(index)")
+                let temporary = try rename(row.item.url, ".foldera-rename-\(batch)-\(index)")
                 changes.append(.moved(from: row.item.url, to: temporary))
                 parked.append((row, temporary, changes.count - 1))
             } catch {
                 failures.append("“\(row.item.name)”: \(error.localizedDescription)")
             }
         }
+        // Before committing a swap, cancellation restores all parked names.
+        // Once committing starts, finish the group so names cannot collide.
+        if cancelled.isSet || !failures.isEmpty {
+            for entry in parked.reversed() {
+                do {
+                    _ = try FileOps.rename(entry.temporary, to: entry.row.item.name)
+                    changes.remove(at: entry.change)
+                } catch {
+                    failures.append("Could not restore “\(entry.row.item.name)”; it is at \(entry.temporary.path): \(error.localizedDescription)")
+                }
+            }
+            return (changes, failures)
+        }
         var takenBack = IndexSet()
         for entry in parked {
             do {
-                let renamed = try FileOps.rename(entry.temporary, to: entry.row.newName)
+                let renamed = try rename(entry.temporary, entry.row.newName)
                 changes.append(.moved(from: entry.temporary, to: renamed))
             } catch {
                 failures.append("“\(entry.row.item.name)”: \(error.localizedDescription)")
@@ -443,10 +459,12 @@ extension ExplorerTab {
 
     private func performRename(_ rows: [BatchRename.Row]) {
         let progress = ProgressWindow(title: "Renaming \(Format.items(rows.filter(\.changes).count))")
+        let cancelled = CancelFlag()
+        progress.onCancel = { cancelled.set() }
         progress.update(text: "")
         progress.showSoon()
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
-            let (changes, failures) = BatchRename.perform(rows)
+            let (changes, failures) = BatchRename.perform(rows, cancelled: cancelled)
             DispatchQueue.main.async {
                 progress.finish()
                 FileUndo.record(changes, name: "Rename")

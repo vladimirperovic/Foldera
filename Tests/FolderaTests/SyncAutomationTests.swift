@@ -31,6 +31,114 @@ private final class SyncFixture {
     }
 }
 
+extension SyncTestIsolation.SyncAutomation {
+    @Test(arguments: ["shared.txt", "Group"])
+    func exclusionsKeepTwoWayHistoryUntilConflictingFilesReturn(exclusion: String) throws {
+        let p = try SyncFixture()
+        let name = exclusion == "Group" ? "Group/shared.txt" : "shared.txt"
+        for side in [p.left, p.right] {
+            try FileManager.default.createDirectory(at: side.appendingPathComponent(name).deletingLastPathComponent(), withIntermediateDirectories: true)
+            try p.file(side, name, "base")
+        }
+        _ = try Sync.compare(p.left, p.right, by: .content, cancelled: CancelFlag())
+        let before = Sync.Memory.load(p.left, p.right)
+        let key = try #require(before.items.keys.first { $0.hasSuffix("shared.txt") })
+        #expect(before.items[key] != nil && before.hashes?[key] != nil)
+        _ = try Sync.compare(p.left, p.right, by: .content, excluding: .init(exclusion), cancelled: CancelFlag())
+        let remembered = Sync.Memory.load(p.left, p.right)
+        #expect(remembered.items[key] != nil)
+        #expect(remembered.hashes?[key] == before.hashes?[key])
+        try p.file(p.left, name, "left changed")
+        try p.file(p.right, name, "right changed too")
+        let scan = try Sync.compare(p.left, p.right, by: .content, cancelled: CancelFlag())
+        let row = try #require(Sync.plan(scan, mode: .twoWay).rows.first { $0.key == key })
+        #expect(row.conflict != nil && row.action == .none)
+    }
+
+    @Test func exclusionKeepsDeletionHistoryAndSymbolicLinkTargets() throws {
+        let p = try SyncFixture()
+        for side in [p.left, p.right] {
+            try p.file(side, "shared.txt", "base")
+            try FileManager.default.createSymbolicLink(atPath: side.appendingPathComponent("link").path, withDestinationPath: "shared.txt")
+        }
+        _ = try Sync.compare(p.left, p.right, by: .content, cancelled: CancelFlag())
+        _ = try Sync.compare(p.left, p.right, by: .content, excluding: .init("shared.txt; link"), cancelled: CancelFlag())
+        #expect(Sync.Memory.load(p.left, p.right).targets?["link"] == "shared.txt")
+        try FileManager.default.removeItem(at: p.left.appendingPathComponent("shared.txt"))
+        let scan = try Sync.compare(p.left, p.right, by: .content, cancelled: CancelFlag())
+        let row = try #require(Sync.plan(scan, mode: .twoWay).rows.first { $0.key == "shared.txt" })
+        #expect(row.action == .deleteRight)
+    }
+
+    @Test(arguments: [false, true])
+    func failedSyncInstallationRestoresTheOldTarget(permanently: Bool) throws {
+        let p = try SyncFixture()
+        try p.file(p.left, "shared.txt", "new content")
+        try p.file(p.right, "shared.txt", "old content")
+        let scan = try Sync.compare(p.left, p.right, by: .content, cancelled: CancelFlag())
+        let job = Sync.Job(scan, rows: Sync.plan(scan, mode: .mirror).rows, permanently: permanently)
+        var attempted = false
+        job.installReplacement = { _, _ in attempted = true; throw CocoaError(.fileWriteNoPermission) }
+        let result = job.perform()
+        #expect(attempted && !result.failures.isEmpty && result.copied == 0)
+        #expect(result.changes.isEmpty)
+        #expect(try String(contentsOf: p.right.appendingPathComponent("shared.txt"), encoding: .utf8) == "old content")
+        #expect(try String(contentsOf: p.left.appendingPathComponent("shared.txt"), encoding: .utf8) == "new content")
+        #expect(try FileManager.default.contentsOfDirectory(atPath: p.right.path) == ["shared.txt"])
+    }
+
+    @Test func failedSyncRollbackPreservesBothVersionsWhenAnotherWriterTakesTheName() throws {
+        let p = try SyncFixture()
+        try p.file(p.left, "shared.txt", "new content")
+        try p.file(p.right, "shared.txt", "old content")
+        let scan = try Sync.compare(p.left, p.right, by: .content, cancelled: CancelFlag())
+        let job = Sync.Job(scan, rows: Sync.plan(scan, mode: .mirror).rows, permanently: true)
+        job.installReplacement = { _, target in
+            try "other writer".write(to: target, atomically: false, encoding: .utf8)
+            throw CocoaError(.fileWriteFileExists)
+        }
+        let result = job.perform()
+        #expect(result.failures.contains { $0.contains("old version is preserved") })
+        #expect(try String(contentsOf: p.right.appendingPathComponent("shared.txt"), encoding: .utf8) == "other writer")
+        let contents = try FileManager.default.contentsOfDirectory(at: p.right, includingPropertiesForKeys: nil)
+            .map { try String(contentsOf: $0, encoding: .utf8) }
+        #expect(Set(contents) == ["old content", "new content", "other writer"])
+    }
+
+    @Test func historyRetentionBoundsFilesAndSummariesDoNotDecodeEveryEvent() throws {
+        let p = try SyncFixture()
+        try p.file(p.left, "a.txt")
+        let scan = try Sync.compare(p.left, p.right, by: .content, cancelled: CancelFlag())
+        let event = SyncLibrary.Event(try #require(Sync.plan(scan, mode: .update).rows.first))
+        var latest = SyncLibrary.Record(setup: p.setup, started: Date())
+        for index in 0...SyncLibrary.historyLimit {
+            var record = SyncLibrary.Record(setup: p.setup, started: Date(timeIntervalSince1970: 1_700_000_000 + Double(index)))
+            if index == SyncLibrary.historyLimit {
+                record.events = Array(repeating: event, count: 10000)
+                record.failures = Array(repeating: "error", count: 100)
+                record.status = .failed
+            }
+            try SyncLibrary.append(record)
+            latest = record
+        }
+        let summaries = try SyncLibrary.summaries(limit: 1000)
+        #expect(summaries.count == SyncLibrary.historyLimit)
+        let summary = try #require(summaries.first)
+        #expect(summary.id == latest.id && summary.events.isEmpty && summary.failures.count == 3)
+        #expect(summary.summary.hasPrefix("100 errors"))
+        #expect(try SyncLibrary.record(summary).events.count == 10000)
+        let history = SyncLibrary.folder.appendingPathComponent("History")
+        #expect(try FileManager.default.contentsOfDirectory(atPath: history.path).filter { $0.hasSuffix(".json") }.count == SyncLibrary.historyLimit)
+        let sidecars = history.appendingPathComponent("Summaries")
+        #expect(try FileManager.default.contentsOfDirectory(atPath: sidecars.path).count == SyncLibrary.historyLimit)
+        // Pre-upgrade records have no summary: they remain readable.
+        for url in try FileManager.default.contentsOfDirectory(at: sidecars, includingPropertiesForKeys: nil) {
+            try FileManager.default.removeItem(at: url)
+        }
+        #expect(try SyncLibrary.summaries(limit: 1).first?.id == latest.id)
+    }
+}
+
 extension SyncTestIsolation {
 @Suite(.serialized) struct SyncAutomation {
     @Test func twoWayConflictAfterACompletedSyncIsLoggedUntilManuallyResolved() throws {

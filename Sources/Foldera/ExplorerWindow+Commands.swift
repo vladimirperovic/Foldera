@@ -254,43 +254,49 @@ extension ExplorerTab: NSMenuItemValidation {
         guard !ArchiveFolders.isInside(folder) else { return FileOps.report(["An opened archive is read-only. Extract it to add to it."]) }
         // What comes out of an opened archive is always a copy; the archive stays as it is.
         let move = requested && !urls.contains(where: ArchiveFolders.isInside)
-        guard let plan = Transfer.plan(urls, into: folder, move: move, ask: Transfer.askWithAlert) else { return }
-        FileOps.report(plan.problems)
-        guard !plan.steps.isEmpty || (move && !plan.emptied.isEmpty) else {
-            then?()
-            return
-        }
-        let verb = move ? "Moving" : "Copying"
-        let job = Transfer(plan: plan, move: move)
-        let progress = ProgressWindow(title: "\(verb) \(Format.items(plan.steps.count)) to “\(folder.lastPathComponent)”")
-        progress.onCancel = { job.cancel() }
+        let cancelled = CancelFlag()
+        let progress = ProgressWindow(title: "Preparing \(move ? "move" : "copy") to “\(folder.lastPathComponent)”")
+        progress.onCancel = { cancelled.set() }
         progress.showSoon()
-        busyText = "\(verb)…"
-        updateStatus()
-        job.run(progress: { [weak self] report in
-            progress.update(report)
-            if let fraction = report.fraction {
-                self?.busyText = "\(verb)… \(Int(fraction * 100))%"
-                self?.updateStatus()
+        Transfer.planInBackground(urls, into: folder, move: move, cancelled: cancelled, ask: Transfer.askWithAlert) { [weak self] planned in
+            guard let self, let plan = planned else { progress.finish(); return }
+            FileOps.report(plan.problems)
+            guard !plan.steps.isEmpty || (move && !plan.emptied.isEmpty) else {
+                progress.finish()
+                then?()
+                return
             }
-        }, done: { [weak self] outcome in
-            progress.finish()
-            // Folders measured before now hold more (or less).
-            UsageCache.changed(folder)
-            if move { urls.forEach { UsageCache.changed($0.deletingLastPathComponent()) } }
-            FileUndo.record(outcome.changes, name: move ? "Move" : "Copy")
-            FileOps.report(outcome.failures)
-            then?()
-            guard let self else { return }
-            self.busyText = nil
-            if folder.key == self.currentFolder?.key || folder.key == self.location.url?.key {
-                self.pendingSelection = Set(outcome.made.map(\.key))
-                self.scrollToSelection = true
-                self.load()
-            } else {
-                self.updateStatus()
-            }
-        })
+            let verb = move ? "Moving" : "Copying"
+            let job = Transfer(plan: plan, move: move)
+            progress.window?.title = "\(verb) \(Format.items(plan.steps.count)) to “\(folder.lastPathComponent)”"
+            progress.onCancel = { job.cancel() }
+            self.busyText = "\(verb)…"
+            self.updateStatus()
+            job.run(progress: { [weak self] report in
+                progress.update(report)
+                if let fraction = report.fraction {
+                    self?.busyText = "\(verb)… \(Int(fraction * 100))%"
+                    self?.updateStatus()
+                }
+            }, done: { [weak self] outcome in
+                progress.finish()
+                // Folders measured before now hold more (or less).
+                UsageCache.changed(folder)
+                if move { urls.forEach { UsageCache.changed($0.deletingLastPathComponent()) } }
+                FileUndo.record(outcome.changes, name: move ? "Move" : "Copy")
+                FileOps.report(outcome.failures)
+                then?()
+                guard let self else { return }
+                self.busyText = nil
+                if folder.key == self.currentFolder?.key || folder.key == self.location.url?.key {
+                    self.pendingSelection = Set(outcome.made.map(\.key))
+                    self.scrollToSelection = true
+                    self.load()
+                } else {
+                    self.updateStatus()
+                }
+            })
+        }
     }
 
     private var deletableItems: [FileItem] { isInArchive ? [] : selectedItems.filter { $0.volume == nil } }

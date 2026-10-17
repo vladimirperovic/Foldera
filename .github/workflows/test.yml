@@ -10,6 +10,10 @@ jobs:
   test:
     runs-on: macos-26
     timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        configuration: [debug, release]
     env:
       # These require another app to supply promised file bytes through a
       # file presenter (as Windows App does). Hosted runners don't provide
@@ -31,7 +35,7 @@ jobs:
           echo "FOLDERA_DISK_FAILURE_VOLUME=$RUNNER_TEMP/foldera-fault/mounted" >> "$GITHUB_ENV"
       - name: Build
         id: build
-        run: swift build --build-tests
+        run: swift build -c "${{ matrix.configuration }}" --build-tests
       - name: A second, case-sensitive volume
         # For the tests that move across drives and rename on a drive that tells case apart.
         run: |
@@ -42,7 +46,7 @@ jobs:
         # A test that hangs shouldn't hold the run for half an hour: after ten
         # minutes the test process's threads are printed, and it is stopped.
         run: |
-          ./test.sh --skip "$NEEDS_A_DESKTOP" > test.log 2>&1 &
+          ./test.sh -c "${{ matrix.configuration }}" --skip "$NEEDS_A_DESKTOP" > test.log 2>&1 &
           pid=$!
           for _ in $(seq 1 120); do
             sleep 5
@@ -65,6 +69,11 @@ jobs:
             exit 1
           fi
           exit "$status"
+      - name: Package and verify the release application
+        if: ${{ matrix.configuration == 'release' }}
+        run: |
+          ./build.sh
+          codesign --verify --deep --strict build/Foldera.app
       - name: Preview window snapshots
         id: previews
         if: ${{ !cancelled() && steps.build.outcome == 'success' }}
@@ -90,17 +99,17 @@ jobs:
 
           > Editing remains available when you need it.
           MARKDOWN
-          .build/debug/Foldera --snapshot "$RUNNER_TEMP/preview-fixture" "$RUNNER_TEMP/preview-snapshots/attached.png" --pane --select Reading.md --light --wait 6
-          .build/debug/Foldera --snapshot "$RUNNER_TEMP/preview-fixture" "$RUNNER_TEMP/preview-snapshots/detached-light.png" --pane --select Reading.md --act detachpreview --light --wait 6
-          .build/debug/Foldera --snapshot "$RUNNER_TEMP/preview-fixture" "$RUNNER_TEMP/preview-snapshots/detached-dark.png" --pane --select Reading.md --act detachpreview --dark --wait 6
+          .build/${{ matrix.configuration }}/Foldera --snapshot "$RUNNER_TEMP/preview-fixture" "$RUNNER_TEMP/preview-snapshots/attached.png" --pane --select Reading.md --light --wait 6
+          .build/${{ matrix.configuration }}/Foldera --snapshot "$RUNNER_TEMP/preview-fixture" "$RUNNER_TEMP/preview-snapshots/detached-light.png" --pane --select Reading.md --act detachpreview --light --wait 6
+          .build/${{ matrix.configuration }}/Foldera --snapshot "$RUNNER_TEMP/preview-fixture" "$RUNNER_TEMP/preview-snapshots/detached-dark.png" --pane --select Reading.md --act detachpreview --dark --wait 6
       - name: Native preview full-screen round trip
         if: ${{ !cancelled() && steps.previews.outcome == 'success' }}
         timeout-minutes: 1
-        run: .build/debug/Foldera --snapshot "$RUNNER_TEMP/preview-fixture" "$RUNNER_TEMP/preview-snapshots/fullscreen.png" --pane --select Reading.md --light --verify-preview
+        run: .build/${{ matrix.configuration }}/Foldera --snapshot "$RUNNER_TEMP/preview-fixture" "$RUNNER_TEMP/preview-snapshots/fullscreen.png" --pane --select Reading.md --light --verify-preview
       - uses: actions/upload-artifact@v4
         if: ${{ !cancelled() && steps.previews.outcome == 'success' }}
         with:
-          name: preview-snapshots
+          name: preview-snapshots-${{ matrix.configuration }}
           path: ${{ runner.temp }}/preview-snapshots/*.png
           if-no-files-found: error
           retention-days: 7

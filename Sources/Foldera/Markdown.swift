@@ -521,8 +521,32 @@ final class MarkdownTextView: NSScrollView {
 enum TextFile {
     enum Conflict { case overwrite, reload, cancel }
 
+    struct Document {
+        let text: String
+        let encoding: String.Encoding
+        let prefix: Data
+    }
+
+    /// Only deterministic encodings are editable. Guessing Latin-1 silently
+    /// damages legacy text (for example Windows-1250); leave it untouched.
+    static func document(_ data: Data) throws -> Document {
+        let formats: [(bytes: [UInt8], encoding: String.Encoding)] = [
+            ([0xff, 0xfe, 0, 0], .utf32LittleEndian), ([0, 0, 0xfe, 0xff], .utf32BigEndian),
+            ([0xff, 0xfe], .utf16LittleEndian), ([0xfe, 0xff], .utf16BigEndian),
+            ([0xef, 0xbb, 0xbf], .utf8),
+        ]
+        let format = formats.first { data.starts(with: $0.bytes) }
+        let prefix = Data(format?.bytes ?? [])
+        let encoding = format?.encoding ?? .utf8
+        guard let text = String(data: data.dropFirst(prefix.count), encoding: encoding),
+              format != nil || !data.contains(0) else {
+            throw OpError("This text encoding cannot be identified safely. Convert a copy to UTF-8 or Unicode with a byte-order mark before editing.")
+        }
+        return Document(text: text, encoding: encoding, prefix: prefix)
+    }
+
     static func read(_ url: URL) -> String? {
-        (try? String(contentsOf: url, encoding: .utf8)) ?? (try? String(contentsOf: url, encoding: .isoLatin1))
+        try? document(Data(contentsOf: url)).text
     }
 
     /// When the file last changed on disk (a fresh URL, since a URL keeps what it has read).
@@ -535,7 +559,11 @@ enum TextFile {
 
     static func write(_ text: String, to url: URL) throws {
         try FileOps.refuseInArchive([url])
-        try text.write(to: url, atomically: true, encoding: .utf8)
+        let original = FileOps.exists(url) ? try document(Data(contentsOf: url)) : Document(text: "", encoding: .utf8, prefix: Data())
+        guard let encoded = text.data(using: original.encoding, allowLossyConversion: false) else {
+            throw OpError("The text cannot be saved in this file's original encoding.")
+        }
+        try (original.prefix + encoded).write(to: url, options: .atomic)
     }
 
     static func checkBeforeSaving(_ url: URL, saved: String?) -> Conflict {
@@ -582,7 +610,7 @@ final class MarkdownEditor: NSWindowController, NSWindowDelegate, NSTextViewDele
         }
         let text = TextFile.read(file)
         guard text != nil || unsaved != nil else {
-            FileOps.report(["Foldera can't read “\(file.lastPathComponent)” as text."])
+            FileOps.report(["Foldera can't safely identify the text encoding of “\(file.lastPathComponent)”. Convert a copy to UTF-8 or Unicode with a byte-order mark before editing."])
             return nil
         }
         let controller = MarkdownEditor(file: file, text: text)

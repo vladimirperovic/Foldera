@@ -290,19 +290,28 @@ final class FileItem {
 
     /// The items in `folder`. `step` is handed what has been read so far
     /// twice a second, so a slow disk shows the first before the rest.
-    static func contents(of folder: URL, showHidden: Bool, step: (([FileItem]) -> Void)? = nil) throws -> [FileItem] {
+    typealias Enumerator = (URL, [URLResourceKey], FileManager.DirectoryEnumerationOptions, @escaping (URL, Error) -> Bool) -> AnyIterator<URL>?
+
+    static func enumerate(_ folder: URL, keys: [URLResourceKey], options: FileManager.DirectoryEnumerationOptions,
+                          error: @escaping (URL, Error) -> Bool) -> AnyIterator<URL>? {
+        guard let walker = FileManager.default.enumerator(at: folder, includingPropertiesForKeys: keys,
+                                                          options: options, errorHandler: error) else { return nil }
+        return AnyIterator { walker.nextObject() as? URL }
+    }
+
+    static func contents(of folder: URL, showHidden: Bool, step: (([FileItem]) -> Void)? = nil,
+                         enumerate: Enumerator = FileItem.enumerate) throws -> [FileItem] {
         let foreign = UsageScanner.isForeign(folder)
         // On a foreign disk hidden is told from the name, so the walk isn't asked
         // to tell (it would look into every "._" file).
         var options: FileManager.DirectoryEnumerationOptions = [.skipsSubdirectoryDescendants]
         if !showHidden && !foreign { options.insert(.skipsHiddenFiles) }
-        var failed = false
-        guard let walker = FileManager.default.enumerator(
-            at: folder, includingPropertiesForKeys: foreign ? leanKeys : keys, options: options,
-            errorHandler: { _, _ in failed = true; return true }) else { throw CocoaError(.fileReadUnknown) }
+        var failure: Error?
+        guard let walker = enumerate(folder, foreign ? leanKeys : keys, options,
+                                     { _, error in failure = error; return false }) else { throw CocoaError(.fileReadUnknown) }
         var found: [FileItem] = []
         var told = Date()
-        while let url = walker.nextObject() as? URL {
+        while let url = walker.next() {
             let item = FileItem(url: url, foreign: foreign)
             if foreign && !showHidden && item.isHidden { continue }
             found.append(item)
@@ -311,10 +320,8 @@ final class FileItem {
                 step(found)
             }
         }
-        if failed && found.isEmpty {
-            // Not readable (no permission, gone): the error the list explains, as reading it whole gives it.
-            _ = try FileManager.default.contentsOfDirectory(at: folder, includingPropertiesForKeys: nil)
-        }
+        // A partial list is not a successful read, even when some entries arrived.
+        if let failure { throw failure }
         return found
     }
 

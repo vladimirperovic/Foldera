@@ -49,9 +49,11 @@ final class Transfer {
     /// folders, so merging is possible. `many`: more questions may follow.
     typealias Asker = (_ name: String, _ folders: Bool, _ many: Bool) -> (Clash, remember: Bool)
 
-    // MARK: Planning (main thread: it may ask questions)
+    // MARK: Planning (disk work on a worker; questions on the main thread)
 
-    static func plan(_ sources: [URL], into folder: URL, move: Bool, ask: Asker) -> Plan? {
+    static func plan(_ sources: [URL], into folder: URL, move: Bool, cancelled: CancelFlag = CancelFlag(),
+                     readDirectory: (URL) throws -> [URL] = { try FileManager.default.contentsOfDirectory(at: $0, includingPropertiesForKeys: nil) },
+                     ask: Asker) -> Plan? {
         var plan = Plan()
         var fileAnswer: Clash?
         var folderAnswer: Clash?
@@ -66,6 +68,7 @@ final class Transfer {
         }
 
         func visit(_ source: URL, into folder: URL, topLevel: Bool) -> Bool {
+            if cancelled.isSet { return false }
             let parent = source.deletingLastPathComponent()
             if topLevel && (parent.key == folder.key || FileOps.isSameItem(parent.resolvingSymlinksInPath(), folder.resolvingSymlinksInPath())) {
                 // Already here: moving does nothing, copying makes "name - Copy".
@@ -113,7 +116,7 @@ final class Transfer {
                 }
                 let children: [URL]
                 do {
-                    children = try FileManager.default.contentsOfDirectory(at: source, includingPropertiesForKeys: nil)
+                    children = try readDirectory(source)
                 } catch {
                     plan.problems.append("“\(source.lastPathComponent)”: \(error.localizedDescription)")
                     return true
@@ -129,7 +132,20 @@ final class Transfer {
         for source in sources {
             if !visit(source, into: folder, topLevel: true) { return nil }
         }
-        return plan
+        return cancelled.isSet ? nil : plan
+    }
+
+    static func planInBackground(_ sources: [URL], into folder: URL, move: Bool, cancelled: CancelFlag,
+                                readDirectory: @escaping (URL) throws -> [URL] = { try FileManager.default.contentsOfDirectory(at: $0, includingPropertiesForKeys: nil) },
+                                ask: @escaping Asker, done: @escaping (Plan?) -> Void) {
+        DispatchQueue.global(qos: .userInitiated).async {
+            let result = plan(sources, into: folder, move: move, cancelled: cancelled, readDirectory: readDirectory) { name, folders, many in
+                DispatchQueue.main.sync {
+                    cancelled.isSet ? (.stop, false) : ask(name, folders, many)
+                }
+            }
+            DispatchQueue.main.async { done(cancelled.isSet ? nil : result) }
+        }
     }
 
     /// The Windows questions, as alerts.

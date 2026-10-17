@@ -87,13 +87,14 @@ enum SyncLibrary {
         var conflicts = 0
         var failures: [String] = []
         var events: [Event] = []
+        var failureCount: Int? = nil
         var summary: String {
             switch status {
             case .needsReview:
                 let detail = conflicts > 0 ? " · \(conflicts) \(conflicts == 1 ? "conflict" : "conflicts")" : ""
                 return "Needs review\(detail) · \(copied) copied · \(deleted) deleted"
             case .cancelled: return "Stopped · \(copied) copied · \(deleted) deleted"
-            case .failed: return "\(failures.count) errors · \(copied) copied · \(deleted) deleted"
+            case .failed: return "\(failureCount ?? failures.count) errors · \(copied) copied · \(deleted) deleted"
             case .success: return copied + deleted == 0 ? "Already in sync" : "\(copied) copied · \(deleted) deleted"
             }
         }
@@ -155,20 +156,61 @@ enum SyncLibrary {
         DispatchQueue.main.async { NotificationCenter.default.post(name: changed, object: nil) }
     }
 
+    static let historyLimit = 500
+
+    private static func historyName(_ record: Record) -> String {
+        String(format: "%.3f", record.started.timeIntervalSince1970) + "-" + record.id.uuidString + ".json"
+    }
+
     static func append(_ record: Record) throws {
-        let history = folder.appendingPathComponent("History", isDirectory: true)
-        try FileManager.default.createDirectory(at: history, withIntermediateDirectories: true)
-        let name = String(format: "%.3f", record.started.timeIntervalSince1970) + "-" + record.id.uuidString + ".json"
-        try JSONEncoder().encode(record).write(to: history.appendingPathComponent(name), options: .atomic)
+        try locked {
+            let history = folder.appendingPathComponent("History", isDirectory: true)
+            let summaries = history.appendingPathComponent("Summaries", isDirectory: true)
+            try FileManager.default.createDirectory(at: summaries, withIntermediateDirectories: true)
+            let name = historyName(record)
+            try JSONEncoder().encode(record).write(to: history.appendingPathComponent(name), options: .atomic)
+            var summary = record
+            summary.events = []
+            summary.failureCount = record.failures.count
+            summary.failures = Array(record.failures.prefix(3))
+            try JSONEncoder().encode(summary).write(to: summaries.appendingPathComponent(name), options: .atomic)
+            // The same lock protects pruning against another process appending a run.
+            let files = try historyFiles()
+            for old in files.dropFirst(historyLimit) {
+                try FileManager.default.removeItem(at: old)
+                let small = summaries.appendingPathComponent(old.lastPathComponent)
+                if FileOps.exists(small) { try FileManager.default.removeItem(at: small) }
+            }
+        }
         DispatchQueue.main.async { NotificationCenter.default.post(name: changed, object: nil) }
     }
 
-    static func records(limit: Int = 200) throws -> [Record] {
+    private static func historyFiles() throws -> [URL] {
         let history = folder.appendingPathComponent("History", isDirectory: true)
         guard FileManager.default.fileExists(atPath: history.path) else { return [] }
-        let files = try FileManager.default.contentsOfDirectory(at: history, includingPropertiesForKeys: nil)
+        return try FileManager.default.contentsOfDirectory(at: history, includingPropertiesForKeys: nil)
             .filter { $0.pathExtension == "json" }.sorted { $0.lastPathComponent > $1.lastPathComponent }
-        return try files.prefix(limit).map { try JSONDecoder().decode(Record.self, from: Data(contentsOf: $0)) }
+    }
+
+    static func records(limit: Int = 200) throws -> [Record] {
+        try historyFiles().prefix(max(0, limit)).map { try JSONDecoder().decode(Record.self, from: Data(contentsOf: $0)) }
+    }
+
+    /// Old histories without sidecars remain readable; callers run this off the main thread.
+    static func summaries(limit: Int = 200) throws -> [Record] {
+        try historyFiles().prefix(max(0, limit)).map { file in
+            let small = file.deletingLastPathComponent().appendingPathComponent("Summaries/" + file.lastPathComponent)
+            var record = try JSONDecoder().decode(Record.self, from: Data(contentsOf: FileOps.exists(small) ? small : file))
+            record.events = []
+            record.failureCount = record.failureCount ?? record.failures.count
+            record.failures = Array(record.failures.prefix(3))
+            return record
+        }
+    }
+
+    static func record(_ summary: Record) throws -> Record {
+        let file = folder.appendingPathComponent("History/" + historyName(summary))
+        return try JSONDecoder().decode(Record.self, from: Data(contentsOf: file))
     }
 
     /// A process-wide file lock also prevents a manual run racing a scheduled run.

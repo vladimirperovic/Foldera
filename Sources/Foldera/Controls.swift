@@ -678,7 +678,7 @@ final class IconItem: NSCollectionViewItem {
         }) { [weak self] image in
             guard let self, self.key == item.key else { return }
             self.thumbnail = nil
-            self.show(image)
+            self.show(image ?? item.icon)
         }
     }
 }
@@ -692,6 +692,8 @@ final class IconItem: NSCollectionViewItem {
 /// PDFs, videos and the rest, and photos kept only in iCloud, are made by
 /// Quick Look. On the main thread.
 final class Thumbnails {
+    typealias Generator = (URL, Int, @escaping (NSImage?) -> Void) -> Void
+    private let generator: Generator?
     static let shared = Thumbnails()
     private let cache = NSCache<NSString, NSImage>()
 
@@ -707,7 +709,7 @@ final class Thumbnails {
     }
     private struct Waiting {
         let early: ((NSImage) -> Void)?
-        let done: (NSImage) -> Void
+        let done: (NSImage?) -> Void
     }
     /// A picture asked for again while it is being made isn't made twice.
     private var pending: [NSString: Pending] = [:]
@@ -751,7 +753,8 @@ final class Thumbnails {
     /// Bounded by memory, not count: a screenful of a contact sheet's pictures
     /// is about 40 MB, and scrolling back shouldn't make them all again. A
     /// thirty-second of the Mac's memory, between 96 and 512 MB.
-    init() {
+    init(generator: Generator? = nil) {
+        self.generator = generator
         let share = Int(clamping: ProcessInfo.processInfo.physicalMemory / 32)
         cache.totalCostLimit = min(max(share, 96 << 20), 512 << 20)
     }
@@ -765,7 +768,7 @@ final class Thumbnails {
     /// gets a rough picture to show meanwhile, when there is one.
     @discardableResult
     func image(for url: URL, side: CGFloat, scale: CGFloat, version: Date?,
-               early: ((NSImage) -> Void)? = nil, done: @escaping (NSImage) -> Void) -> Ticket? {
+               early: ((NSImage) -> Void)? = nil, done: @escaping (NSImage?) -> Void) -> Ticket? {
         let key = Self.cacheKey(for: url, side: side, scale: scale, version: version)
         if let image = cache.object(forKey: key) {
             done(image)
@@ -791,6 +794,12 @@ final class Thumbnails {
         if let rough = entry.early { early?(rough) }
         guard starting else { return ticket }
         let job = Job(url: url, side: side, scale: scale, key: key, id: entry.id, made: Made(pixels: pixels, version: stamp))
+        if let generator {
+            generator(url, pixels) { [weak self] image in
+                DispatchQueue.main.async { self?.finish(job, image, cost: pixels * pixels * 4) }
+            }
+            return ticket
+        }
         if Self.readsHere(url) { read(job) } else { quickLook(job) }
         return ticket
     }
@@ -832,9 +841,10 @@ final class Thumbnails {
     private func finish(_ job: Job, _ image: NSImage?, cost: Int) {
         guard let entry = pending[job.key], entry.id == job.id else { return }
         pending[job.key] = nil
-        guard let image else { return }
-        cache.setObject(image, forKey: job.key, cost: cost)
-        made[job.url.path, default: [:]][job.key] = job.made
+        if let image {
+            cache.setObject(image, forKey: job.key, cost: cost)
+            made[job.url.path, default: [:]][job.key] = job.made
+        }
         entry.waiting.values.forEach { $0.done(image) }
     }
 

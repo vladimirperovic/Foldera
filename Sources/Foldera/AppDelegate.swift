@@ -7,6 +7,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
     private var openedAtLaunch = false
 
     func applicationWillFinishLaunching(_ notification: Notification) {
+        if !CommandLine.arguments.contains("--snapshot") && !Self.anotherFolderaRunning {
+            // This must precede the open-file and reveal events delivered at launch.
+            try? ArchiveFolders.prepareForLaunch()
+        }
         // "Show in Finder" from other apps arrives as Finder's own reveal
         // event once Foldera is the default file viewer.
         NSAppleEventManager.shared().setEventHandler(
@@ -17,15 +21,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.mainMenu = MainMenu.build()
         let args = Array(CommandLine.arguments.dropFirst())
-        // Archives opened last time were unpacked into the cache; start clean,
-        // unless another Foldera is using that cache right now.
-        if !args.contains("--snapshot") && !Self.anotherFolderaRunning {
-            DispatchQueue.global(qos: .utility).async { ArchiveFolders.clear() }
-        }
         if let index = args.firstIndex(of: "--snapshot") {
             snapshot(Array(args[(index + 1)...]))
             return
         }
+        SyncAgent.refreshAtLaunch()
         for arg in args where !arg.hasPrefix("-") {
             let url = URL(fileURLWithPath: (arg as NSString).expandingTildeInPath)
             if FileOps.exists(url) { open(url, reveal: false) }

@@ -866,6 +866,7 @@ enum Sync {
             var now: [String: Pair] = [:]
             var sums: [String: String] = [:]
             var links: [String: String] = [:]
+            let exclusions = scan.leftSide.excluded.union(scan.rightSide.excluded)
             for (key, l) in scan.leftSide.items {
                 guard !scan.isBlocked(key), let r = scan.rightSide.items[key], scan.same(key, l, r) else { continue }
                 now[key] = Pair(left: l, right: r)
@@ -879,7 +880,8 @@ enum Sync {
                 }
             }
             for (key, pair) in items where now[key] == nil {
-                if scan.leftSide.items[key] != nil || scan.rightSide.items[key] != nil || scan.isBlocked(key) {
+                let excluded = exclusions.contains { key == $0 || key.hasPrefix($0 + "/") }
+                if scan.leftSide.items[key] != nil || scan.rightSide.items[key] != nil || scan.isBlocked(key) || excluded {
                     now[key] = pair
                     if let sum = hashes?[key] { sums[key] = sum }
                     if let target = targets?[key] { links[key] = target }
@@ -897,6 +899,14 @@ enum Sync {
     /// what goes in them; deletions last, deepest first. Whatever is
     /// replaced or deleted must still be as the compare found it, all the way down.
     final class Job {
+        /// Kept injectable to exercise a failed final rename after a successful copy.
+        var installReplacement: (URL, URL) throws -> Void = Job.moveExclusively
+
+        private static func moveExclusively(_ from: URL, _ to: URL) throws {
+            guard renamex_np(from.path, to.path, UInt32(RENAME_EXCL)) == 0 else {
+                throw OpError(String(cString: strerror(errno)))
+            }
+        }
         struct Outcome {
             var changes: [Change] = []
             var events: [SyncLibrary.Event] = []
@@ -1068,19 +1078,35 @@ enum Sync {
                 try? FileManager.default.removeItem(at: partial)
                 throw OpError(copier.errors.joined(separator: " "))
             }
+            let backup = target.deletingLastPathComponent().appendingPathComponent(".\(UUID().uuidString)\(Sync.partialSuffix)")
             do {
                 // Looked at again right before it goes: the copy may have taken a while.
                 try guardInside(target, onLeft: !toRight)
                 guard try unchanged(row, onLeft: !toRight, at: target) else { throw changed }
-                if let change = try remove(target) { outcome.changes.append(change) }
+                try Self.moveExclusively(target, backup)
             } catch {
                 try? FileManager.default.removeItem(at: partial)
                 throw error
             }
-            guard renamex_np(partial.path, target.path, UInt32(RENAME_EXCL)) == 0 else {
-                let problem = String(cString: strerror(errno))
-                outcome.changes.append(.created(partial))
-                throw OpError("The new version couldn't be put in place (\(problem)); it is in “\(partial.lastPathComponent)”.")
+            var installed = false
+            do {
+                try installReplacement(partial, target)
+                installed = true
+                // Even permanent deletion waits until the replacement is installed.
+                if case let .moved(_, trash)? = try remove(backup) {
+                    outcome.changes.append(.moved(from: target, to: trash))
+                }
+            } catch {
+                let failure = error
+                do {
+                    if installed { try Self.moveExclusively(target, partial) }
+                    try Self.moveExclusively(backup, target)
+                    try? FileManager.default.removeItem(at: partial)
+                } catch {
+                    // A competing writer must never be overwritten by rollback.
+                    throw OpError("Replacement failed (\(failure.localizedDescription)). The old version is preserved at \(backup.path); the new version is at \(FileOps.exists(partial) ? partial.path : target.path). Restoration failed: \(error.localizedDescription)")
+                }
+                throw failure
             }
             outcome.changes.append(.created(target))
             outcome.copied += 1

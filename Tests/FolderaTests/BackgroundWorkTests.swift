@@ -88,16 +88,16 @@ import Testing
         let lock = NSLock()
         var reads = 0, active = 0, peak = 0
         func counts() -> (reads: Int, active: Int, peak: Int) { lock.lock(); defer { lock.unlock() }; return (reads, active, peak) }
-        let original = ExplorerTab.readFolder
+        let original = ExplorerTab.readFolderInSteps
         ExplorerTab.readFolder = { url, hidden in
-            guard url.key == folder.key else { return try original(url, hidden) }
+            guard url.key == folder.key else { return try original(url, hidden, { _ in }) }
             lock.lock(); reads += 1; active += 1; peak = max(peak, active); lock.unlock()
             _ = gate.wait(timeout: .now() + 5)
             lock.lock(); active -= 1; lock.unlock()
-            return try original(url, hidden)
+            return try original(url, hidden, { _ in })
         }
         defer {
-            ExplorerTab.readFolder = original
+            ExplorerTab.readFolderInSteps = original
             for _ in 0..<8 { gate.signal() }
         }
 
@@ -133,13 +133,13 @@ import Testing
         try "b".write(to: slow.appendingPathComponent("b.txt"), atomically: true, encoding: .utf8)
         // A slow disk for the second folder only.
         let gate = DispatchSemaphore(value: 0)
-        let original = ExplorerTab.readFolder
+        let original = ExplorerTab.readFolderInSteps
         ExplorerTab.readFolder = { url, hidden in
             if url.key == slow.key { _ = gate.wait(timeout: .now() + 5) }
-            return try original(url, hidden)
+            return try original(url, hidden, { _ in })
         }
         defer {
-            ExplorerTab.readFolder = original
+            ExplorerTab.readFolderInSteps = original
             for _ in 0..<4 { gate.signal() }
         }
         func shows(_ name: String) -> Bool { tab.items.contains { $0.name == name } }
@@ -281,14 +281,14 @@ import Testing
         // From now on the disk is slow, and answers with what was there before.
         let before = tab.items.map(\.url)
         let gate = DispatchSemaphore(value: 0)
-        let original = ExplorerTab.readFolder
+        let original = ExplorerTab.readFolderInSteps
         ExplorerTab.readFolder = { url, hidden in
-            guard url.key == folder.key else { return try original(url, hidden) }
+            guard url.key == folder.key else { return try original(url, hidden, { _ in }) }
             _ = gate.wait(timeout: .now() + 5)
             return before.map { FileItem(url: $0) }
         }
         defer {
-            ExplorerTab.readFolder = original
+            ExplorerTab.readFolderInSteps = original
             for _ in 0..<4 { gate.signal() }
         }
 

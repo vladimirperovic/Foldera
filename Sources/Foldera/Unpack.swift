@@ -193,6 +193,17 @@ enum ArchiveFolders {
     static func clear() {
         try? FileManager.default.removeItem(at: root)
     }
+
+    /// Detach the previous cache before launch events can open an archive.
+    /// Deleting a large old cache may then continue without touching new work.
+    static func prepareForLaunch(at cache: URL = root, dispose: @escaping (URL) -> Void = { old in
+        DispatchQueue.global(qos: .utility).async { try? FileManager.default.removeItem(at: old) }
+    }) throws {
+        guard FileOps.exists(cache) else { return }
+        let old = cache.deletingLastPathComponent().appendingPathComponent("Archives-old-\(UUID().uuidString)")
+        try FileManager.default.moveItem(at: cache, to: old)
+        dispose(old)
+    }
 }
 
 /// The window side of unpacking: a progress window with Cancel, the password

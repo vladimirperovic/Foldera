@@ -97,6 +97,7 @@ enum SyncScheduler {
 }
 
 enum SyncAgent {
+    private static let refreshLock = NSLock()
     static let label = "com.vladimirperovic.foldera.sync"
     static var plistURL: URL {
         FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Library/LaunchAgents/\(label).plist")
@@ -109,13 +110,34 @@ enum SyncAgent {
     }
 
     static func refresh() throws {
+        refreshLock.lock()
+        defer { refreshLock.unlock() }
         guard Bundle.main.bundleIdentifier == "com.vladimirperovic.foldera",
               !CommandLine.arguments.contains("--snapshot"), let executable = Bundle.main.executableURL else {
             throw OpError("Configure schedules in the installed Foldera application.")
         }
+        let active = try SyncLibrary.profiles().contains { $0.schedule.frequency != .off }
+        try refresh(executable: executable, library: SyncLibrary.folder, plistURL: plistURL, active: active, launchctl: launchctl)
+    }
+
+    static func refreshAtLaunch() {
+        guard Bundle.main.bundleIdentifier == "com.vladimirperovic.foldera" else { return }
+        DispatchQueue.global(qos: .utility).async {
+            do { try refresh() }
+            catch { DispatchQueue.main.async { FileOps.report([error.localizedDescription]) } }
+        }
+    }
+
+    static func refresh(executable: URL, library: URL, plistURL: URL, active: Bool,
+                        launchctl: ([String]) -> (Int32, String)) throws {
+        if active {
+            let readOnly = try? executable.resourceValues(forKeys: [.volumeIsReadOnlyKey]).volumeIsReadOnly
+            guard !executable.resolvingSymlinksInPath().pathComponents.contains("AppTranslocation"), readOnly != true else {
+                throw OpError("Move Foldera to Applications and open it there before enabling background schedules.")
+            }
+        }
         let domain = "gui/\(getuid())"
         let service = "\(domain)/\(label)"
-        let active = try SyncLibrary.profiles().contains { $0.schedule.frequency != .off }
         let loaded = launchctl(["print", service]).0 == 0
         if !active {
             if loaded {
@@ -125,12 +147,12 @@ enum SyncAgent {
             if FileManager.default.fileExists(atPath: plistURL.path) { try FileManager.default.removeItem(at: plistURL) }
             return
         }
-        let data = try PropertyListSerialization.data(fromPropertyList: configuration(executable: executable, library: SyncLibrary.folder),
+        let data = try PropertyListSerialization.data(fromPropertyList: configuration(executable: executable, library: library),
                                                        format: .xml, options: 0)
         let previous = (try? Data(contentsOf: plistURL)).flatMap {
             try? PropertyListSerialization.propertyList(from: $0, options: [], format: nil) as? [String: Any]
         }
-        let changed = previous.map { !NSDictionary(dictionary: $0).isEqual(to: configuration(executable: executable, library: SyncLibrary.folder)) } ?? true
+        let changed = previous.map { !NSDictionary(dictionary: $0).isEqual(to: configuration(executable: executable, library: library)) } ?? true
         if changed {
             if loaded {
                 let result = launchctl(["bootout", service])

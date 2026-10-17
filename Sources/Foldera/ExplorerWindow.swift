@@ -70,7 +70,8 @@ final class ExplorerTab: NSViewController, NSSplitViewDelegate {
     /// Items taken off the list as they went to the Trash. A read begun
     /// before, or a slow disk's stale answer, that still has one leaves it
     /// out when it is no longer on the disk (one put back is shown again).
-    private var justRemoved: Set<String> = []
+    private var justRemoved: [String: Int] = [:]
+    private var removalGeneration = 0
     private var navigationGeneration = 0
     private var pendingRecentVisit = false
     var sortGeneration = 0
@@ -663,7 +664,7 @@ final class ExplorerTab: NSViewController, NSSplitViewDelegate {
             forwardStack.removeAll()
         }
         location = target
-        justRemoved = []
+        justRemoved = [:]
         cloudRefresh?.cancel()
         usageScanner?.cancel()
         measuring = nil
@@ -809,11 +810,11 @@ final class ExplorerTab: NSViewController, NSSplitViewDelegate {
             DispatchQueue.global(qos: .userInitiated).async { [weak self] in
                 let result = Result { () -> [FileItem] in
                     var found = try read(url, hidden) { soFar in
-                        let shown = soFar.filter { !ExplorerTab.isAmong($0, removed) }.sorted(by: order)
+                        let shown = soFar.sorted(by: order)
                         DispatchQueue.main.async { self?.showSoFar(shown, generation: generation) }
                     }
                     if !removed.isEmpty {
-                        found.removeAll { Self.isAmong($0, removed) && !FileManager.default.fileExists(atPath: $0.url.path) }
+                        found.removeAll { Self.isAmong($0, Set(removed.keys)) && !FileOps.exists($0.url) }
                     }
                     if let sizes { for item in found where item.isFolder && item.volume == nil { item.folderSize = sizes[item.name] } }
                     return found.sorted(by: order)
@@ -821,7 +822,11 @@ final class ExplorerTab: NSViewController, NSSplitViewDelegate {
                 DispatchQueue.main.async {
                     guard let self, generation == self.loadGeneration else { return }
                     switch result {
-                    case .success(let loaded): self.apply(loaded, error: nil, sortedBy: order, sized: sizes != nil)
+                    case .success(let loaded):
+                        // A removal after this read began wins over its stale snapshot.
+                        // Older tombstones were checked on disk above, so Undo can restore them.
+                        let newer = Set(self.justRemoved.compactMap { key, revision in removed[key] != revision ? key : nil })
+                        self.apply(loaded.filter { !Self.isAmong($0, newer) }, error: nil, sortedBy: order, sized: sizes != nil)
                     case .failure(let error): self.apply([], error: error)
                     }
                     self.folderReadFinished()
@@ -838,10 +843,12 @@ final class ExplorerTab: NSViewController, NSSplitViewDelegate {
     private func showSoFar(_ soFar: [FileItem], generation: Int) {
         guard generation == loadGeneration, waitingForFolder, renamingKey == nil, !isSearching, !soFar.isEmpty else { return }
         shownSoFar = generation
-        items = soFar
+        let selected = Set(selectedItems.map(\.key))
+        items = soFar.filter { !Self.isAmong($0, Set(justRemoved.keys)) }
         if shownMode != .usage {
             selectingQuietly = true
             reloadVisibleList()
+            select(keys: selected)
             selectingQuietly = false
         }
         updateEmptyState()
@@ -891,7 +898,8 @@ final class ExplorerTab: NSViewController, NSSplitViewDelegate {
     func drop(_ keys: Set<String>) {
         // Remembered even when a read got there first and the list no longer
         // has them: a stale answer after that would bring them back.
-        justRemoved.formUnion(keys)
+        removalGeneration += 1
+        for key in keys { justRemoved[key] = removalGeneration }
         guard items.contains(where: { keys.contains($0.key) }) else { return }
         // Disk usage takes its own out of the map; the lists catch up when shown.
         guard shownMode != .usage else {

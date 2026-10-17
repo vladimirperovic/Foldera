@@ -4,10 +4,11 @@ import Testing
 @testable import Foldera
 
 @Suite(.serialized) @MainActor struct Viewer {
-    private func eventually(_ message: String = "condition", _ condition: () -> Bool) async throws {
+    /// The message is put together when the wait is over, to say how things stood.
+    private func eventually(_ message: @autoclosure () -> String = "condition", _ condition: () -> Bool) async throws {
         let deadline = Date().addingTimeInterval(5)
         while !condition(), Date() < deadline { try await Task.sleep(for: .milliseconds(10)) }
-        #expect(condition(), Comment(rawValue: message))
+        #expect(condition(), Comment(rawValue: message()))
     }
 
     private func picture(_ url: URL, width: Int, height: Int) throws {
@@ -42,7 +43,10 @@ import Testing
 
         let tall = viewer.pictureArea.height
         viewer.clicked()
-        try await eventually("thumbnails") { !viewer.filmstrip.isHidden }
+        try await eventually("""
+            thumbnails: fit \(viewer.fitMode), \(viewer.magnification)×, \
+            double click \(NSEvent.doubleClickInterval) s
+            """) { !viewer.filmstrip.isHidden }
         #expect(viewer.pictureArea.height < tall) // The picture makes room for them.
         #expect(viewer.filmstrip.urls.count == 3)
         viewer.filmstrip.onPick?(2)

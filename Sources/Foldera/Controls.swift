@@ -473,7 +473,10 @@ struct IconGeometry: Equatable {
 }
 
 /// The large icons view's layout: a flow layout set out by IconGeometry for
-/// the width it has.
+/// the width it has. The flow asks the view's delegate for the sizes, which
+/// hands back this geometry (`geometry(of:)`). Set on the flow while it was
+/// laying out, they were taken only on a later pass, and tiles made at a
+/// narrower width kept that size.
 final class IconLayout: NSCollectionViewFlowLayout {
     /// The picture size from the slider.
     var side: CGFloat = 64 { didSet { if side != oldValue { invalidateLayout() } } }
@@ -488,15 +491,15 @@ final class IconLayout: NSCollectionViewFlowLayout {
         let width = view?.bounds.width ?? 0
         laidOutWidth = width
         let fresh = IconGeometry(side: side, width: width, scale: view?.window?.backingScaleFactor ?? 2)
-        // Each of these lays out again when set, so only when it changes.
-        if itemSize != fresh.tile { itemSize = fresh.tile }
-        if minimumInteritemSpacing != fresh.gap { minimumInteritemSpacing = fresh.gap }
-        if minimumLineSpacing != fresh.gap { minimumLineSpacing = fresh.gap }
-        if !NSEdgeInsetsEqual(sectionInset, fresh.insets) { sectionInset = fresh.insets }
-        super.prepare()
-        guard fresh != geometry else { return }
+        let changed = fresh != geometry
         geometry = fresh
-        onChange?(fresh)
+        super.prepare()
+        if changed { onChange?(fresh) }
+    }
+
+    /// For the view's delegate (NSCollectionViewDelegateFlowLayout).
+    static func geometry(of layout: NSCollectionViewLayout) -> IconGeometry {
+        (layout as? IconLayout)?.geometry ?? IconGeometry()
     }
 
     override func shouldInvalidateLayout(forBoundsChange newBounds: NSRect) -> Bool {
@@ -821,7 +824,7 @@ final class Thumbnails {
         }
         guard let source = CGImageSourceCreateWithURL(url as CFURL, [kCGImageSourceShouldCache: false] as CFDictionary),
               CGImageSourceGetCount(source) > 0 else { return .elsewhere }
-        guard let kept = ImageFiles.storedThumbnail(in: source, maxPixels: pixels) else { return .decode(rough: nil) }
+        guard let kept = ImageFiles.storedThumbnail(url, in: source, maxPixels: pixels) else { return .decode(rough: nil) }
         // Within a tenth of the tile, or the whole picture: the difference doesn't show.
         let across = CGFloat(max(kept.width, kept.height))
         let whole = ImageFiles.uprightSize(of: source).map { max($0.width, $0.height) } ?? .infinity

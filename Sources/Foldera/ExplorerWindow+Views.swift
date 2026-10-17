@@ -96,6 +96,29 @@ extension ExplorerTab: NSTableViewDataSource, NSTableViewDelegate {
     }
 }
 
+/// The sizes of the large icons, worked out by IconLayout for the width it has.
+extension ExplorerTab: NSCollectionViewDelegateFlowLayout {
+    func collectionView(_ collectionView: NSCollectionView, layout collectionViewLayout: NSCollectionViewLayout,
+                        sizeForItemAt indexPath: IndexPath) -> NSSize {
+        IconLayout.geometry(of: collectionViewLayout).tile
+    }
+
+    func collectionView(_ collectionView: NSCollectionView, layout collectionViewLayout: NSCollectionViewLayout,
+                        insetForSectionAt section: Int) -> NSEdgeInsets {
+        IconLayout.geometry(of: collectionViewLayout).insets
+    }
+
+    func collectionView(_ collectionView: NSCollectionView, layout collectionViewLayout: NSCollectionViewLayout,
+                        minimumInteritemSpacingForSectionAt section: Int) -> CGFloat {
+        IconLayout.geometry(of: collectionViewLayout).gap
+    }
+
+    func collectionView(_ collectionView: NSCollectionView, layout collectionViewLayout: NSCollectionViewLayout,
+                        minimumLineSpacingForSectionAt section: Int) -> CGFloat {
+        IconLayout.geometry(of: collectionViewLayout).gap
+    }
+}
+
 extension ExplorerTab: NSCollectionViewDataSource, NSCollectionViewDelegate {
     func collectionView(_ collectionView: NSCollectionView, numberOfItemsInSection section: Int) -> Int { items.count }
 

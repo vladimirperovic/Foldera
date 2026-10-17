@@ -92,9 +92,8 @@ enum ImageFiles {
     /// read from the first part of the file without decoding the photo, so it
     /// costs next to nothing even on a slow disk. Nil when there is none, or
     /// when its shape says it isn't of this photo. Safe off the main thread.
-    static func storedThumbnail(in source: CGImageSource, maxPixels: Int) -> CGImage? {
-        guard keepsThumbnails(source) else { return nil }
-        // Without either "from image" key, ImageIO hands back only a picture the file already has.
+    static func storedThumbnail(_ url: URL, in source: CGImageSource, maxPixels: Int) -> CGImage? {
+        guard keepsThumbnail(url, source) else { return nil }
         guard let stored = CGImageSourceCreateThumbnailAtIndex(source, 0, [
             kCGImageSourceCreateThumbnailWithTransform: true,
             kCGImageSourceShouldCacheImmediately: true,
@@ -107,16 +106,69 @@ enum ImageFiles {
     /// The same, as a picture to show, and nil when the file is not one ImageIO reads.
     static func storedThumbnail(_ url: URL, maxPixels: Int) -> NSImage? {
         guard let source = CGImageSourceCreateWithURL(url as CFURL, [kCGImageSourceShouldCache: false] as CFDictionary),
-              CGImageSourceGetCount(source) > 0, let stored = storedThumbnail(in: source, maxPixels: maxPixels) else { return nil }
+              CGImageSourceGetCount(source) > 0,
+              let stored = storedThumbnail(url, in: source, maxPixels: maxPixels) else { return nil }
         return NSImage(cgImage: stored, size: NSSize(width: stored.width, height: stored.height))
     }
 
-    /// Kinds of file that carry a picture of their own; asking the others only fills the log.
-    private static func keepsThumbnails(_ source: CGImageSource) -> Bool {
+    /// Whether the file carries a picture of its own. Asked for one a JPEG
+    /// doesn't have, ImageIO decodes the whole photo to make it, so a JPEG's
+    /// EXIF is looked at first; HEIC and RAW files always have theirs.
+    private static func keepsThumbnail(_ url: URL, _ source: CGImageSource) -> Bool {
         guard let found = CGImageSourceGetType(source) else { return false }
         let id = found as String
         guard let type = UTType(id) else { return false }
-        return [UTType.jpeg, .heic, .heif, .tiff, .rawImage].contains { type.conforms(to: $0) } || id == "public.mpo-image"
+        if type.conforms(to: .jpeg) || id == "public.mpo-image" { return jpegKeepsThumbnail(url) }
+        return [UTType.heic, .heif, .rawImage].contains { type.conforms(to: $0) }
+    }
+
+    /// Whether a JPEG's EXIF holds a thumbnail, read from the start of the file.
+    static func jpegKeepsThumbnail(_ url: URL) -> Bool {
+        guard let handle = try? FileHandle(forReadingFrom: url) else { return false }
+        defer { try? handle.close() }
+        // EXIF comes before the picture, in a segment of 64 KB at most.
+        guard let head = try? handle.read(upToCount: 128 * 1024) else { return false }
+        return jpegKeepsThumbnail(head)
+    }
+
+    static func jpegKeepsThumbnail(_ data: Data) -> Bool {
+        let bytes = [UInt8](data)
+        guard bytes.count > 4, bytes[0] == 0xFF, bytes[1] == 0xD8 else { return false }
+        var at = 2
+        while at + 4 <= bytes.count, bytes[at] == 0xFF {
+            let marker = bytes[at + 1]
+            // Fill bytes, and markers without a length.
+            if marker == 0xFF { at += 1; continue }
+            if marker == 0x01 || (0xD0...0xD7).contains(marker) { at += 2; continue }
+            // The picture itself starts: no EXIF before it.
+            if marker == 0xDA || marker == 0xD9 { return false }
+            let length = Int(bytes[at + 2]) << 8 | Int(bytes[at + 3])
+            guard length >= 2 else { return false }
+            let start = at + 4, end = min(at + 2 + length, bytes.count)
+            if marker == 0xE1, end - start > 14, Array(bytes[start..<start + 6]) == [0x45, 0x78, 0x69, 0x66, 0, 0] {
+                return exifKeepsThumbnail(Array(bytes[(start + 6)..<end]))
+            }
+            at += 2 + length
+        }
+        return false
+    }
+
+    /// EXIF is laid out as TIFF: the thumbnail is the second directory
+    /// (IFD1), with a pointer to its JPEG data (tag 0x201).
+    private static func exifKeepsThumbnail(_ tiff: [UInt8]) -> Bool {
+        guard tiff.count >= 8 else { return false }
+        let little = tiff[0] == 0x49 && tiff[1] == 0x49
+        guard little || (tiff[0] == 0x4D && tiff[1] == 0x4D) else { return false }
+        func number(_ at: Int, _ size: Int) -> Int? {
+            guard at >= 0, at + size <= tiff.count else { return nil }
+            let digits = tiff[at..<at + size].map(Int.init)
+            let ordered = little ? Array(digits.reversed()) : digits
+            return ordered.reduce(0) { $0 << 8 | $1 }
+        }
+        guard let first = number(4, 4), let entries = number(first, 2),
+              let second = number(first + 2 + entries * 12, 4), second > 0,
+              let count = number(second, 2) else { return false }
+        return (0..<count).contains { number(second + 2 + $0 * 12, 2) == 0x201 }
     }
 
     /// A thumbnail of another shape than its photo, as when a camera pads a

@@ -10,13 +10,20 @@ private func folder() throws -> URL {
     return url
 }
 
-/// A JPEG like a camera's: noise, which doesn't compress away, so it takes
-/// as long to decode as a photo, and a thumbnail kept inside.
+/// A JPEG like a camera's, with a thumbnail kept inside: noise drawn
+/// four times larger, soft detail that compresses about as a photo does.
 private func photo(_ url: URL, width: Int, height: Int, thumbnail: Bool = true, orientation: Int? = nil) throws {
+    let space = CGColorSpaceCreateDeviceRGB()
+    let info = CGImageAlphaInfo.noneSkipLast.rawValue
+    let grain = try #require(CGContext(data: nil, width: width / 4, height: height / 4, bitsPerComponent: 8, bytesPerRow: 0,
+                                       space: space, bitmapInfo: info))
+    let noise = try #require(grain.data)
+    arc4random_buf(noise, grain.bytesPerRow * grain.height)
+    let detail = try #require(grain.makeImage())
     let context = try #require(CGContext(data: nil, width: width, height: height, bitsPerComponent: 8, bytesPerRow: 0,
-                                         space: CGColorSpaceCreateDeviceRGB(), bitmapInfo: CGImageAlphaInfo.noneSkipLast.rawValue))
-    let pixels = try #require(context.data)
-    arc4random_buf(pixels, context.bytesPerRow * height)
+                                         space: space, bitmapInfo: info))
+    context.interpolationQuality = .high
+    context.draw(detail, in: CGRect(x: 0, y: 0, width: width, height: height))
     let image = try #require(context.makeImage())
     let destination = try #require(CGImageDestinationCreateWithURL(url as CFURL, "public.jpeg" as CFString, 1, nil))
     var properties: [CFString: Any] = [
@@ -59,32 +66,38 @@ private func source(_ url: URL) throws -> CGImageSource {
         let dir = try folder()
         defer { try? FileManager.default.removeItem(at: dir) }
         let kept = dir.appendingPathComponent("kept.jpg")
-        try photo(kept, width: 3000, height: 2000)
+        try photo(kept, width: 2400, height: 1600)
+        #expect(ImageFiles.jpegKeepsThumbnail(kept))
         let keptSource = try source(kept)
-        let thumbnail = try #require(ImageFiles.storedThumbnail(in: keptSource, maxPixels: 1024))
+        let thumbnail = try #require(ImageFiles.storedThumbnail(kept, in: keptSource, maxPixels: 1024))
         #expect(max(thumbnail.width, thumbnail.height) < 1024)
         #expect(abs(CGFloat(thumbnail.width) / CGFloat(thumbnail.height) - 1.5) < 0.05)
         #expect(ImageFiles.storedThumbnail(kept, maxPixels: 1024) != nil)
 
         // Taken with the camera on its side: the thumbnail stands up as the photo does.
         let turned = dir.appendingPathComponent("turned.jpg")
-        try photo(turned, width: 3000, height: 2000, orientation: 6)
+        try photo(turned, width: 2400, height: 1600, orientation: 6)
         let turnedSource = try source(turned)
-        let upright = try #require(ImageFiles.storedThumbnail(in: turnedSource, maxPixels: 1024))
+        let upright = try #require(ImageFiles.storedThumbnail(turned, in: turnedSource, maxPixels: 1024))
         #expect(upright.height > upright.width)
 
-        // A file without one has none to give; asking doesn't decode the photo.
+        // A file without one has none to give: ImageIO would decode the photo to make one.
         let bare = dir.appendingPathComponent("bare.jpg")
-        try photo(bare, width: 3000, height: 2000, thumbnail: false)
+        try photo(bare, width: 2400, height: 1600, thumbnail: false)
+        #expect(!ImageFiles.jpegKeepsThumbnail(bare))
         let bareSource = try source(bare)
-        #expect(ImageFiles.storedThumbnail(in: bareSource, maxPixels: 1024) == nil)
+        #expect(ImageFiles.storedThumbnail(bare, in: bareSource, maxPixels: 1024) == nil)
+        // Nor does a file that isn't a JPEG at all, or one cut short.
+        #expect(!ImageFiles.jpegKeepsThumbnail(Data("not a picture".utf8)))
+        let start = try Data(contentsOf: kept).prefix(40)
+        #expect(!ImageFiles.jpegKeepsThumbnail(start))
     }
 
     @Test func aSmallTileTakesTheKeptThumbnailAndALargeOneDecodesThePhoto() throws {
         let dir = try folder()
         defer { try? FileManager.default.removeItem(at: dir) }
         let url = dir.appendingPathComponent("photo.jpg")
-        try photo(url, width: 3000, height: 2000)
+        try photo(url, width: 2400, height: 1600)
 
         guard case .enough(let small) = Thumbnails.peek(url, pixels: 64) else {
             Issue.record("a 64-pixel tile should take the thumbnail the file keeps")
@@ -105,7 +118,7 @@ private func source(_ url: URL) throws -> CGImageSource {
         let dir = try folder()
         defer { try? FileManager.default.removeItem(at: dir) }
         let url = dir.appendingPathComponent("photo.jpg")
-        try photo(url, width: 3000, height: 2000)
+        try photo(url, width: 2400, height: 1600)
         var events: [String] = []
         var made: NSImage?
         Thumbnails.shared.image(for: url, side: 400, scale: 2, version: Date(), early: { _ in events.append("rough") }) {
@@ -170,6 +183,18 @@ private func source(_ url: URL) throws -> CGImageSource {
         // Far apart, so a busy machine doesn't make this flaky.
         #expect(kept.reduce(0, +) * 3 < decoded.reduce(0, +), "kept \(kept) ms, decoded \(decoded) ms")
 
+        // Why a JPEG's EXIF is looked at first: asked for a thumbnail one doesn't keep, ImageIO makes it from the photo.
+        let bare = dir.appendingPathComponent("bare.jpg")
+        try photo(bare, width: 4000, height: 3000, thumbnail: false)
+        let bareSource = try source(bare)
+        var unaskedFor: CGImage?
+        let unasked = milliseconds {
+            unaskedFor = CGImageSourceCreateThumbnailAtIndex(bareSource, 0, [
+                kCGImageSourceThumbnailMaxPixelSize: 256, kCGImageSourceShouldCacheImmediately: true,
+            ] as CFDictionary)
+        }
+        let looked = milliseconds { _ = ImageFiles.jpegKeepsThumbnail(bare) }
+
         // Quick Look, each photo once (it remembers what it made), for comparison only.
         var quickLook: [Double] = []
         for url in urls {
@@ -189,7 +214,8 @@ private func source(_ url: URL) throws -> CGImageSource {
         print("""
             Thumbnails of 12 MP JPEGs, ms each. Kept in the file: \(listed(kept)). \
             Decoded to 256 px: \(listed(decoded)). Quick Look at 128 pt: \(quickLook.isEmpty ? "unavailable" : listed(quickLook)). \
-            Whole photo decoded: \(listed([whole])).
+            Whole photo decoded: \(listed([whole])). Without a kept thumbnail, ImageIO gave \
+            \(unaskedFor.map { "\($0.width)×\($0.height)" } ?? "none") in \(listed([unasked])); looking at the EXIF took \(listed([looked])).
             """)
     }
 }

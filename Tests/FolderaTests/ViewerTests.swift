@@ -6,6 +6,7 @@ import Testing
 @Suite(.serialized) @MainActor struct Viewer {
     /// The message is put together when the wait is over, to say how things stood.
     private func eventually(_ message: @autoclosure () -> String = "condition", _ condition: () -> Bool) async throws {
+        Awake.hold()
         let deadline = Date().addingTimeInterval(5)
         while !condition(), Date() < deadline { try await Task.sleep(for: .milliseconds(10)) }
         #expect(condition(), Comment(rawValue: message()))

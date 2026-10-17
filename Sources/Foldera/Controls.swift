@@ -474,9 +474,7 @@ struct IconGeometry: Equatable {
 
 /// The large icons view's layout: a flow layout set out by IconGeometry for
 /// the width it has. The flow asks the view's delegate for the sizes, which
-/// hands back this geometry (`geometry(of:)`). Set on the flow while it was
-/// laying out, they were taken only on a later pass, and tiles made at a
-/// narrower width kept that size.
+/// hands back this geometry (`geometry(of:)`).
 final class IconLayout: NSCollectionViewFlowLayout {
     /// The picture size from the slider.
     var side: CGFloat = 64 { didSet { if side != oldValue { invalidateLayout() } } }
@@ -504,6 +502,18 @@ final class IconLayout: NSCollectionViewFlowLayout {
 
     override func shouldInvalidateLayout(forBoundsChange newBounds: NSRect) -> Bool {
         newBounds.width != laidOutWidth || super.shouldInvalidateLayout(forBoundsChange: newBounds)
+    }
+
+    /// Another width means other tiles. Left to itself, the flow only spreads
+    /// the sizes it already has across the new width: tiles made while the
+    /// view was narrow (still hidden, say) stayed 40 points wide in rows of 819.
+    override func invalidationContext(forBoundsChange newBounds: NSRect) -> NSCollectionViewLayoutInvalidationContext {
+        let context = super.invalidationContext(forBoundsChange: newBounds)
+        if newBounds.width != laidOutWidth, let flow = context as? NSCollectionViewFlowLayoutInvalidationContext {
+            flow.invalidateFlowLayoutDelegateMetrics = true
+            flow.invalidateFlowLayoutAttributes = true
+        }
+        return context
     }
 }
 

@@ -44,6 +44,7 @@ private func source(_ url: URL) throws -> CGImageSource {
 /// size, and a size already made standing in for another.
 @Suite(.serialized) @MainActor struct FastPictures {
     private func eventually(_ message: String = "condition", _ condition: () -> Bool) async throws {
+        Awake.hold()
         let deadline = Date().addingTimeInterval(10)
         while !condition(), Date() < deadline { try await Task.sleep(for: .milliseconds(10)) }
         #expect(condition(), Comment(rawValue: message))

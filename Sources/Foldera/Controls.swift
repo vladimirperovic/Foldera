@@ -642,6 +642,15 @@ final class IconItem: NSCollectionViewItem {
         }
     }
 
+    /// A photo's tile while its thumbnail is made: a quiet frame rather than
+    /// the file's icon, so scrolling doesn't show rows of document icons
+    /// turning into pictures. Drawn when shown, in light or dark.
+    static let waiting = NSImage(size: NSSize(width: 160, height: 120), flipped: false) { rect in
+        NSColor.quaternaryLabelColor.setFill()
+        NSBezierPath(roundedRect: rect.insetBy(dx: 4, dy: 4), xRadius: 6, yRadius: 6).fill()
+        return true
+    }
+
     /// The tile went out of sight (or is shown for another file): its thumbnail is no longer wanted.
     func stopThumbnail() {
         if let thumbnail { Thumbnails.shared.cancel(thumbnail) }
@@ -657,7 +666,7 @@ final class IconItem: NSCollectionViewItem {
         let coming = thumbnail != nil && thumbnail?.key == wanted
         if !coming { stopThumbnail() }
         key = item.key
-        if !coming { show(item.icon) }
+        if !coming { show(!item.isFolder && Thumbnails.readsHere(item.url) ? Self.waiting : item.icon) }
         picture.alphaValue = dimmed || item.isHidden ? 0.45 : 1
         label.stringValue = item.name
         background.toolTip = geometry.names ? nil : item.name
@@ -789,6 +798,11 @@ final class Thumbnails {
     /// Any picture made of the file so far, for the viewer to show while it reads the photo.
     func anyPicture(of url: URL) -> NSImage? {
         largest(url, version: nil)?.image
+    }
+
+    /// The picture for this size, if it is made already.
+    func ready(for url: URL, side: CGFloat, scale: CGFloat, version: Date?) -> NSImage? {
+        cache.object(forKey: Self.cacheKey(for: url, side: side, scale: scale, version: version))
     }
 
     /// The largest picture of the file made so far, of this version unless any will do.

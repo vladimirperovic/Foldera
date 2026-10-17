@@ -216,6 +216,39 @@ enum ImageFiles {
         return Loaded(image: image, pixels: loaded.pixels.map(swap), full: loaded.full.map(swap))
     }
 
+    /// The picture itself at full size, turned as it is shown, as TIFF for
+    /// the clipboard: what an editor, a document or a message pastes. Nil for
+    /// what ImageIO doesn't read (SVG). Safe off the main thread.
+    static func clipboardPicture(_ url: URL, quarterTurns: Int) -> Data? {
+        // Without a largest size, the "thumbnail" is the whole picture, stood up by its orientation.
+        guard let source = CGImageSourceCreateWithURL(url as CFURL, [kCGImageSourceShouldCache: false] as CFDictionary),
+              CGImageSourceGetCount(source) > 0,
+              let picture = CGImageSourceCreateThumbnailAtIndex(source, 0, [
+                  kCGImageSourceCreateThumbnailFromImageAlways: true,
+                  kCGImageSourceCreateThumbnailWithTransform: true,
+                  kCGImageSourceShouldCacheImmediately: true,
+              ] as CFDictionary),
+              let shown = turned(picture, quarterTurns: quarterTurns) else { return nil }
+        return NSBitmapImageRep(cgImage: shown).tiffRepresentation
+    }
+
+    /// A bitmap turned by quarters, to the right for positive turns, as R does.
+    static func turned(_ image: CGImage, quarterTurns: Int) -> CGImage? {
+        let turns = ((quarterTurns % 4) + 4) % 4
+        guard turns != 0 else { return image }
+        let width = CGFloat(image.width), height = CGFloat(image.height)
+        let size = turns % 2 == 1 ? CGSize(width: height, height: width) : CGSize(width: width, height: height)
+        let space = image.colorSpace.flatMap { $0.model == .rgb ? $0 : nil } ?? CGColorSpaceCreateDeviceRGB()
+        guard let context = CGContext(data: nil, width: Int(size.width), height: Int(size.height), bitsPerComponent: 8,
+                                      bytesPerRow: 0, space: space, bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue) else {
+            return nil
+        }
+        context.translateBy(x: size.width / 2, y: size.height / 2)
+        context.rotate(by: -CGFloat(turns) * .pi / 2)
+        context.draw(image, in: CGRect(x: -width / 2, y: -height / 2, width: width, height: height))
+        return context.makeImage()
+    }
+
     /// Name, size, and what the camera wrote down.
     static func details(_ url: URL, pixels: NSSize?) -> [(String, String)] {
         var rows: [(String, String)] = [("Name", url.lastPathComponent), ("Folder", Format.path(url.deletingLastPathComponent()))]
@@ -329,13 +362,7 @@ final class ViewerCanvas: NSImageView {
     private var dragged = false
 
     override func menu(for event: NSEvent) -> NSMenu? {
-        guard let viewer else { return nil }
-        let menu = NSMenu()
-        let copy = NSMenuItem(title: "Copy text from image", action: #selector(ImageViewer.copyTextFromImage(_:)), keyEquivalent: "")
-        copy.target = viewer
-        copy.image = NSImage(systemSymbolName: "text.viewfinder", accessibilityDescription: nil)
-        menu.addItem(copy)
-        return menu
+        viewer?.pictureMenu()
     }
 
     override func mouseDown(with event: NSEvent) {
@@ -407,6 +434,10 @@ final class ImageViewer: NSWindowController, NSWindowDelegate, NSMenuItemValidat
     /// The rough picture shown while the right one decodes.
     private static let previews = BackgroundTask.queue("Foldera.image-previews")
     private let rough = BackgroundTask(queue: ImageViewer.previews)
+    /// Copy image: the whole picture read for the clipboard.
+    private let copying = BackgroundTask(queue: ImageViewer.previews)
+    /// Behind the menu's Share item, which works only while its picker lives.
+    private var sharePicker: NSSharingServicePicker?
     /// Which way the pages are turning (1 or −1), to read ahead that way.
     private var heading = 1
     /// True while the full-resolution picture is being decoded for zooming in.
@@ -427,6 +458,11 @@ final class ImageViewer: NSWindowController, NSWindowDelegate, NSMenuItemValidat
     private let fullScreenButton = ToolButton(symbol: "arrow.up.left.and.arrow.down.right", label: "Full screen",
                                               tip: "Full screen (F)", iconSize: 13)
     private let thumbnailsButton = ToolButton(symbol: "film", tip: "Thumbnails (T)", iconSize: 13)
+    private let copyButton = ToolButton(symbol: "doc.on.doc", tip: "Copy the file (⌘C), the picture itself (⌥⌘C), its path (⇧⌘C) or its text",
+                                        dropdown: true, iconSize: 13)
+    private let moreButton = ToolButton(symbol: "ellipsis.circle",
+                                        tip: "More: share, open with, show in Foldera or Finder, desktop picture… (or right-click the picture)",
+                                        iconSize: 13)
     let filmstrip = Filmstrip()
     private var scrollBottom: NSLayoutConstraint?
     private var barBottom: NSLayoutConstraint?
@@ -528,6 +564,10 @@ final class ImageViewer: NSWindowController, NSWindowDelegate, NSMenuItemValidat
         fullScreenButton.action = #selector(toggleFullScreen(_:))
         thumbnailsButton.target = self
         thumbnailsButton.action = #selector(toggleThumbnails(_:))
+        copyButton.target = self
+        copyButton.action = #selector(showCopyMenu(_:))
+        moreButton.target = self
+        moreButton.action = #selector(showPictureMenu(_:))
         let views: [NSView] = [
             button("chevron.left", "Previous (←)", #selector(previous(_:))),
             button("chevron.right", "Next (→)", #selector(next(_:))),
@@ -542,8 +582,10 @@ final class ImageViewer: NSWindowController, NSWindowDelegate, NSMenuItemValidat
             thumbnailsButton,
             playButton,
             fullScreenButton,
+            copyButton,
             button("arrow.up.forward.app", "Open in the default app (E)", #selector(openExternally(_:))),
-            button("trash", "Move to Trash (Delete)", #selector(delete(_:))),
+            button("trash", "Move to Trash (⌦ or ⌘⌫)", #selector(delete(_:))),
+            moreButton,
         ]
         let row = NSStackView(views: views)
         row.orientation = .horizontal
@@ -885,6 +927,8 @@ final class ImageViewer: NSWindowController, NSWindowDelegate, NSMenuItemValidat
     private func updateLabels() {
         guard let url = current else { return }
         nameLabel.stringValue = url.lastPathComponent
+        nameLabel.toolTip = Format.path(url)
+        metaLabel.toolTip = "Picture in the folder, pixel size, file size and zoom"
         var parts = ["\(index + 1) / \(urls.count)"]
         if let pixels = shown?.full { parts.append("\(Int(pixels.width)) × \(Int(pixels.height))") }
         if let size = try? url.resourceValues(forKeys: [.fileSizeKey]).fileSize { parts.append(Format.bytes(Int64(size))) }
@@ -961,14 +1005,182 @@ final class ImageViewer: NSWindowController, NSWindowDelegate, NSMenuItemValidat
         if let url = current { FileClipboard.shared.put([url], cut: false) }
     }
 
+    @objc func copyImage(_ sender: Any?) {
+        copyImage(to: .general)
+    }
+
+    /// The picture itself, full size and turned as shown; read in the background, as a big one takes a moment.
+    func copyImage(to pasteboard: NSPasteboard, done: (() -> Void)? = nil) {
+        guard let url = current else { return }
+        let turns = turns
+        copying.run({ ImageFiles.clipboardPicture(url, quarterTurns: turns) }) { data in
+            pasteboard.clearContents()
+            if let data {
+                pasteboard.setData(data, forType: .tiff)
+            } else if let vector = NSImage(contentsOf: url) {
+                pasteboard.writeObjects([vector])
+            } else {
+                NSSound.beep()
+            }
+            done?()
+        }
+    }
+
+    @objc func copyPath(_ sender: Any?) {
+        if let url = current { FileOps.copyPaths([url]) }
+    }
+
     @objc func copyTextFromImage(_ sender: Any?) {
         guard let current, let window else { return }
         ImageTextCopy.start(current, in: window)
     }
 
+    @objc func showInFoldera(_ sender: Any?) {
+        guard let url = current else { return }
+        (NSApp.delegate as? AppDelegate)?.openWindow(.folder(url.deletingLastPathComponent()), select: [url])
+    }
+
+    @objc func showInFinder(_ sender: Any?) {
+        if let url = current { FileOps.showInFinder([url]) }
+    }
+
+    @objc func setAsDesktopPicture(_ sender: Any?) {
+        guard let url = current else { return }
+        do {
+            for screen in NSScreen.screens { try NSWorkspace.shared.setDesktopImageURL(url, for: screen, options: [:]) }
+        } catch {
+            if let window { NSAlert(error: error).beginSheetModal(for: window) }
+        }
+    }
+
+    @objc private func openWithApp(_ sender: NSMenuItem) {
+        guard let url = current, let app = sender.representedObject as? URL else { return }
+        NSWorkspace.shared.open([url], withApplicationAt: app, configuration: NSWorkspace.OpenConfiguration())
+    }
+
     func validateMenuItem(_ menuItem: NSMenuItem) -> Bool {
         if menuItem.action == #selector(copyTextFromImage(_:)) { return current != nil && window?.attachedSheet == nil }
-        return true
+        return current != nil
+    }
+
+    // MARK: The picture's menu
+
+    private func command(_ title: String, _ symbol: String, _ action: Selector, _ key: String = "",
+                         _ mods: NSEvent.ModifierFlags = [], tip: String) -> NSMenuItem {
+        let item = NSMenuItem(title: title, action: action, keyEquivalent: key)
+        item.keyEquivalentModifierMask = mods
+        item.target = self
+        item.image = NSImage(systemSymbolName: symbol, accessibilityDescription: nil)
+        item.toolTip = tip
+        return item
+    }
+
+    /// The ways to copy, in the picture's menu and under the tool bar's Copy button.
+    private func copyCommands() -> [NSMenuItem] {
+        [
+            command("Copy", "doc.on.doc", #selector(copy(_:)), "c", .command,
+                    tip: "Copy the file, to paste into a folder, a message or a mail"),
+            command("Copy image", "photo.on.rectangle", #selector(copyImage(_:)), "c", [.command, .option],
+                    tip: "Copy the picture itself, full size and turned as shown, to paste into an editor or a document"),
+            command("Copy as path", "link", #selector(copyPath(_:)), "c", [.command, .shift],
+                    tip: "Copy where the file is, as text"),
+            command("Copy text from image", "text.viewfinder", #selector(copyTextFromImage(_:)),
+                    tip: "Read the text in the picture, on this Mac, and copy it"),
+        ]
+    }
+
+    func copyMenu() -> NSMenu {
+        let menu = NSMenu()
+        copyCommands().forEach(menu.addItem)
+        return menu
+    }
+
+    @objc func showCopyMenu(_ sender: Any?) {
+        copyButton.popUp(copyMenu())
+    }
+
+    @objc func showPictureMenu(_ sender: Any?) {
+        moreButton.popUp(pictureMenu())
+    }
+
+    /// A right-click on the picture: everything there is to do with it, each
+    /// command saying in its tooltip what it does, with its key.
+    func pictureMenu() -> NSMenu {
+        let menu = NSMenu()
+        func add(_ title: String, _ symbol: String, _ action: Selector, _ key: String = "",
+                 _ mods: NSEvent.ModifierFlags = [], tip: String) {
+            menu.addItem(command(title, symbol, action, key, mods, tip: tip))
+        }
+        let full = window?.styleMask.contains(.fullScreen) == true
+        copyCommands().forEach(menu.addItem)
+        if let url = current {
+            let picker = NSSharingServicePicker(items: [url])
+            sharePicker = picker
+            let share = picker.standardShareMenuItem
+            share.toolTip = "Send the file by AirDrop, Messages, Mail…"
+            menu.addItem(share)
+        }
+        menu.addItem(.separator())
+        add("Open in default app", "arrow.up.forward.app", #selector(openExternally(_:)), "e",
+            tip: "Open the file in the app pictures like it open in (E)")
+        if let url = current {
+            let openWith = NSMenuItem(title: "Open with", action: nil, keyEquivalent: "")
+            openWith.image = NSImage(systemSymbolName: "square.grid.2x2", accessibilityDescription: nil)
+            openWith.toolTip = "Open the file in another app, as in Photoshop to edit it"
+            openWith.submenu = openWithMenu(for: url)
+            menu.addItem(openWith)
+        }
+        add("Show in Foldera", "folder", #selector(showInFoldera(_:)),
+            tip: "Open the picture's folder in a Foldera window, with the picture selected")
+        add("Show in Finder", "macwindow", #selector(showInFinder(_:)),
+            tip: "Show the picture in Finder")
+        menu.addItem(.separator())
+        add("Rotate left", "rotate.left", #selector(rotateLeft(_:)), "l",
+            tip: "Turn the picture a quarter to the left, on screen only; the file stays as it is (L)")
+        add("Rotate right", "rotate.right", #selector(rotateRight(_:)), "r",
+            tip: "Turn the picture a quarter to the right, on screen only; the file stays as it is (R)")
+        add("Fit to window", "arrow.down.right.and.arrow.up.left", #selector(fit(_:)), "0",
+            tip: "Show the whole picture, as large as the window allows (0)")
+        add("Actual size", "1.magnifyingglass", #selector(actualSize(_:)), "1",
+            tip: "One pixel of the picture on one pixel of the screen (1)")
+        menu.addItem(.separator())
+        add(infoPanel.isHidden ? "Show information" : "Hide information", "info.circle", #selector(toggleInfo(_:)), "i",
+            tip: "Size, camera, lens, exposure and where it was taken (I)")
+        add(filmstrip.isHidden ? "Show thumbnails" : "Hide thumbnails", "film", #selector(toggleThumbnails(_:)), "t",
+            tip: "The folder's pictures along the bottom; click one to show it (T)")
+        add(slideshow == nil ? "Start slideshow" : "Stop slideshow", slideshow == nil ? "play" : "pause",
+            #selector(toggleSlideshow(_:)), "s", tip: "The next picture every 3 seconds, starting over at the end (S)")
+        add(full ? "Exit full screen" : "Full screen",
+            full ? "arrow.down.right.and.arrow.up.left" : "arrow.up.left.and.arrow.down.right",
+            #selector(toggleFullScreen(_:)), "f", tip: "The picture over the whole screen (F, Enter or a double click)")
+        menu.addItem(.separator())
+        add("Set as desktop picture", "menubar.dock.rectangle", #selector(setAsDesktopPicture(_:)),
+            tip: "Use this picture as the desktop picture on every screen")
+        add("Move to Trash", "trash", #selector(delete(_:)), "\u{8}", .command,
+            tip: "Move the picture to the Trash and show the next one; ⌘Z brings it back (⌦)")
+        return menu
+    }
+
+    private func openWithMenu(for url: URL) -> NSMenu {
+        let menu = NSMenu()
+        let preferred = NSWorkspace.shared.urlForApplication(toOpen: url)
+        var apps = NSWorkspace.shared.urlsForApplications(toOpen: url)
+        if let preferred {
+            apps.removeAll { $0 == preferred }
+            apps.insert(preferred, at: 0)
+        }
+        for (i, app) in apps.prefix(30).enumerated() {
+            var title = FileManager.default.displayName(atPath: app.path)
+            if i == 0 && preferred != nil { title += " (default)" }
+            let item = NSMenuItem(title: title, action: #selector(openWithApp(_:)), keyEquivalent: "")
+            item.target = self
+            item.representedObject = app
+            item.image = menuIcon(NSWorkspace.shared.icon(forFile: app.path))
+            item.toolTip = "Open “\(url.lastPathComponent)” in \(title)"
+            menu.addItem(item)
+            if i == 0 && preferred != nil && apps.count > 1 { menu.addItem(.separator()) }
+        }
+        return menu
     }
 
     /// Delete: to the Trash, and on to the next picture.

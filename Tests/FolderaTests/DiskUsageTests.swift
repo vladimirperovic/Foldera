@@ -52,4 +52,39 @@ import Testing
         #expect(tree.size == before - movie.size)
         #expect(tree.find(root.appendingPathComponent("big/inner"))?.children.isEmpty == true)
     }
+
+    /// An exFAT disk (or FAT, or a share) is measured without asking for what
+    /// lives in "._" files there: the same tree, packages known by their names.
+    @Test func aForeignDiskIsMeasuredTheSameWithoutTheExtraQuestions() throws {
+        let fm = FileManager.default
+        let root = fm.temporaryDirectory.appendingPathComponent("FolderaForeign-\(UUID().uuidString)")
+        defer { try? fm.removeItem(at: root) }
+        try fm.createDirectory(at: root.appendingPathComponent("big"), withIntermediateDirectories: true)
+        try fm.createDirectory(at: root.appendingPathComponent("Tool.app/Contents"), withIntermediateDirectories: true)
+        try Data(count: 2 * 1024 * 1024).write(to: root.appendingPathComponent("big/movie.mov"))
+        try Data(count: 4096).write(to: root.appendingPathComponent("Tool.app/Contents/Info.plist"))
+        try Data(count: 4096).write(to: root.appendingPathComponent("notes.txt"))
+        #expect(!UsageScanner.isForeign(root)) // The temporary folder is on APFS.
+
+        let native = try #require(UsageScanner().scan(root, foreign: false))
+        let scanner = UsageScanner()
+        let foreign = try #require(scanner.scan(root, foreign: true))
+        #expect(foreign.files == native.files && foreign.files == 3)
+        #expect(foreign.children.map(\.name) == native.children.map(\.name))
+        #expect(foreign.size >= 2 * 1024 * 1024)
+        #expect(foreign.find(root.appendingPathComponent("Tool.app"))?.isPackage == true)
+        #expect(foreign.find(root.appendingPathComponent("big"))?.isPackage == false)
+        // Done: the status line has the whole count, and no folder being read.
+        #expect(scanner.progress.files == 3 && scanner.progress.folder == nil)
+    }
+
+    @Test func theStatusLineSaysWhichFolderASlowDiskIsOn() {
+        let now = Date()
+        var progress = UsageScanner.Progress(files: 9500, bytes: Int64(94) << 30,
+                                             folder: URL(fileURLWithPath: "/Volumes/MOODBOARD/_katalog"), since: now)
+        #expect(progress.note(now: now).hasPrefix("Measuring… "))
+        #expect(!progress.note(now: now).contains("reading"))
+        progress.since = now.addingTimeInterval(-12)
+        #expect(progress.note(now: now).hasSuffix(" · reading “_katalog” (12 s)"))
+    }
 }

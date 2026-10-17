@@ -1,4 +1,5 @@
 import AppKit
+import UniformTypeIdentifiers
 
 /// A folder or file in a disk-usage scan, sized by what it takes on disk.
 final class UsageNode {
@@ -120,9 +121,66 @@ final class UsageScanner {
 
     func cancel() { cancelled.set() }
 
-    func scan(_ root: URL, progress: ((Int, Int64) -> Void)? = nil) -> UsageNode? {
-        let keys: [URLResourceKey] = [.isDirectoryKey, .isSymbolicLinkKey, .isPackageKey, .isVolumeKey,
-                                      .totalFileAllocatedSizeKey, .fileAllocatedSizeKey]
+    /// How far a scan has got, for the status line.
+    struct Progress {
+        var files = 0
+        var bytes: Int64 = 0
+        /// The folder being read, and since when: a slow disk can keep one for long.
+        var folder: URL?
+        var since = Date()
+
+        /// "Measuring… 9,512 files, 94.4 GB", and the folder, once it has taken a while.
+        func note(now: Date = Date()) -> String {
+            var note = "Measuring… \(Format.count(Int64(files))) files, \(Format.bytes(bytes))"
+            let waited = Int(now.timeIntervalSince(since))
+            if let folder, waited >= 3 { note += " · reading “\(folder.lastPathComponent)” (\(waited) s)" }
+            return note
+        }
+    }
+
+    private let lock = NSLock()
+    private var reached = Progress()
+
+    /// Read from the main thread while the scan runs.
+    var progress: Progress {
+        lock.lock()
+        defer { lock.unlock() }
+        return reached
+    }
+
+    private func update(_ change: (inout Progress) -> Void) {
+        lock.lock()
+        change(&reached)
+        lock.unlock()
+    }
+
+    /// Whether `root` is on a disk without macOS's own file metadata (exFAT,
+    /// FAT, network shares). There, a resource fork's size or whether a folder
+    /// is a package lives in the "._" file kept beside each item: asking means
+    /// finding that file, and on an exFAT disk run through FSKit each search
+    /// is a trip to the disk. Such a disk is measured by its files' data
+    /// alone (the "._" files are counted as files of their own), and packages
+    /// are known by their extension.
+    static func isForeign(_ root: URL) -> Bool {
+        guard let type = (try? root.resourceValues(forKeys: [.volumeTypeNameKey]))?.volumeTypeName?.lowercased() else {
+            return false
+        }
+        return !["apfs", "hfs"].contains(type)
+    }
+
+    /// Asked as a folder's: an extension alone is looked up as a file's (public.data), where "app" is nothing.
+    static func isPackageName(_ url: URL) -> Bool {
+        !url.pathExtension.isEmpty
+            && UTType(filenameExtension: url.pathExtension, conformingTo: .directory)?.conforms(to: .package) == true
+    }
+
+    /// `foreign` is worked out from the disk when not given.
+    func scan(_ root: URL, foreign: Bool? = nil) -> UsageNode? {
+        let foreign = foreign ?? Self.isForeign(root)
+        let keys: [URLResourceKey] = foreign
+            ? [.isDirectoryKey, .isSymbolicLinkKey, .isVolumeKey, .fileAllocatedSizeKey, .fileSizeKey]
+            : [.isDirectoryKey, .isSymbolicLinkKey, .isPackageKey, .isVolumeKey,
+               .totalFileAllocatedSizeKey, .fileAllocatedSizeKey]
         let rootPath = root.standardizedFileURL.path
         let top = UsageNode(url: root, name: FileManager.default.displayName(atPath: rootPath), isFolder: true, kind: .folders)
         var folders: [String: UsageNode] = [rootPath: top]
@@ -142,13 +200,19 @@ final class UsageScanner {
         }
         var count = 0
         var bytes: Int64 = 0
-        var reported = Date()
         var kindByExtension: [String: SearchFilters.Kind?] = [:]
         let keySet = Set(keys)
+        update { $0 = Progress(folder: root, since: Date()) }
+        // The folder the walk is in, as the status line was last told.
+        var shown = top
         while let url = walker.nextObject() as? URL {
             if cancelled.isSet { return nil }
             let path = url.path
             guard let parent = folders[(path as NSString).deletingLastPathComponent] else { continue }
+            if parent !== shown {
+                shown = parent
+                update { $0.folder = parent.url; $0.since = Date() }
+            }
             guard let values = try? url.resourceValues(forKeys: keySet) else {
                 parent.unreadable += 1
                 walker.skipDescendants()
@@ -159,14 +223,17 @@ final class UsageScanner {
                     walker.skipDescendants()
                     continue
                 }
-                let package = values.isPackage == true
+                let package = foreign ? Self.isPackageName(url) : values.isPackage == true
                 let node = UsageNode(url: url, name: url.lastPathComponent, isFolder: true, isPackage: package,
                                      kind: package ? SearchFilters.kind(ofFile: url) ?? .apps : .folders)
                 node.parent = parent
                 parent.children.append(node)
                 folders[path] = node
+                // The walk goes into it next, and may wait there for the disk.
+                shown = node
+                update { $0.folder = url; $0.since = Date() }
             } else {
-                let size = Int64(values.totalFileAllocatedSize ?? values.fileAllocatedSize ?? 0)
+                let size = Int64(values.totalFileAllocatedSize ?? values.fileAllocatedSize ?? values.fileSize ?? 0)
                 count += 1
                 bytes += size
                 if size >= Self.ownBlockFrom {
@@ -184,12 +251,10 @@ final class UsageScanner {
                     }
                     parent.addSmall(size, kind: kind)
                 }
-                if let progress, count % 500 == 0, Date().timeIntervalSince(reported) > 0.2 {
-                    reported = Date()
-                    progress(count, bytes)
-                }
+                if count % 50 == 0 { update { $0.files = count; $0.bytes = bytes } }
             }
         }
+        update { $0.files = count; $0.bytes = bytes; $0.folder = nil }
         for url in failed {
             // As the walk spells paths (standardizing would drop a /private the walk kept).
             let path = url.path

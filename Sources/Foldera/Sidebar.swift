@@ -356,7 +356,10 @@ final class Sidebar: NSObject, NSOutlineViewDataSource, NSOutlineViewDelegate {
         // mounting anything; look there when it changes and when Foldera
         // comes to the front (in case the folder itself was only just made).
         cloudWatcher.onChange = { [weak self] in self?.placesChanged() }
-        cloudWatcher.watch(FileOps.exists(Places.cloudStorage) ? Places.cloudStorage : nil)
+        cloudWatcher.watch(FileOps.exists(Places.cloudStorage) ? Places.cloudStorage : nil) { [weak self] in
+            guard let self else { return }
+            self.reload(self.locations)
+        }
         NotificationCenter.default.addObserver(self, selector: #selector(placesChanged), name: NSApplication.didBecomeActiveNotification, object: nil)
     }
 
@@ -399,6 +402,27 @@ final class Sidebar: NSObject, NSOutlineViewDataSource, NSOutlineViewDelegate {
     /// Directory reads, including pinned/network locations, stay off the UI
     /// thread. Keep node identities so open branches survive a refresh.
     private func load(_ node: SidebarNode) {
+        guard !stopped, !node.loading, !node.watcher.isOpening, node.isExpandable, node.kind != .network else { return }
+        if let url = node.url, !node.isFile, node.watcher.isIdle {
+            let generation = node.generation
+            node.watcher.onChange = { [weak self, weak node] in
+                guard let self, let node else { return }
+                self.reload(node)
+            }
+            node.watcher.watch(url) { [weak self, weak node] in
+                guard let self, let node else { return }
+                guard node.generation == generation else {
+                    if self.outline.isItemExpanded(node) { self.load(node) }
+                    return
+                }
+                self.read(node)
+            }
+        } else {
+            read(node)
+        }
+    }
+
+    private func read(_ node: SidebarNode) {
         guard !stopped, !node.loading, node.isExpandable, node.kind != .network else { return }
         node.loading = true
         let generation = node.generation
@@ -486,7 +510,11 @@ final class Sidebar: NSObject, NSOutlineViewDataSource, NSOutlineViewDelegate {
     @objc private func placesChanged() {
         guard !stopped else { return }
         if cloudWatcher.isIdle, FileOps.exists(Places.cloudStorage) {
-            cloudWatcher.watch(Places.cloudStorage)
+            cloudWatcher.watch(Places.cloudStorage) { [weak self] in
+                guard let self else { return }
+                self.reload(self.locations)
+            }
+            return
         }
         reload(locations)
     }
@@ -613,12 +641,6 @@ final class Sidebar: NSObject, NSOutlineViewDataSource, NSOutlineViewDelegate {
     func outlineViewItemDidExpand(_ notification: Notification) {
         guard !stopped, let node = notification.userInfo?["NSObject"] as? SidebarNode else { return }
         if node.needsReload { load(node) }
-        guard let url = node.url, !node.isFile else { return }
-        node.watcher.onChange = { [weak self, weak node] in
-            guard let self, let node else { return }
-            self.reload(node)
-        }
-        if node.watcher.isIdle { node.watcher.watch(url) }
     }
 
     func outlineViewItemDidCollapse(_ notification: Notification) {

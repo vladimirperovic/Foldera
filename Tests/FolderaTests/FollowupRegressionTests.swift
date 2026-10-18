@@ -224,6 +224,7 @@ extension BackgroundWork {
         let tab = ExplorerTab(location: .folder(folder.url))
         defer { tab.watcher.stop() }
         try await followupEventually { tab.items.count == 4 }
+        tab.setViewMode(.details)
         tab.watcher.stop()
         let meter = FollowupReads(), original = ExplorerTab.readFolderInSteps
         ExplorerTab.readFolderInSteps = { url, hidden, step in
@@ -334,7 +335,7 @@ extension BackgroundWork {
         strip.isHidden = true
         completions[0](NSImage(size: NSSize(width: 84, height: 84)))
         try await Task.sleep(for: .milliseconds(100))
-        #expect(service.ready(for: url, side: Filmstrip.side, scale: window.backingScaleFactor, version: nil) == nil)
+        #expect(service.anyPicture(of: url) == nil)
         strip.isHidden = false
         strip.layoutSubtreeIfNeeded()
         try await followupEventually { completions.count == 2 }
@@ -352,15 +353,14 @@ extension BackgroundWork {
         defer { strip.urls = []; window.close() }
         strip.urls = [url]
         strip.layoutSubtreeIfNeeded()
-        let scale = window.backingScaleFactor
         try await Task.sleep(for: .milliseconds(750))
-        let hiddenImage = Thumbnails.shared.ready(for: url, side: Filmstrip.side, scale: scale, version: nil)
+        let hiddenImage = Thumbnails.shared.anyPicture(of: url)
         print("FOLLOWUP filmstrip: generated while hidden=\(hiddenImage != nil)")
         #expect(hiddenImage == nil)
         strip.isHidden = false
         strip.current = 0
         strip.layoutSubtreeIfNeeded()
-        try await followupEventually { Thumbnails.shared.ready(for: url, side: Filmstrip.side, scale: scale, version: nil) != nil }
+        try await followupEventually { Thumbnails.shared.anyPicture(of: url) != nil }
     }
 }
 

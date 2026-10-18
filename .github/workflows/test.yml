@@ -41,9 +41,9 @@ jobs:
           mkfile 128m "$RUNNER_TEMP/foldera-exfat.img"
           device=$(hdiutil attach -nomount -imagekey diskimage-class=CRawDiskImage "$RUNNER_TEMP/foldera-exfat.img" | awk '/^\/dev\/disk/ {print $1; exit}')
           test -n "$device"
-          sudo newfs_exfat -v FolderaExFAT "$device"
+          sudo newfs_exfat -v FXTEST "$device"
           diskutil mount "$device"
-          echo "FOLDERA_EXFAT_VOLUME=/Volumes/FolderaExFAT" >> "$GITHUB_ENV"
+          echo "FOLDERA_EXFAT_VOLUME=/Volumes/FXTEST" >> "$GITHUB_ENV"
       - name: A second, case-sensitive volume
         # For the tests that move across drives and rename on a drive that tells case apart.
         run: |
@@ -91,7 +91,7 @@ jobs:
           codesign --verify --deep --strict build/Foldera.app
       - name: Preview window snapshots
         id: previews
-        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        if: ${{ !cancelled() && success() && steps.build.outcome == 'success' }}
         timeout-minutes: 3
         run: |
           mkdir -p "$RUNNER_TEMP/preview-fixture" "$RUNNER_TEMP/preview-snapshots"

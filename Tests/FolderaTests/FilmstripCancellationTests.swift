@@ -27,7 +27,7 @@ extension FollowupFilmstrip {
         #expect(!grid.visibleItems().isEmpty)
         strip.isHidden = true
         try await Task.sleep(for: .milliseconds(1000))
-        let cached = Thumbnails.shared.ready(for: url, side: Filmstrip.side, scale: window.backingScaleFactor, version: nil)
+        let cached = Thumbnails.shared.anyPicture(of: url)
         print("FOLLOWUP filmstrip: pending thumbnail published after hiding=\(cached != nil)")
         #expect(cached == nil)
     }

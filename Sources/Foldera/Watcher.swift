@@ -13,9 +13,12 @@ final class DirectoryWatcher {
 
     var isIdle: Bool { source == nil && !opening }
 
-    func watch(_ url: URL?) {
+    /// With `ready`, the first read starts after the watch is armed, closing
+    /// the observation gap without a second unconditional directory walk.
+    /// Existing callers that already started reading need that catch-up.
+    func watch(_ url: URL?, ready: (() -> Void)? = nil) {
         stop()
-        guard let url else { return }
+        guard let url else { ready?(); return }
         opening = true
         let generation = self.generation
         let task = BlockOperation()
@@ -29,11 +32,9 @@ final class DirectoryWatcher {
                 }
                 self.opening = false
                 self.openTask = nil
-                guard fd >= 0 else { return }
+                guard fd >= 0 else { ready?(); return }
                 self.install(fd)
-                // Re-read after arming the watch: changes during the open
-                // must not be missed on a slow volume.
-                self.changed()
+                if let ready { ready() } else { self.changed() }
             }
         }
         openTask = task

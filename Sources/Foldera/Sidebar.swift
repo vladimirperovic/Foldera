@@ -526,7 +526,13 @@ final class Sidebar: NSObject, NSOutlineViewDataSource, NSOutlineViewDelegate {
             }
             // Open the deepest folder in sight that holds it. Its subfolders
             // may take a moment to read; when they come, load() shows it again.
-            guard revealing == location, let holder = deepestHolder(of: location), !outline.isItemExpanded(holder) else { break }
+            guard revealing == location, let holder = deepestHolder(of: location) else { break }
+            if outline.isItemExpanded(holder) {
+                // Finished reading the deepest ancestor, but the target is
+                // absent (hidden, removed or unreadable). This reveal is over.
+                if !holder.loading && !holder.needsReload { revealing = nil }
+                break
+            }
             outline.expandItem(holder)
             if holder.children == nil || holder.needsReload { break }
         }
@@ -617,6 +623,7 @@ final class Sidebar: NSObject, NSOutlineViewDataSource, NSOutlineViewDelegate {
 
     func outlineViewItemDidCollapse(_ notification: Notification) {
         guard let node = notification.userInfo?["NSObject"] as? SidebarNode else { return }
+        if !syncing { revealing = nil }
         func stop(_ node: SidebarNode) {
             node.invalidate()
             node.watcher.stop()

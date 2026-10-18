@@ -48,3 +48,29 @@ final class BackgroundTask {
 
     deinit { operation?.cancel() }
 }
+
+/// A burst of main-thread events gets one pass over the latest state. Unlike
+/// a debounce, continuous scrolling cannot postpone work indefinitely.
+final class CoalescedTask {
+    private let delay: TimeInterval
+    private let action: () -> Void
+    private var pending: DispatchWorkItem?
+
+    init(delay: TimeInterval, action: @escaping () -> Void) {
+        self.delay = delay
+        self.action = action
+    }
+
+    func request() {
+        guard pending == nil else { return }
+        let work = DispatchWorkItem { [weak self] in
+            self?.pending = nil
+            self?.action()
+        }
+        pending = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: work)
+    }
+
+    func cancel() { pending?.cancel(); pending = nil }
+    deinit { pending?.cancel() }
+}

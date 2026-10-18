@@ -104,7 +104,7 @@ extension ExplorerTab: NSMenuItemValidation {
         }
     }
 
-    private func isPicture(_ item: FileItem) -> Bool { !item.isFolder && ImageFiles.isImage(item.url) }
+    private func isPicture(_ item: FileItem) -> Bool { !item.isFolder && item.isImage }
 
     /// One picture opens with the list's other pictures around it, in the
     /// order they are listed; several selected pictures open on their own.
@@ -311,7 +311,7 @@ extension ExplorerTab: NSMenuItemValidation {
     }
 
     /// After a delete: what failed to go stays on screen.
-    private func removed(_ chosen: [FileItem], only removedURLs: [URL]) {
+    func removed(_ chosen: [FileItem], only removedURLs: [URL]) {
         let keys = Set(removedURLs.map(\.key))
         let gone = chosen.filter { keys.contains($0.key) }
         guard !gone.isEmpty else { return }
@@ -328,7 +328,7 @@ extension ExplorerTab: NSMenuItemValidation {
         pendingSelection = next.map { [$0] } ?? []
         // Off the list at once; the folder is read again behind, to catch up with anything else.
         drop(Set(gone.map(\.key)))
-        if !isSearching { reload() }
+        if !isSearching { reloadForChange() }
     }
 
     @objc func delete(_ sender: Any?) {
@@ -427,17 +427,9 @@ extension ExplorerTab: NSMenuItemValidation {
         guard selectedItems.count == 1, let item = selectedItems.first, isPicture(item) else { return NSSound.beep() }
         let url = item.url
         DispatchQueue.global(qos: .userInitiated).async {
-            let data = ImageFiles.clipboardPicture(url, quarterTurns: 0)
+            let data = ImageFiles.clipboardData(url, quarterTurns: 0)
             DispatchQueue.main.async {
-                let pasteboard = NSPasteboard.general
-                pasteboard.clearContents()
-                if let data {
-                    pasteboard.setData(data, forType: .tiff)
-                } else if let vector = NSImage(contentsOf: url) {
-                    pasteboard.writeObjects([vector])
-                } else {
-                    NSSound.beep()
-                }
+                if !ImageFiles.writeClipboard(data, to: .general) { NSSound.beep() }
             }
         }
     }

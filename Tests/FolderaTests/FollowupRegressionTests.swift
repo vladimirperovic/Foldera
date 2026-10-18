@@ -1,6 +1,7 @@
 import AppKit
 import ImageIO
 import Testing
+import UniformTypeIdentifiers
 @testable import Foldera
 
 private final class FollowupFolder {
@@ -62,7 +63,80 @@ private func iconFile(_ ext: String, in folder: URL) throws -> URL {
     return url
 }
 
+private final class FollowupReads {
+    private let lock = NSLock()
+    private var reads = 0, active = 0, peak = 0
+    func start() { lock.lock(); reads += 1; active += 1; peak = max(peak, active); lock.unlock() }
+    func finish() { lock.lock(); active -= 1; lock.unlock() }
+    var counts: (reads: Int, active: Int, peak: Int) {
+        lock.lock(); defer { lock.unlock() }; return (reads, active, peak)
+    }
+}
+
 @Suite(.serialized) struct FollowupImages {
+    @Test func jpegInspectionAndDecodeShareOneOpenAndCloudFilesStayUnopened() throws {
+        let folder = try FollowupFolder(), url = folder.url.appendingPathComponent("camera.jpg")
+        let png = try iconPNG(640)
+        let source = try #require(CGImageSourceCreateWithData(png as CFData, nil))
+        let destination = try #require(CGImageDestinationCreateWithURL(url as CFURL, "public.jpeg" as CFString, 1, nil))
+        CGImageDestinationAddImage(destination, try #require(CGImageSourceCreateImageAtIndex(source, 0, nil)),
+                                  [kCGImageDestinationEmbedThumbnail: true] as CFDictionary)
+        #expect(CGImageDestinationFinalize(destination))
+        var opens = 0, queries = 0, early = 0
+        let image = Thumbnails.photo(url, pixels: 512, isCloudOnly: false,
+            downloadStatus: { _ in queries += 1; return false },
+            openSource: { url in ThumbnailSource(url, openFile: { opens += 1; return open($0, O_RDONLY) }) },
+            early: { _ in early += 1 })
+        #expect(image?.width == 512)
+        #expect(opens == 1 && queries == 0 && early == 1)
+        let cloud = Thumbnails.photo(url, pixels: 512,
+            downloadStatus: { _ in queries += 1; return true },
+            openSource: { _ in opens += 1; return nil })
+        #expect(cloud == nil && queries == 1 && opens == 1)
+    }
+
+    @Test func thumbnailSourceClosesItsDescriptorOnSuccessAndInvalidInput() throws {
+        let folder = try FollowupFolder(), valid = folder.url.appendingPathComponent("image.png")
+        try iconPNG(32).write(to: valid)
+        let invalid = try folder.file("broken.jpg")
+        for url in [valid, invalid] {
+            var descriptor: Int32 = -1
+            autoreleasepool {
+                let source = ThumbnailSource(url, openFile: { descriptor = open($0, O_RDONLY); return descriptor })
+                if url == valid { #expect(source != nil); _ = source.map { Thumbnails.decode($0.image, pixels: 16) } }
+                else { #expect(source == nil) }
+            }
+            #expect(fcntl(descriptor, F_GETFD) == -1 && errno == EBADF)
+        }
+    }
+
+    @Test func progressSnapshotsOwnTheirMutableDisplayStateAndKeepMetadata() throws {
+        let folder = try FollowupFolder(), url = try folder.file("photo.jpg")
+        let original = FileItem(url: url)
+        original.tags = ["Red"]
+        let snapshot = FileItem(snapshot: original, folderSize: 12)
+        try FileManager.default.removeItem(at: url)
+        original.folderSize = 99
+        original.tags = ["Blue"]
+        #expect(snapshot !== original && snapshot.key == original.key)
+        #expect(snapshot.folderSize == 12 && snapshot.tags == ["Red"])
+        #expect(snapshot.isImage && original.isImage)
+        #expect(snapshot.size == original.size && snapshot.modified == original.modified)
+    }
+
+    @Test @MainActor func failedClipboardPreparationPreservesEveryExistingType() throws {
+        let board = NSPasteboard.withUniqueName()
+        defer { board.releaseGlobally() }
+        let custom = NSPasteboard.PasteboardType("app.foldera.regression")
+        board.setString("keep this text", forType: .string)
+        board.setData(Data([1, 2, 3]), forType: custom)
+        let revision = board.changeCount
+        let missing = URL(fileURLWithPath: "/nonexistent/\(UUID().uuidString).png")
+        #expect(!ImageFiles.writeClipboard(ImageFiles.clipboardData(missing, quarterTurns: 0), to: board))
+        #expect(board.changeCount == revision)
+        #expect(board.string(forType: .string) == "keep this text")
+        #expect(board.data(forType: custom) == Data([1, 2, 3]))
+    }
     @Test(arguments: ["ico", "icns"])
     func multiResolutionIconsUseAnImageLargeEnoughForTheTile(ext: String) throws {
         let folder = try FollowupFolder(), url = try iconFile(ext, in: folder.url)
@@ -93,6 +167,123 @@ private func iconFile(_ ext: String, in folder: URL) throws -> URL {
 }
 
 extension BackgroundWork {
+    @Test func aPublishedProgressBatchIsIndependentOfTheReaderUntilItsFinalResult() async throws {
+        _ = NSApplication.shared
+        let first = try FollowupFolder(), slow = try FollowupFolder()
+        try first.file("first.txt")
+        let child = slow.url.appendingPathComponent("child")
+        try FileManager.default.createDirectory(at: child, withIntermediateDirectories: true)
+        let gate = DispatchSemaphore(value: 0), original = ExplorerTab.readFolderInSteps
+        let tab = ExplorerTab(location: .folder(first.url))
+        defer { tab.watcher.stop(); ExplorerTab.readFolderInSteps = original; gate.signal() }
+        try await followupEventually { tab.items.count == 1 }
+        ExplorerTab.readFolderInSteps = { url, hidden, step in
+            guard url.key == slow.url.key else { return try original(url, hidden, step) }
+            let all = try original(url, hidden, { _ in })
+            Thread.sleep(forTimeInterval: 0.25)
+            step(all)
+            _ = gate.wait(timeout: .now() + 10)
+            for item in all { item.folderSize = 12345 }
+            return all
+        }
+        tab.navigate(to: .folder(slow.url))
+        try await followupEventually { tab.waitingForFolder && tab.items.first?.name == "child" }
+        let published = try #require(tab.items.first)
+        let sizeBefore = published.folderSize
+        gate.signal()
+        try await followupEventually { !tab.waitingForFolder }
+        #expect(tab.items.first !== published)
+        #expect(published.folderSize == sizeBefore)
+    }
+
+    @Test func openingAQuietFolderReadsItOnceAndTheArmedWatchCatchesLaterWrites() async throws {
+        _ = NSApplication.shared
+        let folder = try FollowupFolder()
+        try folder.file("first.txt")
+        let meter = FollowupReads(), original = ExplorerTab.readFolderInSteps
+        ExplorerTab.readFolderInSteps = { url, hidden, step in
+            guard url.key == folder.url.key else { return try original(url, hidden, step) }
+            meter.start(); defer { meter.finish() }
+            return try original(url, hidden, step)
+        }
+        defer { ExplorerTab.readFolderInSteps = original }
+        let tab = ExplorerTab(location: .folder(folder.url))
+        defer { tab.watcher.stop() }
+        try await followupEventually { tab.items.count == 1 }
+        try await Task.sleep(for: .milliseconds(750))
+        #expect(meter.counts.reads == 1)
+        try folder.file("second.txt")
+        try await followupEventually { tab.items.count == 2 }
+        #expect(meter.counts.reads == 2 && meter.counts.peak == 1)
+    }
+
+    @Test func successiveDeleteCompletionsShareOneRead() async throws {
+        _ = NSApplication.shared
+        let folder = try FollowupFolder()
+        for i in 0..<4 { try folder.file("\(i).txt") }
+        let tab = ExplorerTab(location: .folder(folder.url))
+        defer { tab.watcher.stop() }
+        try await followupEventually { tab.items.count == 4 }
+        tab.watcher.stop()
+        let meter = FollowupReads(), original = ExplorerTab.readFolderInSteps
+        ExplorerTab.readFolderInSteps = { url, hidden, step in
+            guard url.key == folder.url.key else { return try original(url, hidden, step) }
+            meter.start(); defer { meter.finish() }
+            Thread.sleep(forTimeInterval: 0.2)
+            return try original(url, hidden, step)
+        }
+        defer { ExplorerTab.readFolderInSteps = original }
+        for item in Array(tab.items.prefix(3)) {
+            try FileManager.default.removeItem(at: item.url)
+            tab.removed([item], only: [item.url])
+        }
+        #expect(tab.items.count == 1)
+        #expect(meter.counts.reads == 0)
+        try await followupEventually { meter.counts.reads > 0 && meter.counts.active == 0 }
+        try await Task.sleep(for: .milliseconds(400))
+        #expect(meter.counts.reads == 1 && meter.counts.peak == 1)
+        #expect(tab.items.count == 1)
+    }
+
+    @Test func anUnrevealableFolderDoesNotReopenACollapsedBranch() async throws {
+        _ = NSApplication.shared
+        let folder = try FollowupFolder()
+        let outer = folder.url.appendingPathComponent("Projects")
+        try FileManager.default.createDirectory(at: outer, withIntermediateDirectories: true)
+        let hidden = outer.appendingPathComponent(".hidden")
+        try FileManager.default.createDirectory(at: hidden, withIntermediateDirectories: true)
+        let pins = UserDefaults.standard.object(forKey: "pinned")
+        Pins.urls = [folder.url]
+        defer { UserDefaults.standard.set(pins, forKey: "pinned"); NotificationCenter.default.post(name: .explorerPinsChanged, object: nil) }
+        let sidebar = Sidebar(), outline = sidebar.outline
+        defer { sidebar.stop() }
+        func node(_ url: URL) -> SidebarNode? {
+            (0..<outline.numberOfRows).compactMap { outline.item(atRow: $0) as? SidebarNode }.first { $0.url?.key == url.key }
+        }
+        sidebar.sync(to: .folder(hidden))
+        try await followupEventually { node(outer).map { outline.isItemExpanded($0) && !$0.loading } == true }
+        let ancestor = try #require(node(outer))
+        outline.collapseItem(ancestor)
+        sidebar.refresh()
+        try await Task.sleep(for: .milliseconds(750))
+        #expect(!outline.isItemExpanded(ancestor))
+    }
+
+    @Test func scrollBurstsUseTheLatestViewportAndCancellationStopsAPendingPass() async throws {
+        var position = 0, visited: [Int] = []
+        let task = CoalescedTask(delay: 0.05) { visited.append(position) }
+        for i in 0..<200 { position = i; task.request() }
+        #expect(visited.isEmpty)
+        try await followupEventually { !visited.isEmpty }
+        #expect(visited == [199])
+        position = 300
+        task.request()
+        try await followupEventually { visited.count == 2 }
+        #expect(visited == [199, 300])
+        task.request(); task.cancel()
+        try await Task.sleep(for: .milliseconds(100))
+        #expect(visited.count == 2)
+    }
     @Test func deletingAnotherFileDoesNotEndAnInlineRename() async throws {
         _ = NSApplication.shared
         let folder = try FollowupFolder()
@@ -125,6 +316,29 @@ extension BackgroundWork {
 }
 
 @Suite(.serialized) @MainActor struct FollowupFilmstrip {
+    @Test func hidingCancelsPendingThumbnailsAndShowingRestartsThem() async throws {
+        _ = NSApplication.shared
+        var completions: [(NSImage?) -> Void] = []
+        let service = Thumbnails(generator: { _, _, done in completions.append(done) })
+        let strip = Filmstrip(frame: NSRect(x: 0, y: 0, width: 600, height: Filmstrip.height))
+        strip.thumbnails = service
+        let window = NSWindow(contentRect: strip.frame, styleMask: [.titled], backing: .buffered, defer: false)
+        window.isReleasedWhenClosed = false
+        window.contentView = strip
+        window.orderFront(nil)
+        defer { strip.isHidden = true; window.close() }
+        let url = URL(fileURLWithPath: "/unused/\(UUID().uuidString).png")
+        strip.urls = [url]
+        strip.layoutSubtreeIfNeeded()
+        try await followupEventually { completions.count == 1 }
+        strip.isHidden = true
+        completions[0](NSImage(size: NSSize(width: 84, height: 84)))
+        try await Task.sleep(for: .milliseconds(100))
+        #expect(service.ready(for: url, side: Filmstrip.side, scale: window.backingScaleFactor, version: nil) == nil)
+        strip.isHidden = false
+        strip.layoutSubtreeIfNeeded()
+        try await followupEventually { completions.count == 2 }
+    }
     @Test func hiddenFilmstripDoesNotGenerateThumbnailsAndShowingItDoes() async throws {
         _ = NSApplication.shared
         let folder = try FollowupFolder(), url = folder.url.appendingPathComponent("picture.png")
@@ -147,5 +361,30 @@ extension BackgroundWork {
         strip.current = 0
         strip.layoutSubtreeIfNeeded()
         try await followupEventually { Thumbnails.shared.ready(for: url, side: Filmstrip.side, scale: scale, version: nil) != nil }
+    }
+}
+
+extension Viewer {
+    @Test func copyingAnImageThatDisappearedPreservesTheClipboard() async throws {
+        _ = NSApplication.shared
+        let folder = try FollowupFolder(), url = folder.url.appendingPathComponent("gone.png")
+        try iconPNG(64).write(to: url)
+        let oldFullScreen = UserDefaults.standard.object(forKey: "viewerFullScreen")
+        UserDefaults.standard.set(false, forKey: "viewerFullScreen")
+        defer { UserDefaults.standard.set(oldFullScreen, forKey: "viewerFullScreen") }
+        ImageViewer.show([url], at: 0)
+        let window = try #require(NSApp.windows.compactMap { $0 as? ViewerWindow }.first { $0.isVisible })
+        defer { window.close() }
+        let viewer = try #require(window.viewer)
+        try FileManager.default.removeItem(at: url)
+        let board = NSPasteboard.withUniqueName()
+        defer { board.releaseGlobally() }
+        board.setString("previous clipboard", forType: .string)
+        let revision = board.changeCount
+        var done = false
+        viewer.copyImage(to: board) { done = true }
+        try await followupEventually { done }
+        #expect(board.changeCount == revision)
+        #expect(board.string(forType: .string) == "previous clipboard")
     }
 }

@@ -672,7 +672,8 @@ final class IconItem: NSCollectionViewItem {
         background.toolTip = geometry.names ? nil : item.name
         updateSelection()
         guard !item.isFolder, thumbnail == nil else { return }
-        thumbnail = Thumbnails.shared.image(for: item.url, side: side, scale: scale, version: item.modified, early: { [weak self] image in
+        thumbnail = Thumbnails.shared.image(for: item.url, side: side, scale: scale, version: item.modified,
+                                             isCloudOnly: item.cloud == nil ? false : nil, early: { [weak self] image in
             guard let self, self.key == item.key else { return }
             self.show(image)
         }) { [weak self] image in
@@ -729,6 +730,7 @@ final class Thumbnails {
         let key: NSString
         let id: UUID
         let made: Made
+        var isCloudOnly: Bool?
         var readHere = false
         var quickLooked = false
         var pixels: Int { made.pixels }
@@ -744,8 +746,6 @@ final class Thumbnails {
         fileprivate let id: UUID
     }
 
-    /// Opening files and reading the pictures they keep: mostly waiting for the disk.
-    private static let peeks = BackgroundTask.queue("Foldera.thumbnail-reading", limit: 4)
     /// Decoding photos, which keeps a core busy each.
     private static let decodes = BackgroundTask.queue(
         "Foldera.thumbnail-decoding", limit: max(2, min(ProcessInfo.processInfo.activeProcessorCount / 2, 4)))
@@ -768,6 +768,7 @@ final class Thumbnails {
     /// gets a rough picture to show meanwhile, when there is one.
     @discardableResult
     func image(for url: URL, side: CGFloat, scale: CGFloat, version: Date?,
+               isCloudOnly: Bool? = nil,
                early: ((NSImage) -> Void)? = nil, done: @escaping (NSImage?) -> Void) -> Ticket? {
         let key = Self.cacheKey(for: url, side: side, scale: scale, version: version)
         if let image = cache.object(forKey: key) {
@@ -793,7 +794,8 @@ final class Thumbnails {
         pending[key] = entry
         if let rough = entry.early { early?(rough) }
         guard starting else { return ticket }
-        let job = Job(url: url, side: side, scale: scale, key: key, id: entry.id, made: Made(pixels: pixels, version: stamp))
+        let job = Job(url: url, side: side, scale: scale, key: key, id: entry.id,
+                      made: Made(pixels: pixels, version: stamp), isCloudOnly: isCloudOnly)
         if let generator {
             generator(url, pixels) { [weak self] image in
                 DispatchQueue.main.async { self?.finish(job, image, cost: pixels * pixels * 4) }
@@ -887,13 +889,18 @@ final class Thumbnails {
 
     /// Opens the file and reads the picture it keeps, if any. Safe off the main thread.
     static func peek(_ url: URL, pixels: Int) -> Peek {
-        // Reading a file iCloud hasn't brought down would bring it down.
-        if (try? url.resourceValues(forKeys: [.ubiquitousItemDownloadingStatusKey]))?.ubiquitousItemDownloadingStatus == .notDownloaded {
-            return .elsewhere
-        }
-        guard let source = CGImageSourceCreateWithURL(url as CFURL, [kCGImageSourceShouldCache: false] as CFDictionary),
-              CGImageSourceGetCount(source) > 0 else { return .elsewhere }
-        guard let kept = ImageFiles.storedThumbnail(url, in: source, maxPixels: pixels) else { return .decode(rough: nil) }
+        guard !cloudOnly(url), let opened = ThumbnailSource(url) else { return .elsewhere }
+        return peek(url, opened: opened, pixels: pixels)
+    }
+
+    private static func cloudOnly(_ url: URL) -> Bool {
+        (try? url.resourceValues(forKeys: [.ubiquitousItemDownloadingStatusKey]))?.ubiquitousItemDownloadingStatus == .notDownloaded
+    }
+
+    private static func peek(_ url: URL, opened: ThumbnailSource, pixels: Int) -> Peek {
+        let source = opened.image
+        guard let kept = ImageFiles.storedThumbnail(url, in: source, maxPixels: pixels,
+                                                    jpegThumbnail: { opened.hasJPEGThumbnail }) else { return .decode(rough: nil) }
         // Within a tenth of the tile, or the whole picture: the difference doesn't show.
         let across = CGFloat(max(kept.width, kept.height))
         let whole = ImageFiles.uprightSize(of: source).map { max($0.width, $0.height) } ?? .infinity
@@ -903,7 +910,7 @@ final class Thumbnails {
     /// The photo, `pixels` across at most. ImageIO decodes it straight to
     /// that size, without the whole photo in memory on the way. Safe off the main thread.
     static func decode(_ source: CGImageSource, pixels: Int) -> CGImage? {
-        CGImageSourceCreateThumbnailAtIndex(source, 0, [
+        CGImageSourceCreateThumbnailAtIndex(source, thumbnailIndex(source, pixels: pixels), [
             kCGImageSourceCreateThumbnailFromImageAlways: true,
             kCGImageSourceCreateThumbnailWithTransform: true,
             kCGImageSourceShouldCacheImmediately: true,
@@ -911,7 +918,24 @@ final class Thumbnails {
         ] as CFDictionary)
     }
 
-    /// The same, opening the file again: a photo waiting its turn holds nothing open meanwhile.
+    /// ICO and ICNS contain alternative sizes, not animation frames. Pick
+    /// the smallest adequate representation, falling back to the largest.
+    private static func thumbnailIndex(_ source: CGImageSource, pixels: Int) -> Int {
+        guard let type = CGImageSourceGetType(source) as String?,
+              ["com.microsoft.ico", "com.apple.icns"].contains(type) else { return 0 }
+        var largest = (index: 0, size: 0), adequate: (index: Int, size: Int)?
+        for index in 0..<CGImageSourceGetCount(source) {
+            guard let values = CGImageSourceCopyPropertiesAtIndex(source, index, nil) as? [CFString: Any],
+                  let width = values[kCGImagePropertyPixelWidth] as? Int,
+                  let height = values[kCGImagePropertyPixelHeight] as? Int else { continue }
+            let size = max(width, height)
+            if size > largest.size { largest = (index, size) }
+            if size >= pixels && size < (adequate?.size ?? Int.max) { adequate = (index, size) }
+        }
+        return adequate?.index ?? largest.index
+    }
+
+    /// A standalone decode, also used by the image tools and tests.
     static func decode(_ url: URL, pixels: Int) -> CGImage? {
         guard let source = CGImageSourceCreateWithURL(url as CFURL, [kCGImageSourceShouldCache: false] as CFDictionary) else { return nil }
         return decode(source, pixels: pixels)
@@ -921,31 +945,17 @@ final class Thumbnails {
         var job = job
         job.readHere = true
         let operation = BlockOperation()
-        operation.addExecutionBlock { [weak operation, job] in
+        operation.addExecutionBlock { [weak self, weak operation, job] in
             guard let operation, !operation.isCancelled else { return }
-            let found = autoreleasepool { Self.peek(job.url, pixels: job.pixels) }
-            DispatchQueue.main.async { [weak self] in
-                guard let self, self.isCurrent(job) else { return }
-                switch found {
-                case .elsewhere:
-                    if job.quickLooked { self.finish(job, nil, cost: 0) } else { self.quickLook(job) }
-                case .enough(let image):
-                    self.finish(job, image)
-                case .decode(let rough):
-                    if let rough { self.preview(job, rough) }
-                    self.decodePhoto(job)
-                }
+            let image = autoreleasepool {
+                Self.photo(job.url, pixels: job.pixels, isCloudOnly: job.isCloudOnly,
+                           cancelled: { operation.isCancelled }, early: { rough in
+                    DispatchQueue.main.async { [weak self] in
+                        guard let self, self.isCurrent(job) else { return }
+                        self.preview(job, rough)
+                    }
+                })
             }
-        }
-        pending[job.key]?.stop = { operation.cancel() }
-        Self.peeks.addOperation(operation)
-    }
-
-    private func decodePhoto(_ job: Job) {
-        let operation = BlockOperation()
-        operation.addExecutionBlock { [weak operation] in
-            guard let operation, !operation.isCancelled else { return }
-            let image = autoreleasepool { Self.decode(job.url, pixels: job.pixels) }
             DispatchQueue.main.async { [weak self] in
                 guard let self, self.isCurrent(job) else { return }
                 if let image {
@@ -959,6 +969,23 @@ final class Thumbnails {
         }
         pending[job.key]?.stop = { operation.cancel() }
         Self.decodes.addOperation(operation)
+    }
+
+    /// Open only when this bounded decode job starts. EXIF, the early
+    /// thumbnail and the full decode share one descriptor and one source.
+    static func photo(_ url: URL, pixels: Int, isCloudOnly: Bool? = nil,
+                      downloadStatus: (URL) -> Bool = cloudOnly,
+                      openSource: (URL) -> ThumbnailSource? = { ThumbnailSource($0) },
+                      cancelled: () -> Bool = { false }, early: (CGImage) -> Void = { _ in }) -> CGImage? {
+        guard !cancelled(), !(isCloudOnly ?? downloadStatus(url)), let source = openSource(url) else { return nil }
+        switch peek(url, opened: source, pixels: pixels) {
+        case .enough(let image): return image
+        case .decode(let rough):
+            if let rough { early(rough) }
+            guard !cancelled() else { return nil }
+            return decode(source.image, pixels: pixels)
+        case .elsewhere: return nil
+        }
     }
 
     // MARK: Quick Look

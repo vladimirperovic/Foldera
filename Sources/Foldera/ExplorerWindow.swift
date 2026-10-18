@@ -97,6 +97,7 @@ final class ExplorerTab: NSViewController, NSSplitViewDelegate {
     var observers: [NSObjectProtocol] = []
     /// Thumbnails asked for ahead of the scroll, by picture and size.
     private(set) var thumbnailsAhead: [String: Thumbnails.Ticket] = [:]
+    private lazy var thumbnailScroll = CoalescedTask(delay: 0.05) { [weak self] in self?.makeThumbnailsAhead() }
     /// Lists that missed a reload while hidden; they catch up when shown.
     var staleViews: Set<ViewMode> = []
     var cloudRefresh: DispatchWorkItem?
@@ -526,8 +527,14 @@ final class ExplorerTab: NSViewController, NSSplitViewDelegate {
         gridScroll.contentView.postsBoundsChangedNotifications = true
         observers.append(NotificationCenter.default.addObserver(
             forName: NSView.boundsDidChangeNotification, object: gridScroll.contentView, queue: .main) { [weak self] _ in
-            self?.makeThumbnailsAhead()
+            self?.scheduleThumbnailsAhead()
         })
+    }
+
+    /// Scroll notifications can arrive several times in a single frame.
+    /// Keep one pending pass, using the latest viewport when it runs.
+    func scheduleThumbnailsAhead() {
+        thumbnailScroll.request()
     }
 
     /// Thumbnails asked for a screenful above and below what is in sight,
@@ -555,7 +562,8 @@ final class ExplorerTab: NSViewController, NSSplitViewDelegate {
             thumbnailsAhead[key] = nil
         }
         for (key, item) in wanted where thumbnailsAhead[key] == nil {
-            let ticket = Thumbnails.shared.image(for: item.url, side: side, scale: scale, version: item.modified) { [weak self] _ in
+            let ticket = Thumbnails.shared.image(for: item.url, side: side, scale: scale, version: item.modified,
+                                                 isCloudOnly: item.cloud == nil ? false : nil) { [weak self] _ in
                 self?.thumbnailsAhead[key] = nil
             }
             if let ticket { thumbnailsAhead[key] = ticket }
@@ -563,6 +571,7 @@ final class ExplorerTab: NSViewController, NSSplitViewDelegate {
     }
 
     private func cancelThumbnailsAhead() {
+        thumbnailScroll.cancel()
         thumbnailsAhead.values.forEach(Thumbnails.shared.cancel)
         thumbnailsAhead = [:]
     }
@@ -693,7 +702,6 @@ final class ExplorerTab: NSViewController, NSSplitViewDelegate {
         addressBar.location = target
         searchField.placeholderString = "Search \(target.url == nil ? "Home" : target.title)"
         sidebar.sync(to: target)
-        watcher.watch(target.url)
         // A folder opens in the layout it was last shown in, as in Windows;
         // one never set keeps the layout on screen. Disk usage stays on.
         if viewMode != .usage, let url = target.url,
@@ -704,14 +712,17 @@ final class ExplorerTab: NSViewController, NSSplitViewDelegate {
         }
         opening?.cancel()
         opening = nil
-        load()
-        if target != previous { clearWhileOpening() }
+        // Invalidate the old folder immediately, including while open(2)
+        // waits for a slow volume. Read once the watch covers new changes.
+        loadGeneration += 1
+        watcher.watch(target.url) { [weak self] in self?.load() }
+        if target != previous || items.isEmpty { clearWhileOpening() }
     }
 
     private func clearWhileOpening() {
-        let generation = loadGeneration
+        let generation = navigationGeneration
         let work = DispatchWorkItem { [weak self] in
-            guard let self, generation == self.loadGeneration, !self.isSearching else { return }
+            guard let self, generation == self.navigationGeneration, !self.isSearching else { return }
             self.opening = nil
             self.waitingForFolder = true
             self.items = []
@@ -811,7 +822,10 @@ final class ExplorerTab: NSViewController, NSSplitViewDelegate {
             DispatchQueue.global(qos: .userInitiated).async { [weak self] in
                 let result = Result { () -> [FileItem] in
                     var found = try read(url, hidden) { soFar in
-                        let shown = soFar.sorted(by: order)
+                        // The reader retains its objects until the final result.
+                        // Publish separate snapshots so its later size writes
+                        // cannot race with the table, preview or user sorting.
+                        let shown = soFar.map { FileItem(snapshot: $0, folderSize: sizes?[$0.name]) }.sorted(by: order)
                         DispatchQueue.main.async { self?.showSoFar(shown, generation: generation) }
                     }
                     if !removed.isEmpty {
@@ -859,13 +873,13 @@ final class ExplorerTab: NSViewController, NSSplitViewDelegate {
 
     /// Answers the folder watcher. A change seen while the folder is read, or
     /// while it rests after a read, is picked up by the next read.
-    private func reloadForChange() {
+    func reloadForChange() {
         if changeReload != nil { return }
         if folderRead?.generation == loadGeneration {
             changedDuringRead = true
             return
         }
-        reload()
+        scheduleChangeReload(after: 0.3)
     }
 
     /// When the folder changed while it was read, it is read again after
@@ -876,6 +890,10 @@ final class ExplorerTab: NSViewController, NSSplitViewDelegate {
         folderRead = nil
         guard changedDuringRead else { return }
         changedDuringRead = false
+        scheduleChangeReload(after: max(0.3, Date().timeIntervalSince(read.started)))
+    }
+
+    private func scheduleChangeReload(after delay: TimeInterval) {
         let generation = loadGeneration
         let work = DispatchWorkItem { [weak self] in
             guard let self else { return }
@@ -884,7 +902,7 @@ final class ExplorerTab: NSViewController, NSSplitViewDelegate {
             self.reload()
         }
         changeReload = work
-        DispatchQueue.main.asyncAfter(deadline: .now() + max(0.3, Date().timeIntervalSince(read.started)), execute: work)
+        DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: work)
     }
 
     /// Whether `item` is one of those thrown away. Its key may have kept the
@@ -903,6 +921,20 @@ final class ExplorerTab: NSViewController, NSSplitViewDelegate {
         removalGeneration += 1
         for key in keys { justRemoved[key] = removalGeneration }
         guard items.contains(where: { keys.contains($0.key) }) else { return }
+        if let editing = renamingKey {
+            if !keys.contains(editing) {
+                // Keep the field editor and its row stable. The tombstones
+                // above still protect every pending read; refresh on finish.
+                reloadDeferred = true
+                return
+            }
+            // The edited file itself went away. End editing as cancellation,
+            // never as an implicit request to rename another row.
+            cancelRename = true
+            window?.makeFirstResponder(nil)
+            renamingKey = nil
+            cancelRename = false
+        }
         // Disk usage takes its own out of the map; the lists catch up when shown.
         guard shownMode != .usage else {
             items.removeAll { keys.contains($0.key) }

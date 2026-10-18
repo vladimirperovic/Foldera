@@ -104,6 +104,9 @@ final class FileItem {
     let isHidden: Bool
     let isAlias: Bool
     let isSymlink: Bool
+    /// Resolved with the directory metadata, never while validating a menu
+    /// or opening the viewer on the main thread.
+    let isImage: Bool
     let size: Int64?
     let modified: Date?
     let created: Date?
@@ -153,7 +156,7 @@ final class FileItem {
 
     static let keys: [URLResourceKey] = [
         .isDirectoryKey, .isPackageKey, .isHiddenKey, .isAliasFileKey, .isSymbolicLinkKey,
-        .fileSizeKey, .contentModificationDateKey, .creationDateKey, .contentAccessDateKey, .localizedTypeDescriptionKey,
+        .fileSizeKey, .contentModificationDateKey, .creationDateKey, .contentAccessDateKey, .localizedTypeDescriptionKey, .contentTypeKey,
         // Tags are not in this list. Asked for alongside other keys, or
         // prefetched by a directory listing, they come back empty on macOS 27
         // (and .isUbiquitousItemKey empties them too), so they are read on
@@ -163,8 +166,8 @@ final class FileItem {
     ]
 
     /// What a disk without macOS's own file metadata (exFAT, FAT, a share) is
-    /// asked for. Whether an item is hidden, an alias or a package, and its
-    /// kind, live there in the "._" file beside it, and asking means a search
+    /// asked for. Finder metadata, aliases, packages and localized kinds can
+    /// live in the "._" file beside it, and asking means a search
     /// of the folder per item: on an exFAT disk through FSKit, seconds for a
     /// folder of photos. They are told from the name instead.
     static let leanKeys: [URLResourceKey] = [
@@ -176,6 +179,13 @@ final class FileItem {
 
     static func hiddenByName(_ name: String) -> Bool {
         name.hasPrefix(".") || windowsHidden.contains(name)
+    }
+
+    /// FAT/exFAT and SMB expose the native hidden bit through stat flags.
+    /// Read that bit without asking Foundation to inspect AppleDouble files.
+    private static func nativeHidden(_ url: URL) -> Bool {
+        var info = stat()
+        return lstat(url.path, &info) == 0 && (info.st_flags & UInt32(UF_HIDDEN)) != 0
     }
 
     /// The type an item's name says it is: a folder's extension is looked up among folders ("app"), a file's among files.
@@ -193,6 +203,7 @@ final class FileItem {
         name = url.lastPathComponent
         byName = foreign
         let values = try? url.resourceValues(forKeys: Set(foreign ? Self.leanKeys : Self.keys))
+        isImage = (values?.contentType ?? UTType(filenameExtension: url.pathExtension))?.conforms(to: .image) ?? false
         isSymlink = values?.isSymbolicLink ?? false
         var directory = values?.isDirectory ?? false
         var package = values?.isPackage ?? false
@@ -205,7 +216,8 @@ final class FileItem {
         }
         isDirectory = directory
         isPackage = package
-        isHidden = foreign ? Self.hiddenByName(name) : (values?.isHidden ?? false) || name.hasPrefix(".")
+        isHidden = foreign ? Self.hiddenByName(name) || Self.nativeHidden(url)
+            : (values?.isHidden ?? false) || name.hasPrefix(".")
         // isAliasFile is also true for symbolic links.
         isAlias = (values?.isAliasFile ?? false) && !isSymlink
         size = directory ? nil : values?.fileSize.map(Int64.init)
@@ -250,6 +262,7 @@ final class FileItem {
         isHidden = false
         isAlias = false
         isSymlink = false
+        isImage = false
         size = nil
         modified = nil
         created = nil
@@ -269,6 +282,30 @@ final class FileItem {
         volume = Volume(total: Int64(values?.volumeTotalCapacity ?? 0), free: free, ejectable: ejectable)
         // Drives carry no tags; and a network drive that stopped answering mustn't be asked while drawing.
         readTags = []
+    }
+
+    /// A progress batch owns its presentation state independently of the
+    /// background reader. No filesystem access and no shared mutable fields.
+    init(snapshot item: FileItem, folderSize: Int64?) {
+        url = item.url
+        key = item.key
+        name = item.name
+        isDirectory = item.isDirectory
+        isPackage = item.isPackage
+        isHidden = item.isHidden
+        isAlias = item.isAlias
+        isSymlink = item.isSymlink
+        isImage = item.isImage
+        size = item.size
+        modified = item.modified
+        created = item.created
+        accessed = item.accessed
+        kind = item.kind
+        volume = item.volume
+        cloud = item.cloud
+        byName = item.byName
+        readTags = item.knownTags
+        self.folderSize = folderSize
     }
 
     /// Read alone and fresh; see the note on `keys`.
@@ -302,8 +339,8 @@ final class FileItem {
     static func contents(of folder: URL, showHidden: Bool, step: (([FileItem]) -> Void)? = nil,
                          enumerate: Enumerator = FileItem.enumerate) throws -> [FileItem] {
         let foreign = UsageScanner.isForeign(folder)
-        // On a foreign disk hidden is told from the name, so the walk isn't asked
-        // to tell (it would look into every "._" file).
+        // Foreign disks use names and native stat flags below, avoiding a
+        // Foundation hidden-file check that can look into every "._" file.
         var options: FileManager.DirectoryEnumerationOptions = [.skipsSubdirectoryDescendants]
         if !showHidden && !foreign { options.insert(.skipsHiddenFiles) }
         var failure: Error?

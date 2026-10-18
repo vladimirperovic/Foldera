@@ -92,8 +92,8 @@ enum ImageFiles {
     /// read from the first part of the file without decoding the photo, so it
     /// costs next to nothing even on a slow disk. Nil when there is none, or
     /// when its shape says it isn't of this photo. Safe off the main thread.
-    static func storedThumbnail(_ url: URL, in source: CGImageSource, maxPixels: Int) -> CGImage? {
-        guard keepsThumbnail(url, source) else { return nil }
+    static func storedThumbnail(_ url: URL, in source: CGImageSource, maxPixels: Int, jpegThumbnail: (() -> Bool)? = nil) -> CGImage? {
+        guard keepsThumbnail(url, source, jpegThumbnail: jpegThumbnail) else { return nil }
         guard let stored = CGImageSourceCreateThumbnailAtIndex(source, 0, [
             kCGImageSourceCreateThumbnailWithTransform: true,
             kCGImageSourceShouldCacheImmediately: true,
@@ -105,20 +105,20 @@ enum ImageFiles {
 
     /// The same, as a picture to show, and nil when the file is not one ImageIO reads.
     static func storedThumbnail(_ url: URL, maxPixels: Int) -> NSImage? {
-        guard let source = CGImageSourceCreateWithURL(url as CFURL, [kCGImageSourceShouldCache: false] as CFDictionary),
-              CGImageSourceGetCount(source) > 0,
-              let stored = storedThumbnail(url, in: source, maxPixels: maxPixels) else { return nil }
+        guard let source = ThumbnailSource(url),
+              let stored = storedThumbnail(url, in: source.image, maxPixels: maxPixels,
+                                           jpegThumbnail: { source.hasJPEGThumbnail }) else { return nil }
         return NSImage(cgImage: stored, size: NSSize(width: stored.width, height: stored.height))
     }
 
     /// Whether the file carries a picture of its own. Asked for one a JPEG
     /// doesn't have, ImageIO decodes the whole photo to make it, so a JPEG's
     /// EXIF is looked at first; HEIC and RAW files always have theirs.
-    private static func keepsThumbnail(_ url: URL, _ source: CGImageSource) -> Bool {
+    private static func keepsThumbnail(_ url: URL, _ source: CGImageSource, jpegThumbnail: (() -> Bool)? = nil) -> Bool {
         guard let found = CGImageSourceGetType(source) else { return false }
         let id = found as String
         guard let type = UTType(id) else { return false }
-        if type.conforms(to: .jpeg) || id == "public.mpo-image" { return jpegKeepsThumbnail(url) }
+        if type.conforms(to: .jpeg) || id == "public.mpo-image" { return jpegThumbnail?() ?? jpegKeepsThumbnail(url) }
         return [UTType.heic, .heif, .rawImage].contains { type.conforms(to: $0) }
     }
 
@@ -230,6 +230,20 @@ enum ImageFiles {
               ] as CFDictionary),
               let shown = turned(picture, quarterTurns: quarterTurns) else { return nil }
         return NSBitmapImageRep(cgImage: shown).tiffRepresentation
+    }
+
+    /// Prepare the fallback too before touching the clipboard. Both callers
+    /// use this off-main, including formats ImageIO does not decode (SVG).
+    static func clipboardData(_ url: URL, quarterTurns: Int) -> Data? {
+        if let data = clipboardPicture(url, quarterTurns: quarterTurns) { return data }
+        guard let image = NSImage(contentsOf: url) else { return nil }
+        return rotated(Loaded(image: image, pixels: nil), quarterTurns: quarterTurns).image.tiffRepresentation
+    }
+
+    @discardableResult static func writeClipboard(_ data: Data?, to pasteboard: NSPasteboard) -> Bool {
+        guard let data, !data.isEmpty else { return false }
+        pasteboard.clearContents()
+        return pasteboard.setData(data, forType: .tiff)
     }
 
     /// A bitmap turned by quarters, to the right for positive turns, as R does.
@@ -1013,15 +1027,8 @@ final class ImageViewer: NSWindowController, NSWindowDelegate, NSMenuItemValidat
     func copyImage(to pasteboard: NSPasteboard, done: (() -> Void)? = nil) {
         guard let url = current else { return }
         let turns = turns
-        copying.run({ ImageFiles.clipboardPicture(url, quarterTurns: turns) }) { data in
-            pasteboard.clearContents()
-            if let data {
-                pasteboard.setData(data, forType: .tiff)
-            } else if let vector = NSImage(contentsOf: url) {
-                pasteboard.writeObjects([vector])
-            } else {
-                NSSound.beep()
-            }
+        copying.run({ ImageFiles.clipboardData(url, quarterTurns: turns) }) { data in
+            if !ImageFiles.writeClipboard(data, to: pasteboard) { NSSound.beep() }
             done?()
         }
     }
@@ -1283,20 +1290,35 @@ final class Filmstrip: NSVisualEffectView, NSCollectionViewDataSource, NSCollect
     static let height: CGFloat = 104
     static let side: CGFloat = 84
 
-    var urls: [URL] = [] { didSet { grid.reloadData() } }
+    var urls: [URL] = [] { didSet { if !isHidden { grid.reloadData() } } }
+    var thumbnails: Thumbnails = .shared
+    override var isHidden: Bool {
+        didSet {
+            guard isHidden != oldValue else { return }
+            if isHidden {
+                grid.visibleItems().forEach { ($0 as? FilmstripItem)?.stopThumbnail() }
+            }
+            // A hidden strip has no collection items, including if AppKit
+            // lays it out while the viewer is being resized or first shown.
+            grid.reloadData()
+            if !isHidden { showCurrent() }
+        }
+    }
     /// The picture shown above, framed and kept in sight.
     var current = 0 {
-        didSet {
-            guard !isHidden, current < urls.count else { return }
-            for tile in grid.visibleItems() { (tile as? FilmstripItem)?.refreshMark(current: current) }
-            grid.layoutSubtreeIfNeeded()
-            grid.scrollToItems(at: [IndexPath(item: current, section: 0)], scrollPosition: .centeredHorizontally)
-        }
+        didSet { showCurrent() }
     }
     var onPick: ((Int) -> Void)?
 
     private let scroll = SidewaysScrollView()
     private let grid = KeylessCollectionView()
+
+    private func showCurrent() {
+        guard !isHidden, current >= 0, current < urls.count else { return }
+        for tile in grid.visibleItems() { (tile as? FilmstripItem)?.refreshMark(current: current) }
+        grid.layoutSubtreeIfNeeded()
+        grid.scrollToItems(at: [IndexPath(item: current, section: 0)], scrollPosition: .centeredHorizontally)
+    }
 
     override init(frame: NSRect) {
         super.init(frame: frame)
@@ -1334,12 +1356,12 @@ final class Filmstrip: NSVisualEffectView, NSCollectionViewDataSource, NSCollect
 
     private static let item = NSUserInterfaceItemIdentifier("FilmstripItem")
 
-    func collectionView(_ collectionView: NSCollectionView, numberOfItemsInSection section: Int) -> Int { urls.count }
+    func collectionView(_ collectionView: NSCollectionView, numberOfItemsInSection section: Int) -> Int { isHidden ? 0 : urls.count }
 
     func collectionView(_ collectionView: NSCollectionView, itemForRepresentedObjectAt indexPath: IndexPath) -> NSCollectionViewItem {
         let tile = collectionView.makeItem(withIdentifier: Self.item, for: indexPath)
-        if let tile = tile as? FilmstripItem, indexPath.item < urls.count {
-            tile.configure(urls[indexPath.item], index: indexPath.item, current: current)
+        if !isHidden, let tile = tile as? FilmstripItem, indexPath.item < urls.count {
+            tile.configure(urls[indexPath.item], index: indexPath.item, current: current, thumbnails: thumbnails)
             tile.onClick = { [weak self] index in self?.onPick?(index) }
         }
         return tile
@@ -1399,10 +1421,13 @@ final class FilmstripItem: NSCollectionViewItem {
         view = tile
     }
 
-    func configure(_ url: URL, index: Int, current: Int) {
+    private var thumbnails: Thumbnails = .shared
+
+    func configure(_ url: URL, index: Int, current: Int, thumbnails: Thumbnails = .shared) {
         // Drawn again for the same picture: the thumbnail on its way stays on its way.
-        let coming = self.url?.key == url.key && thumbnail != nil
+        let coming = self.url?.key == url.key && thumbnail != nil && self.thumbnails === thumbnails
         if !coming { stopThumbnail() }
+        self.thumbnails = thumbnails
         self.url = url
         self.index = index
         view.toolTip = url.lastPathComponent
@@ -1411,7 +1436,7 @@ final class FilmstripItem: NSCollectionViewItem {
         // By its name, not the file: a slow disk is asked only for the thumbnail.
         picture.image = NSWorkspace.shared.icon(for: UTType(filenameExtension: url.pathExtension) ?? .image)
         let scale = view.window?.backingScaleFactor ?? 2
-        thumbnail = Thumbnails.shared.image(for: url, side: Filmstrip.side, scale: scale, version: nil, early: { [weak self] image in
+        thumbnail = thumbnails.image(for: url, side: Filmstrip.side, scale: scale, version: nil, early: { [weak self] image in
             guard let self, self.url?.key == url.key else { return }
             self.picture.image = image
         }) { [weak self] image in
@@ -1429,7 +1454,7 @@ final class FilmstripItem: NSCollectionViewItem {
     }
 
     func stopThumbnail() {
-        if let thumbnail { Thumbnails.shared.cancel(thumbnail) }
+        if let thumbnail { thumbnails.cancel(thumbnail) }
         thumbnail = nil
     }
 }

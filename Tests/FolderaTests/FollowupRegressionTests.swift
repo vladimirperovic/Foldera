@@ -169,10 +169,11 @@ private final class FollowupReads {
 
 extension BackgroundWork {
     @Test func removalMatchesPrivateAliasesButNeverAnUnrelatedPathSuffix() {
-        let ordinary = FileItem(url: URL(fileURLWithPath: "/var/nonexistent/\(UUID().uuidString).txt"))
-        #expect(ExplorerTab.isAmong(ordinary, ["/private" + ordinary.key]))
-        let unrelated = FileItem(url: URL(fileURLWithPath: "/unrelated" + ordinary.key))
-        #expect(!ExplorerTab.isAmong(unrelated, [ordinary.key]))
+        let path = "/var/nonexistent/\(UUID().uuidString).txt"
+        let ordinary = FileItem(url: URL(fileURLWithPath: path))
+        #expect(ExplorerTab.isAmong(ordinary, ["/private" + path]))
+        let unrelated = FileItem(url: URL(fileURLWithPath: "/unrelated" + path))
+        #expect(!ExplorerTab.isAmong(unrelated, [path]))
     }
     @Test func aPublishedProgressBatchIsIndependentOfTheReaderUntilItsFinalResult() async throws {
         _ = NSApplication.shared

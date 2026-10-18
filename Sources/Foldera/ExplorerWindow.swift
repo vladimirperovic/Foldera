@@ -828,7 +828,9 @@ final class ExplorerTab: NSViewController, NSSplitViewDelegate {
                         // The reader retains its objects until the final result.
                         // Publish separate snapshots so its later size writes
                         // cannot race with the table, preview or user sorting.
-                        let shown = soFar.map { FileItem(snapshot: $0, folderSize: sizes?[$0.name]) }.sorted(by: order)
+                        let shown = soFar.map { item in
+                            FileItem(snapshot: item, folderSize: item.isFolder && item.volume == nil ? sizes?[item.name] : nil)
+                        }.sorted(by: order)
                         DispatchQueue.main.async { self?.showSoFar(shown, generation: generation) }
                     }
                     if !removed.isEmpty {

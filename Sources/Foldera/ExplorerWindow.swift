@@ -822,6 +822,9 @@ final class ExplorerTab: NSViewController, NSSplitViewDelegate {
             DispatchQueue.global(qos: .userInitiated).async { [weak self] in
                 let result = Result { () -> [FileItem] in
                     var found = try read(url, hidden) { soFar in
+                        // Cache tag reads on the reader's instances too, so
+                        // later snapshots do not fetch the same tags again.
+                        if order.key == .tags { soFar.forEach { _ = $0.tags } }
                         // The reader retains its objects until the final result.
                         // Publish separate snapshots so its later size writes
                         // cannot race with the table, preview or user sorting.
@@ -909,7 +912,19 @@ final class ExplorerTab: NSViewController, NSSplitViewDelegate {
     /// "/private" before /var or /tmp, which standardizing drops only while
     /// the file is there; the key it was thrown away under hasn't.
     static func isAmong(_ item: FileItem, _ removed: Set<String>) -> Bool {
-        removed.contains(item.key) || removed.contains { item.key.hasSuffix($0) }
+        let key = removalKey(item.key)
+        return removed.contains(item.key) || removed.contains(key)
+            || (hasPrivateAlias(key) && removed.contains("/private" + key))
+    }
+
+    private static func hasPrivateAlias(_ path: String) -> Bool {
+        ["/var", "/tmp", "/etc"].contains { path == $0 || path.hasPrefix($0 + "/") }
+    }
+
+    private static func removalKey(_ path: String) -> String {
+        guard path.hasPrefix("/private/") else { return path }
+        let short = String(path.dropFirst("/private".count))
+        return hasPrivateAlias(short) ? short : path
     }
 
     /// Takes items gone from the disk off the list at once, without reading
@@ -919,10 +934,11 @@ final class ExplorerTab: NSViewController, NSSplitViewDelegate {
         // Remembered even when a read got there first and the list no longer
         // has them: a stale answer after that would bring them back.
         removalGeneration += 1
-        for key in keys { justRemoved[key] = removalGeneration }
-        guard items.contains(where: { keys.contains($0.key) }) else { return }
+        for key in keys { justRemoved[Self.removalKey(key)] = removalGeneration }
+        let displayedKeys = Set(items.filter { Self.isAmong($0, keys) }.map(\.key))
+        guard !displayedKeys.isEmpty else { return }
         if let editing = renamingKey {
-            if !keys.contains(editing) {
+            if !displayedKeys.contains(editing) {
                 // Keep the field editor and its row stable. The tombstones
                 // above still protect every pending read; refresh on finish.
                 reloadDeferred = true
@@ -937,12 +953,12 @@ final class ExplorerTab: NSViewController, NSSplitViewDelegate {
         }
         // Disk usage takes its own out of the map; the lists catch up when shown.
         guard shownMode != .usage else {
-            items.removeAll { keys.contains($0.key) }
+            items.removeAll { displayedKeys.contains($0.key) }
             staleViews.formUnion([.details, .icons, .columns])
             return
         }
-        if pendingSelection == nil { pendingSelection = Set(selectedItems.map(\.key)).subtracting(keys) }
-        items.removeAll { keys.contains($0.key) }
+        if pendingSelection == nil { pendingSelection = Set(selectedItems.map(\.key)).subtracting(displayedKeys) }
+        items.removeAll { displayedKeys.contains($0.key) }
         showItems()
     }
 

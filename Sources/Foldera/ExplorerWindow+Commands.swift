@@ -313,7 +313,7 @@ extension ExplorerTab: NSMenuItemValidation {
     /// After a delete: what failed to go stays on screen.
     func removed(_ chosen: [FileItem], only removedURLs: [URL]) {
         let keys = Set(removedURLs.map(\.key))
-        let gone = chosen.filter { keys.contains($0.key) }
+        let gone = chosen.filter { Self.isAmong($0, keys) }
         guard !gone.isEmpty else { return }
         if shownMode == .usage {
             // The displayed tree is still alive even after its cache entry is invalidated.

@@ -150,8 +150,9 @@ private final class FollowupReads {
         #expect(image.width == 128 && image.height == 128)
     }
 
-    @Test func foreignVolumeKeepsNativeHiddenAttributes() throws {
-        guard let path = ProcessInfo.processInfo.environment["FOLDERA_EXFAT_VOLUME"] else { return }
+    @Test(.enabled(if: ProcessInfo.processInfo.environment["FOLDERA_EXFAT_VOLUME"] != nil))
+    func foreignVolumeKeepsNativeHiddenAttributes() throws {
+        let path = try #require(ProcessInfo.processInfo.environment["FOLDERA_EXFAT_VOLUME"])
         let folder = try FollowupFolder(root: URL(fileURLWithPath: path))
         let hidden = try folder.file("hidden-by-attribute.txt")
         try folder.file("visible.txt")
@@ -167,6 +168,12 @@ private final class FollowupReads {
 }
 
 extension BackgroundWork {
+    @Test func removalMatchesPrivateAliasesButNeverAnUnrelatedPathSuffix() {
+        let ordinary = FileItem(url: URL(fileURLWithPath: "/var/nonexistent/\(UUID().uuidString).txt"))
+        #expect(ExplorerTab.isAmong(ordinary, ["/private" + ordinary.key]))
+        let unrelated = FileItem(url: URL(fileURLWithPath: "/unrelated" + ordinary.key))
+        #expect(!ExplorerTab.isAmong(unrelated, [ordinary.key]))
+    }
     @Test func aPublishedProgressBatchIsIndependentOfTheReaderUntilItsFinalResult() async throws {
         _ = NSApplication.shared
         let first = try FollowupFolder(), slow = try FollowupFolder()
@@ -262,7 +269,7 @@ extension BackgroundWork {
             (0..<outline.numberOfRows).compactMap { outline.item(atRow: $0) as? SidebarNode }.first { $0.url?.key == url.key }
         }
         sidebar.sync(to: .folder(hidden))
-        try await followupEventually { node(outer).map { outline.isItemExpanded($0) && !$0.loading } == true }
+        try await followupEventually { node(outer).map { outline.isItemExpanded($0) && !$0.loading && !$0.needsReload } == true }
         let ancestor = try #require(node(outer))
         outline.collapseItem(ancestor)
         sidebar.refresh()

@@ -180,7 +180,17 @@ final class SidebarNode {
         }
     }
 
+    /// Made once per entry: drawing the tree again (a scroll, a branch
+    /// opened) asked the disk for every row's icon, a server's that stopped
+    /// answering too. Entries kept through a refresh keep theirs.
     var icon: NSImage? {
+        if let cachedIcon { return cachedIcon }
+        cachedIcon = makeIcon()
+        return cachedIcon
+    }
+    private var cachedIcon: NSImage?
+
+    private func makeIcon() -> NSImage? {
         switch kind {
         case .section: return nil
         case .thisMac: return NSImage(named: NSImage.computerName)

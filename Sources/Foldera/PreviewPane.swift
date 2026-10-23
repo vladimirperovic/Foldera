@@ -255,7 +255,8 @@ final class PreviewPane: NSView {
             let unread = item.knownTags == nil ? item : nil
             slow = { Self.tagRows(unread) + [("Contains", Self.countDescription(url, hidden: hidden))] }
         } else if !selection.isEmpty {
-            showPicture(NSWorkspace.shared.icon(forFiles: selection.map(\.url.path)) ?? selection[0].icon)
+            // Any two paths give the icon for several files; all of a select-all were looked at before.
+            showPicture(NSWorkspace.shared.icon(forFiles: selection.prefix(2).map(\.url.path)) ?? selection[0].icon)
             title.stringValue = "\(Format.items(selection.count)) selected"
             let sizes = selection.compactMap(\.size)
             if !sizes.isEmpty { rows.append(("Size of files", Format.bytes(sizes.reduce(0, +)))) }
@@ -269,7 +270,8 @@ final class PreviewPane: NSView {
             rows.append(("Contains", Format.items(count)))
             if let url = location.url {
                 rows.append(("Location", Format.path(url)))
-                if let tags = Tags.names(of: url).nilIfEmpty { rows.append(("Tags", tags.joined(separator: ", "))) }
+                // Off the main thread, as a file's are: the folder may be on a slow share.
+                slow = { Tags.names(of: url).nilIfEmpty.map { [("Tags", $0.joined(separator: ", "))] } ?? [] }
             }
         }
         setRows(rows)

@@ -64,6 +64,10 @@ final class ToolButton: NSView {
         needsDisplay = true
     }
 
+    /// A dropdown's arrow, made once rather than at every redraw (each hover is one).
+    private static let chevron = NSImage(systemSymbolName: "chevron.down", accessibilityDescription: nil)?
+        .withSymbolConfiguration(.init(pointSize: 8, weight: .semibold))
+
     private var hasLabel: Bool { !(label ?? "").isEmpty }
     private var labelWidth: CGFloat {
         guard let label, hasLabel else { return 0 }
@@ -103,8 +107,7 @@ final class ToolButton: NSView {
             (label as NSString).draw(at: NSPoint(x: x, y: floor((bounds.height - s.height) / 2)), withAttributes: attributes)
             x += labelWidth
         }
-        if dropdown, let chevron = NSImage(systemSymbolName: "chevron.down", accessibilityDescription: nil)?
-            .withSymbolConfiguration(.init(pointSize: 8, weight: .semibold)) {
+        if dropdown, let chevron = Self.chevron {
             let s = chevron.size
             tinted(chevron, isEnabled ? .secondaryLabelColor : .tertiaryLabelColor)
                 .draw(in: NSRect(x: x + 5, y: floor((bounds.height - s.height) / 2), width: s.width, height: s.height))
@@ -721,6 +724,10 @@ final class Thumbnails {
         let version: TimeInterval?
     }
     private var made: [String: [NSString: Made]] = [:]
+    /// How many files `made` may name before the ones whose pictures the
+    /// cache let go of are forgotten: otherwise every file ever shown stayed
+    /// named there, long after its picture was gone.
+    private var forgetAt = 4096
 
     /// One picture to make, and how far it has got.
     private struct Job {
@@ -846,8 +853,17 @@ final class Thumbnails {
         if let image {
             cache.setObject(image, forKey: job.key, cost: cost)
             made[job.url.path, default: [:]][job.key] = job.made
+            if made.count >= forgetAt { forgetEvicted() }
         }
         entry.waiting.values.forEach { $0.done(image) }
+    }
+
+    private func forgetEvicted() {
+        for (path, sizes) in made {
+            let kept = sizes.filter { cache.object(forKey: $0.key) != nil }
+            made[path] = kept.isEmpty ? nil : kept
+        }
+        forgetAt = max(4096, made.count * 2)
     }
 
     private func finish(_ job: Job, _ image: CGImage) {

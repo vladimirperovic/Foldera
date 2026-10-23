@@ -109,9 +109,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
     private func open(_ url: URL, reveal: Bool) {
         // A picture opened with Foldera shows in the viewer, with its folder's other pictures a key away.
         if !reveal && Prefs.imageViewer && ImageFiles.isImage(url) {
-            let siblings = ImageFiles.images(in: url.deletingLastPathComponent())
-            let pictures = siblings.contains { $0.key == url.key } ? siblings : [url]
-            ImageViewer.show(pictures, at: pictures.firstIndex { $0.key == url.key } ?? 0)
+            // The picture shows at once; its folder is listed off the main
+            // thread, as a big one on a share or a slow disk takes a while.
+            ImageViewer.show([url], at: 0)
+            let folder = url.deletingLastPathComponent()
+            DispatchQueue.global(qos: .userInitiated).async {
+                let siblings = ImageFiles.images(in: folder)
+                DispatchQueue.main.async { ImageViewer.widen(to: siblings, around: url) }
+            }
             return
         }
         if !reveal && Prefs.browseArchives && ArchiveFolders.isArchive(url) {

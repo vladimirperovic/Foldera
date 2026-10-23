@@ -1873,17 +1873,23 @@ final class ExplorerTab: NSViewController, NSSplitViewDelegate {
         guard views.count >= 2 else { return splitView.adjustSubviews() }
         let (sideMin, listMin, paneMin): (CGFloat, CGFloat, CGFloat) = (150, 260, 180)
         let thickness = splitView.dividerThickness
-        guard splitView.bounds.width >= thickness else { return splitView.adjustSubviews() }
         let height = splitView.bounds.height
         let hasPane = views.count == 3
+        let sideShown = !views[0].isHidden
+        let room = splitView.bounds.width - (sideShown ? thickness : 0) - (hasPane ? thickness : 0)
+        guard room >= 0 else {
+            // No room even for the dividers, as before the window first lays
+            // the tab out: every pane empty and in order. AppKit's own
+            // adjustSubviews put them out of order here, and said so at launch.
+            for view in views { view.frame = NSRect(x: 0, y: 0, width: 0, height: height) }
+            return
+        }
         let sideWanted = max(UserDefaults.standard.double(forKey: sidebarWidthKey), 0) >= sideMin
             ? UserDefaults.standard.double(forKey: sidebarWidthKey) : 220
         let paneWanted = UserDefaults.standard.double(forKey: "previewWidth") >= paneMin
             ? UserDefaults.standard.double(forKey: "previewWidth") : 300
-        let sideShown = !views[0].isHidden
         var side = sideShown ? views[0].frame.width : 0
         var pane = hasPane ? views[2].frame.width : 0
-        let room = splitView.bounds.width - (sideShown ? thickness : 0) - (hasPane ? thickness : 0)
         var list = room - side - pane
         if list < listMin, hasPane {
             let give = min(listMin - list, max(pane - paneMin, 0))
@@ -1905,7 +1911,11 @@ final class ExplorerTab: NSViewController, NSSplitViewDelegate {
             pane += take
             list -= take
         }
-        list = max(room - side - pane, 0)
+        // Below the minimums (a window still being laid out), the panes still
+        // add up to the split view's width rather than running past its edge.
+        side = min(side, room)
+        pane = min(pane, room - side)
+        list = room - side - pane
         let start = sideShown ? side + thickness : 0
         views[0].frame = NSRect(x: 0, y: 0, width: side, height: height)
         views[1].frame = NSRect(x: start, y: 0, width: list, height: height)
@@ -1950,7 +1960,15 @@ final class ExplorerTab: NSViewController, NSSplitViewDelegate {
         sidebar.stop()
         cloudRefresh?.cancel()
         iconReload?.cancel()
+        // A change or an opening still waiting would read the folder again for
+        // nobody, and thumbnails asked for ahead would go on being made.
+        changeReload?.cancel()
+        changeReload = nil
+        opening?.cancel()
+        opening = nil
+        cancelThumbnailsAhead()
         usageScanner?.cancel()
+        measuring = nil
         previewWindow?.onClose = nil
         previewWindow?.close()
         previewWindow = nil

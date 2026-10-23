@@ -274,19 +274,50 @@ enum DragOps {
         info.draggingPasteboard.readObjects(forClasses: [NSURL.self], options: [.urlReadingFileURLsOnly: true]) as? [URL] ?? []
     }
 
+    /// What one drag carries, read once. A drop is validated again at every
+    /// move of the pointer, and thousands of files dragged were each looked
+    /// up on the disk again (their real paths, whether folders) every time.
+    private struct Sources {
+        let drag: Int
+        let change: Int
+        let urls: [URL]
+        let fromArchive: Bool
+        /// The real paths of the folders and packages among them.
+        let folders: [String]
+        let parents: Set<String>
+    }
+    private static var dragged: Sources?
+
+    private static func sources(of info: NSDraggingInfo) -> Sources {
+        let drag = info.draggingSequenceNumber
+        let change = info.draggingPasteboard.changeCount
+        if let dragged, dragged.drag == drag, dragged.change == change { return dragged }
+        let urls = urls(from: info)
+        let read = Sources(drag: drag, change: change, urls: urls,
+                           fromArchive: urls.contains(where: ArchiveFolders.isInside),
+                           folders: urls.filter(isFolderOrPackage).map { $0.resolvingSymlinksInPath().key },
+                           parents: Set(urls.map { $0.deletingLastPathComponent().key }))
+        dragged = read
+        return read
+    }
+
     static func operation(for info: NSDraggingInfo, into folder: URL) -> NSDragOperation {
-        let sources = urls(from: info)
-        guard !sources.isEmpty else { return [] }
+        let sources = sources(of: info)
+        guard let first = sources.urls.first else { return [] }
         // An opened archive is read-only, and what comes out of one is always a copy.
         if ArchiveFolders.isInside(folder) { return [] }
-        if sources.contains(where: ArchiveFolders.isInside) {
+        if sources.fromArchive {
             return info.draggingSourceOperationMask.contains(.copy) ? .copy : []
         }
-        if sources.contains(where: { isFolderOrPackage($0) && FileOps.isInside(folder, $0) }) { return [] }
-        if sources.allSatisfy({ $0.deletingLastPathComponent().key == folder.key }) { return [] }
+        // Not into one of the folders dragged, nor anywhere inside one.
+        if !sources.folders.isEmpty {
+            let target = folder.resolvingSymlinksInPath().key
+            if sources.folders.contains(where: { target == $0 || target.hasPrefix($0 == "/" ? "/" : $0 + "/") }) { return [] }
+        }
+        if sources.parents == [folder.key] { return [] }
         let mask = info.draggingSourceOperationMask
         let optionHeld = NSEvent.modifierFlags.contains(.option)
-        if !optionHeld && mask.contains(.move) && sameVolume(sources[0], folder) { return .move }
+        if !optionHeld && mask.contains(.move) && sameVolume(first, folder) { return .move }
         if mask.contains(.copy) { return .copy }
         if mask.contains(.generic) { return .generic }
         return []

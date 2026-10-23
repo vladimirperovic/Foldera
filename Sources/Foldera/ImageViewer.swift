@@ -500,6 +500,20 @@ final class ImageViewer: NSWindowController, NSWindowDelegate, NSMenuItemValidat
         }
     }
 
+    /// The folder's other pictures, read after the viewer opened on `url`
+    /// alone: the list grows around the picture on screen, which isn't read
+    /// again. Nothing changes if the viewer has moved on since.
+    static func widen(to urls: [URL], around url: URL) {
+        guard let viewer = shared, viewer.urls.count == 1, viewer.current?.key == url.key,
+              urls.count > 1, let index = urls.firstIndex(where: { $0.key == url.key }) else { return }
+        viewer.urls = urls
+        viewer.filmstrip.urls = urls
+        viewer.index = index
+        viewer.filmstrip.current = index
+        viewer.prefetch()
+        viewer.updateLabels()
+    }
+
     private init() {
         let frame = (NSScreen.main?.visibleFrame ?? NSRect(x: 0, y: 0, width: 1400, height: 900)).insetBy(dx: 60, dy: 40)
         let window = ViewerWindow(

@@ -151,13 +151,18 @@ final class FolderSearch {
         let flag = CancelFlag()
         current = flag
         let matches = Self.matcher(for: query)
+        // Words are matched against the name alone, and most of what is walked
+        // doesn't match: its kind, type and iCloud state aren't asked for, only
+        // those of the items found. With no words every item is listed, and
+        // reading it all along with the folder is quicker.
+        let keys = query.trimmingCharacters(in: .whitespaces).isEmpty ? FileItem.keys : []
         DispatchQueue.global(qos: .userInitiated).async {
             var options: FileManager.DirectoryEnumerationOptions = [.skipsPackageDescendants]
             if !showHidden { options.insert(.skipsHiddenFiles) }
             // Folders that can't be searched are counted, so no results there isn't taken for none there.
             var unreadable = 0
             let walker = FileManager.default.enumerator(
-                at: root, includingPropertiesForKeys: FileItem.keys, options: options,
+                at: root, includingPropertiesForKeys: keys, options: options,
                 errorHandler: { _, _ in unreadable += 1; return true })
             var batch: [FileItem] = []
             var total = 0
@@ -166,7 +171,8 @@ final class FolderSearch {
             while let url = walker?.nextObject() as? URL {
                 if flag.isSet { return }
                 // The system volume shows up again under /System/Volumes; once is enough.
-                if url.path == "/System/Volumes" || url.path == "/Volumes" {
+                let path = url.path
+                if path == "/System/Volumes" || path == "/Volumes" {
                     walker?.skipDescendants()
                     continue
                 }

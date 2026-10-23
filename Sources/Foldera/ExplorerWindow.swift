@@ -408,8 +408,18 @@ final class ExplorerTab: NSViewController, NSSplitViewDelegate {
         if previewPane.superview === split { placePreviewPane() }
     }
 
-    var tabTitle: String { location.title }
-    var tabIcon: NSImage { location.icon }
+    var tabTitle: String { label.title }
+    var tabIcon: NSImage { label.icon }
+    /// The tab's name and icon, worked out once per place. Every tab's are
+    /// asked for whenever any tab goes somewhere, and working them out asks
+    /// the disk (a drive's name, the icon, whether it is an opened archive).
+    var labelled: (location: Location, title: String, icon: NSImage)?
+    private var label: (title: String, icon: NSImage) {
+        if let labelled, labelled.location == location { return (labelled.title, labelled.icon) }
+        let made = (location: location, title: location.title, icon: location.icon)
+        labelled = made
+        return (made.title, made.icon)
+    }
     var representedURL: URL? { location.url.flatMap(ArchiveFolders.context(of:))?.archive ?? location.url }
 
     private func pin(_ view: NSView, in container: NSView) {

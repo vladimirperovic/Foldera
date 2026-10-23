@@ -355,7 +355,7 @@ final class Transfer {
             return
         }
         let staging = try FileOps.stagingFolder(beside: step.to)
-        defer { try? fm.removeItem(at: staging) }
+        defer { FileOps.removeOwn(staging) }
         let ready = staging.appendingPathComponent(step.to.lastPathComponent)
         try copier.copy(step.from, to: ready)
         guard copier.errors.isEmpty else { throw OpError(copier.errors.joined(separator: "\n")) }
@@ -454,7 +454,7 @@ final class TreeCopier {
             throw OpError("There is already an item named “\(to.lastPathComponent)”.")
         }
         let staging = try FileOps.stagingFolder(beside: to)
-        defer { try? FileManager.default.removeItem(at: staging) }
+        defer { FileOps.removeOwn(staging) }
         let ready = staging.appendingPathComponent("item")
         try whileReading(from) { try copyNow($0, to: ready) }
         guard FileOps.exists(ready) else {
@@ -575,11 +575,11 @@ final class TreeCopier {
         let result = copyfile(from.path, to.path, state, flags)
         let code = copyError ?? errno
         if cancelled.isSet {
-            try? FileManager.default.removeItem(at: to)
+            FileOps.removeOwn(to)
             throw CancellationError()
         }
         if result != 0 || copyError != nil {
-            try? FileManager.default.removeItem(at: to)
+            FileOps.removeOwn(to)
             throw NSError(domain: NSPOSIXErrorDomain, code: Int(code))
         }
     }

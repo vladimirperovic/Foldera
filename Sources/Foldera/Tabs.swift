@@ -463,7 +463,8 @@ final class TabStrip: NSView {
             button.title = tab.tabTitle
             button.icon = tab.tabIcon
             button.isSelected = tab === selected
-            button.toolTip = tab.location.url.map(Format.path) ?? tab.tabTitle
+            let tip = tab.location.url.map(Format.path) ?? tab.tabTitle
+            if button.toolTip != tip { button.toolTip = tip }
         }
         needsLayout = true
     }
@@ -555,9 +556,10 @@ final class TabStrip: NSView {
 final class TabButton: NSView {
     weak var strip: TabStrip?
     weak var tab: ExplorerTab?
-    var title = "" { didSet { needsDisplay = true } }
-    var icon: NSImage? { didSet { needsDisplay = true } }
-    var isSelected = false { didSet { needsDisplay = true } }
+    // Set for every tab whenever one changes: drawn again only when different.
+    var title = "" { didSet { if title != oldValue { needsDisplay = true } } }
+    var icon: NSImage? { didSet { if icon !== oldValue { needsDisplay = true } } }
+    var isSelected = false { didSet { if isSelected != oldValue { needsDisplay = true } } }
     private var hovering = false { didSet { needsDisplay = true } }
     private var overClose = false { didSet { needsDisplay = true } }
 

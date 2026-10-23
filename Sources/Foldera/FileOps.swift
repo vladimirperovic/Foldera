@@ -21,6 +21,24 @@ enum FileOps {
         return folder
     }
 
+    /// Takes away a tree Foldera made itself: an archive's cache, a staging
+    /// folder, a half-made copy. A read-only folder inside, as an archive or
+    /// a copied folder may hold, stops removeItem, which then left these
+    /// behind for good; as their owner, it is opened up first, as Finder does
+    /// when it empties the Trash. Never for the user's own files.
+    static func removeOwn(_ url: URL) {
+        let fm = FileManager.default
+        if (try? fm.removeItem(at: url)) != nil || !exists(url) { return }
+        func openUp(_ path: String) {
+            var info = stat()
+            guard lstat(path, &info) == 0, info.st_mode & S_IFMT == S_IFDIR else { return }
+            if info.st_mode & S_IRWXU != S_IRWXU { chmod(path, (info.st_mode & 0o7777) | S_IRWXU) }
+            for name in (try? fm.contentsOfDirectory(atPath: path)) ?? [] { openUp(path + "/" + name) }
+        }
+        openUp(url.path)
+        try? fm.removeItem(at: url)
+    }
+
     struct Revision: Equatable {
         let device: Int32
         let inode: UInt64

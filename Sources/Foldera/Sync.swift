@@ -1076,7 +1076,7 @@ enum Sync {
                 .appendingPathComponent(".\(UUID().uuidString)\(Sync.partialSuffix)")
             try copier.copy(source, to: partial)
             guard copier.errors.isEmpty else {
-                try? FileManager.default.removeItem(at: partial)
+                FileOps.removeOwn(partial)
                 throw OpError(copier.errors.joined(separator: " "))
             }
             // Keep the original basename inside a private staging directory,
@@ -1094,7 +1094,7 @@ enum Sync {
                                                          attributes: [.posixPermissions: 0o700])
                 try Self.moveExclusively(target, backup)
             } catch {
-                try? FileManager.default.removeItem(at: partial)
+                FileOps.removeOwn(partial)
                 throw error
             }
             var installed = false
@@ -1118,7 +1118,7 @@ enum Sync {
                 do {
                     if installed { try Self.moveExclusively(target, partial) }
                     try Self.moveExclusively(backup, target)
-                    try? FileManager.default.removeItem(at: partial)
+                    FileOps.removeOwn(partial)
                 } catch {
                     // A competing writer must never be overwritten by rollback.
                     throw OpError("Replacement failed (\(failure.localizedDescription)). The old version is preserved at \(backup.path); the new version is at \(FileOps.exists(partial) ? partial.path : target.path). Restoration failed: \(error.localizedDescription)")

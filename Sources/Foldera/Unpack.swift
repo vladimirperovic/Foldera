@@ -24,8 +24,9 @@ final class Unpacker {
 
     func cancel() { cancelled.set() }
 
-    /// Unpacks everything into `destination` (created if needed). Returns
-    /// the names that were left out for pointing outside it.
+    /// Unpacks everything into `destination` (created if needed; a new
+    /// folder, as all it holds takes the archive's quarantine). Returns the
+    /// names that were left out for pointing outside it.
     @discardableResult
     func unpack(into destination: URL, password: String? = nil, progress: ((Double) -> Void)? = nil) throws -> [String] {
         let total = Double(max((try? archive.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 1, 1))
@@ -58,7 +59,9 @@ final class Unpacker {
             guard status >= ARCHIVE_WARN, let entry else { throw failure(reader) }
             let name = archive_entry_pathname_utf8(entry).map { String(cString: $0) } ?? ""
             guard let target = Self.place(name, in: destination) else {
-                skipped.append(name)
+                // "./", which `tar -c .` writes first, is the folder itself: nothing
+                // to unpack, and nothing outside it to warn about.
+                if !Self.isTop(name) { skipped.append(name) }
                 archive_read_data_skip(reader)
                 continue
             }
@@ -92,8 +95,50 @@ final class Unpacker {
             }
         }
         guard archive_write_close(writer) >= ARCHIVE_WARN else { throw failure(writer) }
+        if let quarantine = Self.quarantine(of: archive) { Self.mark(destination, with: quarantine) }
         progress?(1)
         return skipped
+    }
+
+    private static let quarantineName = "com.apple.quarantine"
+
+    /// A downloaded archive's quarantine, handed on to everything unpacked
+    /// from it as Archive Utility does: an app or script that came in it is
+    /// then checked by Gatekeeper when first opened, as the archive would
+    /// have been. Without it, unpacking here was a way around that check.
+    static func quarantine(of url: URL) -> Data? {
+        let size = getxattr(url.path, quarantineName, nil, 0, 0, 0)
+        guard size > 0 else { return nil }
+        var value = Data(count: size)
+        let read = value.withUnsafeMutableBytes { getxattr(url.path, quarantineName, $0.baseAddress, size, 0, 0) }
+        guard read > 0 else { return nil }
+        value.count = read
+        return value
+    }
+
+    /// `folder` and everything in it. Links are marked themselves, never what
+    /// they point to; an item unpacked read-only is opened up for a moment.
+    static func mark(_ folder: URL, with quarantine: Data) {
+        func mark(_ path: String) {
+            let set = { quarantine.withUnsafeBytes { setxattr(path, quarantineName, $0.baseAddress, quarantine.count, 0, XATTR_NOFOLLOW) } }
+            guard set() != 0, errno == EACCES || errno == EPERM else { return }
+            var info = stat()
+            guard lstat(path, &info) == 0, info.st_mode & S_IFMT != S_IFLNK else { return }
+            let mode = info.st_mode & 0o7777
+            guard chmod(path, mode | S_IWUSR) == 0 else { return }
+            _ = set()
+            chmod(path, mode)
+        }
+        mark(folder.path)
+        guard let walker = FileManager.default.enumerator(atPath: folder.path) else { return }
+        while let name = walker.nextObject() as? String {
+            mark(folder.appendingPathComponent(name).path)
+        }
+    }
+
+    /// A name that stands for the folder unpacked into: ".", "./", "/".
+    static func isTop(_ name: String) -> Bool {
+        !name.isEmpty && name.split(separator: "/").allSatisfy { $0 == "." }
     }
 
     /// Where an entry goes, or nil for a name that tries to climb out of the folder.
@@ -137,8 +182,15 @@ enum ArchiveFolders {
         return ["zip", "rar", "7z", "tar", "tgz", "tbz", "tbz2", "txz", "cab", "lzh", "lha"].contains(ext)
     }
 
+    /// The cache's real path, worked out once: this is asked many times for
+    /// every menu and command, and only the path asked about can change.
+    private static let realRoot = root.resolvingSymlinksInPath().key
+
     static func isInside(_ url: URL) -> Bool {
-        url.key == root.key || url.key.hasPrefix(root.key + "/") || FileOps.isInside(url, root)
+        let key = url.key
+        if key == root.key || key.hasPrefix(root.key + "/") { return true }
+        let real = url.resolvingSymlinksInPath().key
+        return real == realRoot || real.hasPrefix(realRoot + "/")
     }
 
     /// The archive a cache folder belongs to, and the folder standing for the archive itself.
@@ -176,12 +228,12 @@ enum ArchiveFolders {
             let staging = root.appendingPathComponent(".partial-\(UUID().uuidString)", isDirectory: true)
             do {
                 let skipped = try unpacker.unpack(into: staging, password: password, progress: progress)
-                if FileOps.exists(folder) { try? FileManager.default.removeItem(at: staging) } else {
+                if FileOps.exists(folder) { FileOps.removeOwn(staging) } else {
                     try FileManager.default.moveItem(at: staging, to: folder)
                 }
                 return (folder, skipped)
             } catch {
-                try? FileManager.default.removeItem(at: staging)
+                FileOps.removeOwn(staging)
                 throw error
             }
         }, done: { opened in
@@ -191,13 +243,13 @@ enum ArchiveFolders {
     }
 
     static func clear() {
-        try? FileManager.default.removeItem(at: root)
+        FileOps.removeOwn(root)
     }
 
     /// Detach the previous cache before launch events can open an archive.
     /// Deleting a large old cache may then continue without touching new work.
     static func prepareForLaunch(at cache: URL = root, dispose: @escaping (URL) -> Void = { old in
-        DispatchQueue.global(qos: .utility).async { try? FileManager.default.removeItem(at: old) }
+        DispatchQueue.global(qos: .utility).async { FileOps.removeOwn(old) }
     }) throws {
         guard FileOps.exists(cache) else { return }
         let old = cache.deletingLastPathComponent().appendingPathComponent("Archives-old-\(UUID().uuidString)")

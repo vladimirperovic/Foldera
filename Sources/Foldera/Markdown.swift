@@ -402,10 +402,41 @@ final class MarkdownView: NSView, WKNavigationDelegate {
         decisionHandler(.cancel)
         if url.scheme == LocalPictures.scheme {
             // A link to a file beside this one opens it with its app; one within the page goes nowhere.
-            if url.path != pictures.pageURL.path, let file = pictures.file(for: url) { NSWorkspace.shared.open(file) }
+            if url.path != pictures.pageURL.path, let file = pictures.file(for: url) { Self.follow(file) }
             return
         }
+        Self.follow(url)
+    }
+
+    /// Where a link in a page leads. The web and mail open at once; so does
+    /// a document. A program or script (a .command, an app, an executable),
+    /// or a link into another app, is asked about first: a page can label a
+    /// link anything, and a click shouldn't run something unawares.
+    static func follow(_ url: URL) {
+        if needsAsking(url) {
+            let alert = NSAlert()
+            alert.alertStyle = .warning
+            if url.isFileURL {
+                alert.messageText = "Open “\(url.lastPathComponent)”?"
+                alert.informativeText = "The link leads to a program or script. Opening it runs it."
+            } else {
+                alert.messageText = "Open this link in another app?"
+                alert.informativeText = url.absoluteString
+            }
+            alert.addButton(withTitle: "Open")
+            alert.addButton(withTitle: "Cancel")
+            guard alert.runModal() == .alertFirstButtonReturn else { return }
+        }
         NSWorkspace.shared.open(url)
+    }
+
+    static func needsAsking(_ url: URL) -> Bool {
+        guard url.isFileURL else { return !["http", "https", "mailto"].contains(url.scheme?.lowercased() ?? "") }
+        guard let type = (try? url.resourceValues(forKeys: [.contentTypeKey]))?.contentType
+                ?? UTType(filenameExtension: url.pathExtension) else { return false }
+        // Terminal settings run a command when opened; a .fileloc or .inetloc opens whatever it names.
+        let runs = ["com.apple.terminal.settings", "com.apple.file-internet-location", "com.apple.generic-internet-location"]
+        return [.application, .executable, .script].contains(where: type.conforms(to:)) || runs.contains(type.identifier)
     }
 }
 

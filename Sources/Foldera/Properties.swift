@@ -70,9 +70,10 @@ final class PropertiesWindow: NSWindowController, NSWindowDelegate {
         let volume = single && isVolumeRoot(first)
         let folder = values?.isDirectory == true
 
+        // Any two paths give the icon for several files; all of a select-all were looked at before.
         let icon = NSImageView(image: single
             ? NSWorkspace.shared.icon(forFile: first.path)
-            : NSWorkspace.shared.icon(forFiles: urls.map(\.path)) ?? NSImage())
+            : NSWorkspace.shared.icon(forFiles: urls.prefix(2).map(\.path)) ?? NSImage())
         icon.translatesAutoresizingMaskIntoConstraints = false
         icon.widthAnchor.constraint(equalToConstant: 40).isActive = true
         icon.heightAnchor.constraint(equalToConstant: 40).isActive = true
@@ -86,7 +87,12 @@ final class PropertiesWindow: NSWindowController, NSWindowDelegate {
         if single {
             row("Type:", values?.localizedTypeDescription ?? "")
         } else {
-            let kinds = Set(urls.compactMap { try? $0.resourceValues(forKeys: [.localizedTypeDescriptionKey]).localizedTypeDescription })
+            // A second kind settles it: the rest needn't be looked at.
+            var kinds = Set<String>()
+            for url in urls {
+                if let kind = try? url.resourceValues(forKeys: [.localizedTypeDescriptionKey]).localizedTypeDescription { kinds.insert(kind) }
+                if kinds.count > 1 { break }
+            }
             row("Type:", kinds.count == 1 ? "All of type \(kinds.first!)" : "Multiple types")
         }
         row("Location:", Format.path(first.deletingLastPathComponent()))

@@ -164,7 +164,7 @@ enum Archive {
             let target = FileOps.freeURL(in: parent, base: baseName(of: archive), ext: "")
             return (try settle(staging, as: target), skipped)
         } catch {
-            try? FileManager.default.removeItem(at: staging)
+            FileOps.removeOwn(staging)
             throw error
         }
     }
@@ -172,7 +172,7 @@ enum Archive {
     /// Moves what was unpacked into place and returns where it ended up.
     static func settle(_ staging: URL, as target: URL) throws -> URL {
         let fm = FileManager.default
-        defer { try? fm.removeItem(at: staging) }
+        defer { FileOps.removeOwn(staging) }
         let contents = try fm.contentsOfDirectory(at: staging, includingPropertiesForKeys: nil)
             .filter { $0.lastPathComponent != "__MACOSX" && $0.lastPathComponent != ".DS_Store" }
         if contents.count == 1, FileOps.isFolder(contents[0]) {

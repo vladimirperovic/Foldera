@@ -901,7 +901,7 @@ enum Sync {
     final class Job {
         /// Kept injectable to exercise a failed final rename after a successful copy.
         var installReplacement: (URL, URL) throws -> Void = Job.moveExclusively
-        var discardPermanently: (URL) throws -> Void = { try FileManager.default.removeItem(at: $0) }
+        var discardPermanently: (URL) throws -> Void = { try FileOps.removeTree($0) }
 
         private static func moveExclusively(_ from: URL, _ to: URL) throws {
             guard renamex_np(from.path, to.path, UInt32(RENAME_EXCL)) == 0 else {

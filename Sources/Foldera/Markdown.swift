@@ -247,21 +247,41 @@ enum Markdown {
         return lower.hasPrefix("javascript:") || lower.hasPrefix("vbscript:") || lower.hasPrefix("data:text") ? "#" : url
     }
 
-    private static func replace(_ text: String, _ pattern: String, _ make: ([String]) -> String) -> String {
+    /// How long the formatting of one long line may take: 50 ms, and a
+    /// microsecond more for each character. An ordinary line takes a fraction
+    /// of that; an odd one (thousands of `**` or `[a](` never closed) took
+    /// minutes, each opening looking for its close to the end of the line,
+    /// and kept a core busy after the file was left behind. Past it, the rest
+    /// of the line is shown as written. Lines up to `budgetFrom` characters
+    /// can't take long whatever they hold, and are formatted without a clock.
+    static let budgetFrom = 500
+
+    private static func deadline(for line: String) -> UInt64 {
+        let length = line.utf16.count
+        guard length > budgetFrom else { return .max }
+        return DispatchTime.now().uptimeNanoseconds + 50_000_000 + UInt64(length) * 1_000
+    }
+
+    private static func replace(_ text: String, _ pattern: String, until deadline: UInt64 = .max,
+                                _ make: ([String]) -> String) -> String {
         guard let regex = regex(pattern) else { return text }
         var result = ""
         var last = text.startIndex
-        for m in regex.matches(in: text, range: NSRange(text.startIndex..., in: text)) {
-            guard let range = Range(m.range, in: text) else { continue }
-            result += text[last..<range.lowerBound]
-            let groups = (0..<m.numberOfRanges).map { m.range(at: $0).location == NSNotFound ? "" : String(text[Range(m.range(at: $0), in: text)!]) }
-            result += make(groups)
-            last = range.upperBound
+        let timed = deadline != .max
+        regex.enumerateMatches(in: text, options: timed ? [.reportProgress] : [], range: NSRange(text.startIndex..., in: text)) { m, _, stop in
+            if let m, let range = Range(m.range, in: text) {
+                result += text[last..<range.lowerBound]
+                let groups = (0..<m.numberOfRanges).map { m.range(at: $0).location == NSNotFound ? "" : String(text[Range(m.range(at: $0), in: text)!]) }
+                result += make(groups)
+                last = range.upperBound
+            }
+            if timed && DispatchTime.now().uptimeNanoseconds > deadline { stop.pointee = true }
         }
         return result + text[last...]
     }
 
     static func inline(_ source: String) -> String {
+        let deadline = deadline(for: source)
         // Code spans first, kept aside so nothing inside them is formatted.
         // Each is marked by a number between two NULs; a NUL in the file
         // itself becomes U+FFFD first (as a browser would show it), so the
@@ -271,20 +291,23 @@ enum Markdown {
             kept.append(html)
             return "\u{0}\(kept.count - 1)\u{0}"
         }
-        var text = replace(source.replacingOccurrences(of: "\u{0}", with: "\u{FFFD}"), #"(`+)(.+?)\1"#) { keep("<code>\(escape($0[2].trimmingCharacters(in: .whitespaces)))</code>") }
-        text = replace(text, #"\\([\\`*_{}\[\]()#+\-.!|~<>])"#) { keep(escape($0[1])) }
+        var text = replace(source.replacingOccurrences(of: "\u{0}", with: "\u{FFFD}"), #"(`+)(.+?)\1"#, until: deadline) {
+            keep("<code>\(escape($0[2].trimmingCharacters(in: .whitespaces)))</code>")
+        }
+        text = replace(text, #"\\([\\`*_{}\[\]()#+\-.!|~<>])"#, until: deadline) { keep(escape($0[1])) }
         text = escape(text)
-        text = replace(text, #"!\[([^\]]*)\]\(([^)\s]+)(?: &quot;([^&]*)&quot;)?\)"#) {
+        text = replace(text, #"!\[([^\]]*)\]\(([^)\s]+)(?: &quot;([^&]*)&quot;)?\)"#, until: deadline) {
             keep("<img src=\"\(safe($0[2]))\" alt=\"\($0[1])\"\($0[3].isEmpty ? "" : " title=\"\($0[3])\"")>")
         }
-        text = replace(text, #"\[([^\]]+)\]\(([^)\s]+)(?: &quot;([^&]*)&quot;)?\)"#) {
+        text = replace(text, #"\[([^\]]+)\]\(([^)\s]+)(?: &quot;([^&]*)&quot;)?\)"#, until: deadline) {
             "<a href=\"\(safe($0[2]))\"\($0[3].isEmpty ? "" : " title=\"\($0[3])\"")>\($0[1])</a>"
         }
-        text = replace(text, #"&lt;((?:https?|mailto):[^&\s]+)&gt;"#) { "<a href=\"\($0[1])\">\($0[1])</a>" }
-        text = replace(text, #"(\*\*|__)(?=\S)(.+?)(?<=\S)\1"#) { "<strong>\($0[2])</strong>" }
-        text = replace(text, #"(?<![\w*])\*(?=\S)(.+?)(?<=\S)\*(?!\*)"#) { "<em>\($0[1])</em>" }
-        text = replace(text, #"(?<![\w_])_(?=\S)(.+?)(?<=\S)_(?![\w_])"#) { "<em>\($0[1])</em>" }
-        text = replace(text, #"~~(?=\S)(.+?)(?<=\S)~~"#) { "<del>\($0[1])</del>" }
+        text = replace(text, #"&lt;((?:https?|mailto):[^&\s]+)&gt;"#, until: deadline) { "<a href=\"\($0[1])\">\($0[1])</a>" }
+        text = replace(text, #"(\*\*|__)(?=\S)(.+?)(?<=\S)\1"#, until: deadline) { "<strong>\($0[2])</strong>" }
+        text = replace(text, #"(?<![\w*])\*(?=\S)(.+?)(?<=\S)\*(?!\*)"#, until: deadline) { "<em>\($0[1])</em>" }
+        text = replace(text, #"(?<![\w_])_(?=\S)(.+?)(?<=\S)_(?![\w_])"#, until: deadline) { "<em>\($0[1])</em>" }
+        text = replace(text, #"~~(?=\S)(.+?)(?<=\S)~~"#, until: deadline) { "<del>\($0[1])</del>" }
+        // Always to the end, however long the rest took: what was kept aside goes back in.
         return replace(text, #"\x00(\d+)\x00"#) { Int($0[1]).flatMap { kept.indices.contains($0) ? kept[$0] : nil } ?? "" }
     }
 

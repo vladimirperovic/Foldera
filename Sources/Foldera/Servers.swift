@@ -14,9 +14,22 @@ enum Servers {
         return ["smb", "afp", "nfs", "http", "https", "webdav"].contains(scheme)
     }
 
+    /// Kept as plain text, so a password typed into an address is used for
+    /// the connection but never kept here (nor shown again, from before).
     static var recent: [String] {
-        get { UserDefaults.standard.stringArray(forKey: key) ?? [] }
-        set { UserDefaults.standard.set(Array(newValue.prefix(10)), forKey: key) }
+        get { (UserDefaults.standard.stringArray(forKey: key) ?? []).map(withoutPassword) }
+        set {
+            var seen = Set<String>()
+            let entries = newValue.map(withoutPassword).filter { seen.insert($0).inserted }
+            UserDefaults.standard.set(Array(entries.prefix(10)), forKey: key)
+        }
+    }
+
+    static func withoutPassword(_ address: String) -> String {
+        guard var parts = URLComponents(string: address), parts.password != nil else { return address }
+        parts.password = nil
+        if parts.user?.isEmpty == true { parts.user = nil }
+        return parts.string ?? address
     }
 
     /// The address box. A bare name or IP address means SMB, as with a Windows share.
@@ -48,7 +61,7 @@ enum Servers {
 
     /// Mounts the share; `done` gets where it appeared (under /Volumes).
     static func mount(_ url: URL, done: @escaping (Result<URL, Error>) -> Void) {
-        recent = [url.absoluteString] + recent.filter { $0 != url.absoluteString }
+        recent = [url.absoluteString] + recent
         let openOptions = NSMutableDictionary()
         openOptions["UIOption"] = "AllowUI" // kNAUIOptionKey: kNAUIOptionAllowUI
         var request: AsyncRequestID?

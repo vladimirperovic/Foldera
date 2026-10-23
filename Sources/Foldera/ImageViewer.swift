@@ -691,9 +691,12 @@ final class ImageViewer: NSWindowController, NSWindowDelegate, NSMenuItemValidat
     // MARK: Moving through the folder
 
     private var current: URL? { index < urls.count ? urls[index] : nil }
+    /// The size `updateLabels` shows, and for which picture.
+    private var labelledSize: (key: String, text: String?)?
 
     private func go(to newIndex: Int) {
         index = newIndex
+        labelledSize = nil
         turns = 0
         sharpening = false
         sharpen.cancel()
@@ -959,7 +962,11 @@ final class ImageViewer: NSWindowController, NSWindowDelegate, NSMenuItemValidat
         metaLabel.toolTip = "Picture in the folder, pixel size, file size and zoom"
         var parts = ["\(index + 1) / \(urls.count)"]
         if let pixels = shown?.full { parts.append("\(Int(pixels.width)) × \(Int(pixels.height))") }
-        if let size = try? url.resourceValues(forKeys: [.fileSizeKey]).fileSize { parts.append(Format.bytes(Int64(size))) }
+        // Read once per picture: zooming comes here many times a second, and the file may be on a share.
+        if labelledSize?.key != url.key {
+            labelledSize = (url.key, (try? url.resourceValues(forKeys: [.fileSizeKey]).fileSize).map { Format.bytes(Int64($0)) })
+        }
+        if let size = labelledSize?.text { parts.append(size) }
         if shown != nil { parts.append("\(Int((scroll.magnification * 100).rounded()))%") }
         metaLabel.stringValue = parts.joined(separator: "   ")
     }

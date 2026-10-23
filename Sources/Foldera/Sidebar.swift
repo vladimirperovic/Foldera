@@ -860,7 +860,7 @@ final class Sidebar: NSObject, NSOutlineViewDataSource, NSOutlineViewDelegate {
         DispatchQueue.global(qos: .userInitiated).async {
             var failures: [String] = []
             for url in contents {
-                do { try fm.removeItem(at: url) } catch { failures.append(error.localizedDescription) }
+                do { try FileOps.removeTree(url) } catch { failures.append(error.localizedDescription) }
             }
             DispatchQueue.main.async { FileOps.report(failures) }
         }

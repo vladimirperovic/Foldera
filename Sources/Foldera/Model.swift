@@ -348,13 +348,19 @@ final class FileItem {
                                      { _, error in failure = error; return false }) else { throw CocoaError(.fileReadUnknown) }
         var found: [FileItem] = []
         var told = Date()
+        var pause: TimeInterval = 0.5
         while let url = walker.next() {
             let item = FileItem(url: url, foreign: foreign)
             if foreign && !showHidden && item.isHidden { continue }
             found.append(item)
-            if let step, Date().timeIntervalSince(told) > 0.5 {
-                told = Date()
+            if let step, Date().timeIntervalSince(told) > pause {
+                let began = Date()
                 step(found)
+                told = Date()
+                // Handing over a long list takes a while itself (it is copied and
+                // sorted each time); the read goes on at least twice that long
+                // before the next, so a folder of a hundred thousand isn't held up.
+                pause = max(0.5, 2 * told.timeIntervalSince(began))
             }
         }
         // A partial list is not a successful read, even when some entries arrived.

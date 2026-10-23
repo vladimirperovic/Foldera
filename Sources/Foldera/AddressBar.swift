@@ -1,4 +1,5 @@
 import AppKit
+import UniformTypeIdentifiers
 
 /// The Windows address bar: `This Mac › Macintosh HD › Users › you`, every
 /// part clickable, every › a menu of the folders inside. Click the empty part
@@ -174,12 +175,12 @@ final class AddressBar: NSView, NSTextFieldDelegate {
 
     /// Menus use plain file names: asking Finder for display names costs a
     /// lookup per item, and would not match the crumbs anyway.
-    private func menuItem(_ location: Location, title: String? = nil) -> NSMenuItem {
+    private func menuItem(_ location: Location, title: String? = nil, icon: NSImage? = nil) -> NSMenuItem {
         let name = title ?? location.url.map { isVolumeRoot($0) ? volumeName($0) : $0.lastPathComponent } ?? location.title
         let item = NSMenuItem(title: name, action: #selector(menuPicked(_:)), keyEquivalent: "")
         item.target = self
         item.representedObject = location
-        item.image = menuIcon(location.icon)
+        item.image = menuIcon(icon ?? location.icon)
         return item
     }
 
@@ -208,9 +209,14 @@ final class AddressBar: NSView, NSTextFieldDelegate {
         menuRead.cancel()
     }
 
+    /// Past this many folders, the menu shows the plain folder icon: asking
+    /// for each one's own held the open menu up on a folder of thousands.
+    static let ownIconsUpTo = 300
+
     private func fill(_ menu: NSMenu, with children: [Location], next: Location?) {
+        let plain = children.count > Self.ownIconsUpTo ? NSWorkspace.shared.icon(for: .folder) : nil
         for child in children {
-            let item = menuItem(child)
+            let item = menuItem(child, icon: plain)
             if child == next { item.state = .on }
             menu.addItem(item)
         }

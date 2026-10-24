@@ -148,16 +148,17 @@ enum FileOps {
         private struct Key: Hashable { let folder: String; let stem: String; let ext: String }
         private var next: [Key: Int] = [:]
 
-        mutating func name(for source: URL, in folder: URL, copy: Bool = false, taken: Set<String>) -> URL {
+        mutating func name(for source: URL, in folder: URL, copy: Bool = false, taken: Set<String>, ignoreCase: Bool = false) -> URL {
             let parts = FileOps.split(source)
             let stem = copy ? parts.stem + " - Copy" : parts.stem
-            let key = Key(folder: folder.key, stem: stem, ext: parts.ext)
+            func keyPart(_ text: String) -> String { ignoreCase ? text.lowercased() : text }
+            let key = Key(folder: keyPart(folder.key), stem: keyPart(stem), ext: keyPart(parts.ext))
             var n = next[key] ?? (copy ? 1 : 2)
             while true {
                 let base = n == 1 ? stem : "\(stem) (\(n))"
                 let url = folder.appendingPathComponent(parts.ext.isEmpty ? base : base + "." + parts.ext)
                 n += 1
-                if !taken.contains(url.key) && !FileOps.exists(url) {
+                if !taken.contains(keyPart(url.key)) && !FileOps.exists(url) {
                     next[key] = n
                     return url
                 }

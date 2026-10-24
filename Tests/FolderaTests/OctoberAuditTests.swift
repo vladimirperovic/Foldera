@@ -35,6 +35,21 @@ private func octoberPicture(_ url: URL) throws {
 }
 
 @Suite struct OctoberAudit {
+    @Test func plannedNamesRespectTheDestinationsCaseRules() throws {
+        let f = try OctoberFiles()
+        let sources = try [f.file("one/report.txt"), f.file("two/REPORT.txt"), f.file("three/Report.txt")]
+        let target = f.url("target")
+        try FileManager.default.createDirectory(at: target, withIntermediateDirectories: true)
+        let sensitive = try target.resourceValues(forKeys: [.volumeSupportsCaseSensitiveNamesKey]).volumeSupportsCaseSensitiveNames == true
+        let plan = try #require(Transfer.plan(sources, into: target, move: false) { _, _, _ in
+            Issue.record("Names reserved by this plan should be resolved without a clash question.")
+            return (.stop, false)
+        })
+        #expect(plan.steps.count == 3)
+        let names = plan.steps.map { sensitive ? $0.to.lastPathComponent : $0.to.lastPathComponent.lowercased() }
+        #expect(Set(names).count == 3)
+    }
+
     @Test func textReadingRejectsOversizedInputWithoutReturningAPartialDocument() throws {
         let f = try OctoberFiles(), file = try f.file("large.md", "123456789")
         #expect(throws: (any Error).self) { try TextFile.data(file, limit: 8) }

@@ -67,7 +67,7 @@ svaka operacija sada brža.
 ## Regresioni scenariji i granice provjere
 
 U [OctoberAuditTests.swift](../Tests/FolderaTests/OctoberAuditTests.swift)
-dodato je 27 testnih deklaracija, dio sa parametrima. Obuhvataju izmjenu,
+dodato je 28 testnih deklaracija, dio sa parametrima. Obuhvataju izmjenu,
 dodavanje, uklanjanje i zamjenu izvora, nepraćenje linkova, ispravno uklanjanje
 nepromijenjenog izvora, sva tri formata arhive sa posebnim imenima, otkazanu
 ekstrakciju, href i formatirani naslov linka, granice brojača, migraciju

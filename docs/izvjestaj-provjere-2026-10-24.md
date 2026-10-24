@@ -4,7 +4,7 @@ Datum: 24. oktobar 2026.
 
 **Ažuriranje poslije implementacije:** svih 13 nalaza i 8 optimizacija iz ovog
 izvještaja dobilo je izmjene na lokalnoj grani `fix/audit-2026-10-24`.
-Dodato je 27 regresionih testnih deklaracija sa dodatnim parametrizovanim slučajevima.
+Dodato je 28 regresionih testnih deklaracija sa dodatnim parametrizovanim slučajevima.
 Lokalni testovi i build nisu pokretani, prema zahtjevu. Detalji, granice i stanje
 provjere su u [izvještaju popravki](izvjestaj-popravki-2026-10-24.md).
 Pregled ispod ostaje zapis prvobitnog stanja na navedenom commitu.

@@ -63,17 +63,28 @@ final class Transfer {
         // given the same place.
         var planned = Set<String>()
         var names = FileOps.NameAllocator()
+        var caseRules: [String: Bool] = [:]
+        func ignoresCase(in folder: URL) -> Bool {
+            if let cached = caseRules[folder.key] { return cached }
+            let ignores = (try? folder.resourceValues(forKeys: [.volumeSupportsCaseSensitiveNamesKey]))?.volumeSupportsCaseSensitiveNames != true
+            caseRules[folder.key] = ignores
+            return ignores
+        }
+        func plannedKey(_ url: URL) -> String {
+            ignoresCase(in: url.deletingLastPathComponent()) ? url.key.lowercased() : url.key
+        }
         func add(_ step: Step) {
             plan.steps.append(step)
-            planned.insert(step.to.key)
+            planned.insert(plannedKey(step.to))
         }
 
         func visit(_ source: URL, into folder: URL, topLevel: Bool) -> Bool {
             if cancelled.isSet { return false }
+            let ignoreCase = ignoresCase(in: folder)
             let parent = source.deletingLastPathComponent()
             if topLevel && (parent.key == folder.key || FileOps.isSameItem(parent.resolvingSymlinksInPath(), folder.resolvingSymlinksInPath())) {
                 // Already here: moving does nothing, copying makes "name - Copy".
-                if !move { add(Step(from: source, to: names.name(for: source, in: folder, copy: true, taken: planned), replace: false)) }
+                if !move { add(Step(from: source, to: names.name(for: source, in: folder, copy: true, taken: planned, ignoreCase: ignoreCase), replace: false)) }
                 return true
             }
             if FileOps.isFolder(source) && FileOps.isInside(folder, source) {
@@ -81,9 +92,9 @@ final class Transfer {
                 return true
             }
             let target = folder.appendingPathComponent(source.lastPathComponent)
-            if planned.contains(target.key) {
+            if planned.contains(plannedKey(target)) {
                 // Another source of this very plan goes there: both are kept, without asking.
-                add(Step(from: source, to: names.name(for: source, in: folder, taken: planned), replace: false))
+                add(Step(from: source, to: names.name(for: source, in: folder, taken: planned, ignoreCase: ignoreCase), replace: false))
                 return true
             }
             guard FileOps.exists(target) else {
@@ -109,7 +120,7 @@ final class Transfer {
             case .replace:
                 add(Step(from: source, to: target, replace: true))
             case .keepBoth:
-                add(Step(from: source, to: names.name(for: source, in: folder, taken: planned), replace: false))
+                add(Step(from: source, to: names.name(for: source, in: folder, taken: planned, ignoreCase: ignoreCase), replace: false))
             case .merge:
                 guard folders else {
                     add(Step(from: source, to: target, replace: true))

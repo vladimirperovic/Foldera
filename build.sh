@@ -24,21 +24,8 @@ BINARY="$(swift build -c "$CONFIG" --show-bin-path)/$NAME"
 rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 cp "$BINARY" "$APP/Contents/MacOS/$NAME"
-if [ "$CONFIG" = "release" ]; then
-  # Executables need imports and dynamically referenced exports, not every
-  # global Swift symbol. Leave SwiftPM's original binary intact for debugging.
-  # Compare against our previous strip mode on this exact build, before signing.
-  STRIP_BASELINE="$(mktemp "${TMPDIR:-/tmp}/foldera-strip.XXXXXX")"
-  trap 'rm -f "$STRIP_BASELINE"' EXIT
-  cp "$BINARY" "$STRIP_BASELINE"
-  strip -x "$STRIP_BASELINE"
-  strip -u -r "$APP/Contents/MacOS/$NAME"
-  BASELINE_BYTES="$(stat -f %z "$STRIP_BASELINE")"
-  STRIPPED_BYTES="$(stat -f %z "$APP/Contents/MacOS/$NAME")"
-  echo "release executable: $BASELINE_BYTES -> $STRIPPED_BYTES bytes (saved $((BASELINE_BYTES - STRIPPED_BYTES)) bytes of symbols)"
-  rm -f "$STRIP_BASELINE"
-  trap - EXIT
-fi
+# Keep imports and dynamically referenced symbols; leave the original for debugging.
+[ "$CONFIG" = "release" ] && strip -u -r "$APP/Contents/MacOS/$NAME"
 
 # The icon is drawn fresh each time from Icon/icon.swift.
 rm -rf build/AppIcon.iconset

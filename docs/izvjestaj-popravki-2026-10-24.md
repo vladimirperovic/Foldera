@@ -79,7 +79,8 @@ navigaciju tokom brisanja.
 
 Postojeći testovi za treemap geometriju ostaju relevantni za izmijenjeno
 računanje min/max, a postojeće Move/Replace/Undo i disk-failure regresije
-za zajednički prenos. Ni novi ni postojeći testovi nisu izvršeni u ovom radu.
+za zajednički prenos. Ni novi ni postojeći testovi nisu izvršeni lokalno;
+naknadna udaljena CI provjera zabilježena je u izvještaju ponovnog pregleda.
 
 Na volumenu bez pouzdanog trajnog identiteta Foldera namjerno ne koristi
 staru istoriju za zaključak da je nestanak fajla namjerno brisanje. Takvo

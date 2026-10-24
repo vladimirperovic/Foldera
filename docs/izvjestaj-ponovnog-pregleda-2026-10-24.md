@@ -55,3 +55,22 @@ ostaju povezani sa istom komandom. Dugme radi i u drugom panelu.
 
 Pretraga i dalje koristi direktni obilazak. Spotlight ili poseban katalog
 nisu uvedeni ovim izmjenama; to je odvojena promjena arhitekture pretrage.
+
+## Naknadna provjera na GitHubu
+
+Kod na commitu `a30c25e5daad3ad5399ed13d7e9057b4734582f1` prošao je
+[GitHub Actions provjeru 40072036771](https://github.com/vladimirperovic/Foldera/actions/runs/40072036771)
+na macOS-u. **Debug i release** završili su uspješno: u svakoj konfiguraciji
+prošlo je **319 testova u 41 grupi**. Prošli su i pakovanje release aplikacije,
+provjera potpisa, preview snimci i odvajanje/full screen/povratak preview-a.
+
+Prvi CI pokušaj otkrio je pogrešan API poziv u novom Columns testu; ispravljen
+je i test sada provjerava učitani model i obje slike u odabranoj koloni.
+Nijedan test nije preskočen radi uklanjanja tog pada. Postojeći workflow
+izostavlja iste scenarije koji zahtijevaju interaktivno predavanje fajlova
+iz druge desktop aplikacije kao i prije ovih izmjena.
+
+Na CI snimku aplikacije vizuelno je potvrđena Details ikonica neposredno uz
+View, uključujući oznaku aktivnog prikaza. Posljednja naknadna izmjena ove
+evidencije odnosi se samo na dokumentaciju. Lokalni testovi i build nisu
+pokretani.

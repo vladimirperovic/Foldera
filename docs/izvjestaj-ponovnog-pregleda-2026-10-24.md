@@ -21,6 +21,7 @@ pripremljeni za postojeći GitHub Actions workflow na macOS-u.
 | Limit renderovanja Markdowna dolazi poslije neograničenog čitanja | `TextFile` čita u blokovima, sa ukupnim limitom 32 MiB, uključujući fajl koji raste tokom čitanja. Prevelik dokument odbija se cijeli; djelimičan tekst se nikada ne tretira kao dokument za uređivanje ili snimanje. Render i dalje prikazuje najviše 2.000.000 UTF-8 bajtova. |
 | Viewer fallback dekodira na glavnoj niti | Rezervni `decodeOther` sada radi u istom ograničenom pozadinskom redu kao bitmap decoder. UI samo preuzima pripremljenu sliku. |
 | Rezervacije novih imena nisu pratile pravila volumena | Tri izvora `report.txt`, `REPORT.txt` i `Report.txt` mogla su dobiti isto stvarno odredište na volumenu bez razlikovanja velikih slova. Plan i allocator sada normalizuju rezervacije prema pravilima odredišnog foldera, uključujući spajanje u podfoldere, uz keširan upit za taj folder. |
+| Pozadinski sort je čitao promjenjive UI objekte | `FileItem` je referentni tip; dodavanje izmjerene veličine foldera moglo je mijenjati polje koje sorter istovremeno čita. Sort sada koristi privatne snimke, a poslije provjere generacije i revizije samo preuređuje originalne UI instance. |
 
 Sync i veličine foldera imaju dodatne popravke dokumentovane u zasebnim
 izvještajima: identitet korijena tokom posla, stabilnost poređenja sadržaja,
@@ -39,7 +40,7 @@ ostaju povezani sa istom komandom. Dugme radi i u drugom panelu.
 ## Provjera i ograničenja
 
 - `git diff --check` i pregled poziva izmijenjenih metoda.
-- Ukupno 28 novih `@Test` deklaracija u `OctoberAuditTests.swift`, neke sa
+- Ukupno 29 novih `@Test` deklaracija u `OctoberAuditTests.swift`, neke sa
   parametrima; postojeći testovi su prilagođeni cancellation argumentu.
 - Novi scenariji posebno pokrivaju zamjenu korijena između dvije sync
   radnje, Cancel tokom posljednje radnje, invalidaciju mjerenja dok radi,

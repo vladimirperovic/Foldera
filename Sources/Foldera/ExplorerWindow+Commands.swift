@@ -825,7 +825,11 @@ extension ExplorerTab: NSMenuItemValidation {
             items = sortItems(items, sort)
             return showItems()
         }
-        let unsorted = items
+        // FileItem is a reference type: the size scan may update folderSize
+        // while sorting. Compare private value snapshots, then reorder the
+        // original UI instances only after the generation/revision guards.
+        let originals = Dictionary(items.map { ($0.key, $0) }, uniquingKeysWith: { first, _ in first })
+        let unsorted = items.map { FileItem(snapshot: $0, folderSize: $0.folderSize) }
         let order = sort
         let generation = (load: loadGeneration, sort: sortGeneration)
         let revision = itemsRevision
@@ -834,7 +838,7 @@ extension ExplorerTab: NSMenuItemValidation {
             DispatchQueue.main.async {
                 guard let self, generation == (self.loadGeneration, self.sortGeneration),
                       revision == self.itemsRevision, order == self.sort else { return }
-                self.items = sorted
+                self.items = sorted.compactMap { originals[$0.key] }
                 self.showItems()
             }
         }

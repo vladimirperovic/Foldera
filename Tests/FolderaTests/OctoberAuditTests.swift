@@ -355,6 +355,35 @@ extension SyncTestIsolation {
 }
 
 extension BackgroundWork {
+    @Test func backgroundSortingReadsSnapshotsAndKeepsTheCurrentUIInstances() async throws {
+        _ = NSApplication.shared
+        let f = try OctoberFiles()
+        try FileManager.default.createDirectory(at: f.url("child"), withIntermediateDirectories: true)
+        let tab = ExplorerTab(location: .folder(f.root))
+        defer { tab.tearDown() }
+        try await octoberEventually { tab.items.count == 1 }
+        tab.watcher.stop()
+        let original = try #require(tab.items.first)
+        original.folderSize = 10; original.tags = []
+        tab.sort = SortSpec(key: .tags, ascending: true)
+        let started = CancelFlag(), isolated = CancelFlag(), returned = CancelFlag()
+        let gate = DispatchSemaphore(value: 0)
+        defer { gate.signal() }
+        tab.resort(using: { items, _ in
+            started.set()
+            _ = gate.wait(timeout: .now() + 10)
+            if items.first?.folderSize == 10 { isolated.set() }
+            returned.set()
+            return items
+        })
+        try await octoberEventually { started.isSet }
+        original.folderSize = 20
+        gate.signal()
+        try await octoberEventually { returned.isSet }
+        try await Task.sleep(for: .milliseconds(100))
+        #expect(isolated.isSet && tab.items.first === original && tab.items.first?.folderSize == 20)
+    }
+
     @Test func aUsageScanInvalidatedWhileRunningIsReadAgainBeforeDelivery() async throws {
         _ = NSApplication.shared
         let f = try OctoberFiles()

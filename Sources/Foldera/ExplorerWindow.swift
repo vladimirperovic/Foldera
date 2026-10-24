@@ -2003,6 +2003,7 @@ final class ExplorerTab: NSViewController, NSSplitViewDelegate {
         navigationGeneration += 1
         searchDelay?.cancel()
         search.cancel()
+        columns.cancelLoading()
         watcher.stop()
         sidebar.stop()
         cloudRefresh?.cancel()

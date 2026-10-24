@@ -20,8 +20,10 @@ final class UsageNode {
     /// …and by kind, for the legend (indexed as `UsageNode.kinds`).
     var smallByKind: [Int64]?
     static let kinds: [SearchFilters.Kind?] = [nil, .images, .video, .audio, .documents, .archives, .apps]
+    private static let emptyKindSizes = Array(repeating: Int64(0), count: kinds.count)
 
     func addSmall(_ size: Int64, kind: SearchFilters.Kind?) {
+        totalsByKind = nil
         smallFiles += size
         smallCount += 1
         if smallByKind == nil { smallByKind = Array(repeating: 0, count: Self.kinds.count) }
@@ -31,14 +33,48 @@ final class UsageNode {
     weak var parent: UsageNode?
     /// Stands for the small files of `parent` in the treemap.
     let isRest: Bool
-    /// What takes most of the room in a folder, worked out once, for its tint.
-    private var dominant: SearchFilters.Kind??
+    /// Built with the size tally, off the main thread. Drawing a folder's
+    /// tint or opening its legend must not walk all its descendants again.
+    private var totalsByKind: [Int64]?
 
     var dominantKind: SearchFilters.Kind? {
-        if let dominant { return dominant }
-        let kind = TreemapView.legend(of: self).first?.kind
-        dominant = .some(kind)
-        return kind
+        let totals = kindSizes
+        guard let index = totals.indices.max(by: { totals[$0] < totals[$1] }), totals[index] > 0 else { return nil }
+        return Self.kinds[index]
+    }
+
+    var kindSizes: [Int64] {
+        if let totalsByKind { return totalsByKind }
+        // Also support a tree assembled by a caller before total(). The scanner
+        // normally prepares every folder's summary in its postorder tally.
+        var totals = Self.emptyKindSizes
+        var pending = [self]
+        while let node = pending.popLast() {
+            if let small = node.smallByKind {
+                for index in totals.indices { totals[index] += small[index] }
+            }
+            for child in node.children {
+                if child.isFolder && !child.isPackage { pending.append(child) }
+                else { totals[Self.kinds.firstIndex(of: child.kind) ?? 0] += child.size }
+            }
+        }
+        totalsByKind = totals
+        return totals
+    }
+
+    private func tallyKinds() {
+        var totals = smallByKind ?? Self.emptyKindSizes
+        for child in children { child.addKinds(to: &totals) }
+        totalsByKind = totals
+    }
+
+    private func addKinds(to totals: inout [Int64]) {
+        if isFolder && !isPackage {
+            let sizes = kindSizes
+            for index in totals.indices { totals[index] += sizes[index] }
+        } else {
+            totals[Self.kinds.firstIndex(of: kind) ?? 0] += size
+        }
     }
 
     init(url: URL, name: String, isFolder: Bool, isPackage: Bool = false, kind: SearchFilters.Kind?, isRest: Bool = false) {
@@ -66,17 +102,19 @@ final class UsageNode {
             var bytes = node.smallFiles
             var count = node.smallCount
             var missing = 0
+            var kinds = node.smallByKind ?? Self.emptyKindSizes
             for child in node.children {
                 if cancelled?.isSet == true { return size }
                 bytes += child.size
                 count += child.isFolder ? child.files : 1
                 missing += child.isFolder ? child.unreadable : 0
+                child.addKinds(to: &kinds)
             }
             node.size = bytes
             node.files = count
             node.unreadable += missing - node.childrenUnreadable
             node.childrenUnreadable = missing
-            node.dominant = nil
+            node.totalsByKind = kinds
             node.children.sort { $0.size > $1.size }
         }
         return size
@@ -107,7 +145,7 @@ final class UsageNode {
             node.files -= isFolder ? files : 1
             node.unreadable -= isFolder ? unreadable : 0
             node.childrenUnreadable -= isFolder ? unreadable : 0
-            node.dominant = nil
+            node.tallyKinds()
             node.children.sort { $0.size > $1.size }
             ancestor = node.parent
         }
@@ -123,8 +161,14 @@ final class UsageNode {
             rest.size = smallFiles
             rest.files = smallCount
             rest.parent = self
-            list.append(rest)
-            list.sort { $0.size > $1.size }
+            // total() and remove() keep children sorted. Insert the one extra
+            // tile without sorting the whole folder again on every resize.
+            var low = 0, high = list.count
+            while low < high {
+                let middle = low + (high - low) / 2
+                if list[middle].size >= rest.size { low = middle + 1 } else { high = middle }
+            }
+            list.insert(rest, at: low)
         }
         return list
     }
@@ -469,19 +513,11 @@ final class TreemapView: NSView {
 
     // MARK: What is in it, by kind
 
-    /// Sizes by kind of file, biggest first; small files count as "other".
+    /// Sizes by kind of file, biggest first, including grouped small files.
     static func legend(of root: UsageNode) -> [(kind: SearchFilters.Kind?, size: Int64)] {
-        var totals: [SearchFilters.Kind?: Int64] = [:]
-        var pending = [root]
-        while let node = pending.popLast() {
-            if let small = node.smallByKind {
-                for (index, size) in small.enumerated() where size > 0 { totals[UsageNode.kinds[index], default: 0] += size }
-            }
-            for child in node.children {
-                if child.isFolder && !child.isPackage { pending.append(child) } else { totals[child.kind, default: 0] += child.size }
-            }
-        }
-        return totals.filter { $0.value > 0 }.map { ($0.key, $0.value) }.sorted { $0.size > $1.size }
+        let totals = root.kindSizes
+        return totals.indices.filter { totals[$0] > 0 }.map { (UsageNode.kinds[$0], totals[$0]) }
+            .sorted { $0.1 > $1.1 }
     }
 
     private static func title(of kind: SearchFilters.Kind?) -> String {
@@ -507,7 +543,7 @@ final class TreemapView: NSView {
         let rects = Treemap.layout(children.map { Double($0.size) }, in: rect)
         for (child, frame) in zip(children, rects) where frame.width >= 3 && frame.height >= 3 {
             // Three levels at most: deeper, a double-click shows it (already measured, so at once).
-            let roomy = child.isFolder && !child.isPackage && frame.width > 70 && frame.height > 52 && depth < 2 && !child.blocks.isEmpty
+            let roomy = child.isFolder && !child.isPackage && frame.width > 70 && frame.height > 52 && depth < 2 && child.size > 0
             blocks.append(Block(rect: frame, node: child, framed: roomy))
             if roomy {
                 place(child, in: CGRect(x: frame.minX + 4, y: frame.minY + 22, width: frame.width - 8, height: frame.height - 26),

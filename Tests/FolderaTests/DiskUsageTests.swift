@@ -28,6 +28,56 @@ import Testing
         #expect(Treemap.layout([0, 0], in: CGRect(x: 0, y: 0, width: 10, height: 10)) == [.zero, .zero])
     }
 
+    @Test func kindSummariesTreatPackagesAsOneKindAndStayFreshAfterRemoval() {
+        let root = UsageNode(url: URL(fileURLWithPath: "/usage"), name: "usage", isFolder: true, kind: .folders)
+        func child(_ parent: UsageNode, _ name: String, folder: Bool, package: Bool = false,
+                   kind: SearchFilters.Kind?) -> UsageNode {
+            let node = UsageNode(url: parent.url.appendingPathComponent(name), name: name,
+                                 isFolder: folder, isPackage: package, kind: kind)
+            node.parent = parent
+            parent.children.append(node)
+            return node
+        }
+        let folder = child(root, "nested", folder: true, kind: .folders)
+        let app = child(folder, "Example.app", folder: true, package: true, kind: .apps)
+        let photo = child(app, "cover.png", folder: false, kind: .images)
+        photo.size = 100
+        app.addSmall(20, kind: .documents)
+        folder.addSmall(30, kind: .video)
+        root.addSmall(10, kind: nil)
+        func sizes(_ node: UsageNode) -> [SearchFilters.Kind?: Int64] {
+            Dictionary(uniqueKeysWithValues: TreemapView.legend(of: node).map { ($0.kind, $0.size) })
+        }
+        #expect(root.total() == 160)
+        #expect(sizes(root) == [.apps: 120, .video: 30, nil: 10])
+        #expect(sizes(app) == [.images: 100, .documents: 20])
+        #expect(root.dominantKind == .apps)
+        photo.remove()
+        #expect(sizes(app) == [.documents: 20])
+        #expect(sizes(folder) == [.apps: 20, .video: 30])
+        #expect(sizes(root) == [.apps: 20, .video: 30, nil: 10])
+        #expect(root.dominantKind == .video)
+        #expect(root.total() == 60)
+        #expect(sizes(root) == [.apps: 20, .video: 30, nil: 10])
+    }
+
+    @Test func smallFileTileIsInsertedInSizeOrderWithoutChangingChildren() {
+        let root = UsageNode(url: URL(fileURLWithPath: "/usage"), name: "usage", isFolder: true, kind: .folders)
+        root.children = [0, 10, 50, 100].map { size in
+            let node = UsageNode(url: root.url.appendingPathComponent("\(size)"), name: "\(size)", isFolder: false, kind: nil)
+            node.size = Int64(size)
+            node.parent = root
+            return node
+        }
+        root.addSmall(50, kind: .images)
+        root.total()
+        for _ in 0..<3 {
+            #expect(root.blocks.map(\.size) == [100, 50, 50, 10])
+            #expect(root.blocks.filter(\.isRest).count == 1)
+            #expect(root.children.map(\.size) == [100, 50, 10, 0])
+        }
+    }
+
     @Test func scanningAddsUpFoldersAndKeepsBigFiles() throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent("FolderaUsage-\(UUID().uuidString)")
         defer { try? FileManager.default.removeItem(at: root) }

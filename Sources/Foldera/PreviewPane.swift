@@ -38,7 +38,8 @@ final class PreviewPane: NSView {
     private let title = NSTextField(wrappingLabelWithString: "")
     private let info = NSTextField(wrappingLabelWithString: "")
     private var pending: DispatchWorkItem?
-    private var generation = 0
+    private static let detailsReads = BackgroundTask.queue("Foldera.preview-details", limit: 2)
+    private let detailsRead = BackgroundTask(queue: PreviewPane.detailsReads)
     private var previewed: String?
 
     // Markdown files: the rendered page, or the text to edit, over the whole pane.
@@ -192,6 +193,7 @@ final class PreviewPane: NSView {
     /// Waits a moment, so holding an arrow key through a list doesn't preview every file on the way.
     func show(_ selection: [FileItem], in location: Location, count: Int) {
         pending?.cancel()
+        detailsRead.cancel()
         markdownRead.cancel()
         if markdownBuilt { markdownView.cancel() }
         let work = DispatchWorkItem { [weak self] in self?.render(selection, location, count) }
@@ -203,9 +205,9 @@ final class PreviewPane: NSView {
     func clear() {
         pending?.cancel()
         finishEditing(movingOn: true)
+        detailsRead.cancel()
         markdownRead.cancel()
         if markdownBuilt { markdownView.cancel() }
-        generation += 1
         quickLook?.previewItem = nil
         previewed = nil
     }
@@ -218,10 +220,8 @@ final class PreviewPane: NSView {
     }
 
     private func render(_ selection: [FileItem], _ location: Location, _ count: Int) {
-        generation += 1
-        let generation = generation
         var rows: [(String, String)] = []
-        var slow: (() -> [(String, String)])?
+        var slow: ((CancelFlag) -> [(String, String)])?
 
         if selection.count == 1, let item = selection.first, !item.isFolder, Markdown.isMarkdown(item.url) {
             showMarkdown(item.url)
@@ -240,7 +240,11 @@ final class PreviewPane: NSView {
             }
             let url = item.url
             let unread = item.knownTags == nil ? item : nil
-            slow = { Self.tagRows(unread) + Self.contentDetails(url) }
+            slow = { cancelled in
+                let tags = Self.tagRows(unread)
+                guard !cancelled.isSet else { return [] }
+                return tags + Self.contentDetails(url)
+            }
         } else if selection.count == 1, let item = selection.first {
             showPicture(item.icon)
             title.stringValue = item.name
@@ -250,10 +254,14 @@ final class PreviewPane: NSView {
                 rows.append(("Free space", "\(Format.bytes(volume.free)) of \(Format.bytes(volume.total))"))
             }
             rows += dates(item) + extras(item)
-            let url = folderTarget(item)
             let hidden = Prefs.showHidden
             let unread = item.knownTags == nil ? item : nil
-            slow = { Self.tagRows(unread) + [("Contains", Self.countDescription(url, hidden: hidden))] }
+            slow = { cancelled in
+                let tags = Self.tagRows(unread)
+                guard !cancelled.isSet else { return [] }
+                let url = item.isSymlink ? item.url.resolvingSymlinksInPath() : item.url
+                return tags + [("Contains", Self.countDescription(url, hidden: hidden, cancelled: cancelled))]
+            }
         } else if !selection.isEmpty {
             // Any two paths give the icon for several files; all of a select-all were looked at before.
             showPicture(NSWorkspace.shared.icon(forFiles: selection.prefix(2).map(\.url.path)) ?? selection[0].icon)
@@ -271,18 +279,15 @@ final class PreviewPane: NSView {
             if let url = location.url {
                 rows.append(("Location", Format.path(url)))
                 // Off the main thread, as a file's are: the folder may be on a slow share.
-                slow = { Tags.names(of: url).nilIfEmpty.map { [("Tags", $0.joined(separator: ", "))] } ?? [] }
+                slow = { _ in Tags.names(of: url).nilIfEmpty.map { [("Tags", $0.joined(separator: ", "))] } ?? [] }
             }
         }
         setRows(rows)
 
         guard let slow else { return }
-        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
-            let more = slow()
-            DispatchQueue.main.async {
-                guard let self, self.generation == generation, !more.isEmpty else { return }
-                self.setRows(rows + more)
-            }
+        detailsRead.runCancellable(slow) { [weak self] more in
+            guard let self, !more.isEmpty else { return }
+            self.setRows(rows + more)
         }
     }
 
@@ -413,10 +418,6 @@ final class PreviewPane: NSView {
         MarkdownEditor.show(url)
     }
 
-    private func folderTarget(_ item: FileItem) -> URL {
-        item.isSymlink ? item.url.resolvingSymlinksInPath() : item.url
-    }
-
     private func dates(_ item: FileItem) -> [(String, String)] {
         var rows: [(String, String)] = []
         if let modified = item.modified { rows.append(("Modified", Format.date.string(from: modified))) }
@@ -484,9 +485,21 @@ final class PreviewPane: NSView {
 
     // MARK: Details that take a moment (background)
 
-    static func countDescription(_ folder: URL, hidden: Bool) -> String {
-        let names = (try? FileManager.default.contentsOfDirectory(atPath: folder.path)) ?? []
-        return Format.items(hidden ? names.count : names.filter { !$0.hasPrefix(".") }.count)
+    static func countDescription(_ folder: URL, hidden: Bool, cancelled: CancelFlag? = nil) -> String {
+        guard cancelled?.isSet != true,
+              let entries = FileManager.default.enumerator(at: folder, includingPropertiesForKeys: [],
+                                                          options: [.skipsSubdirectoryDescendants]) else { return Format.items(0) }
+        // Keep only the count, not every filename in a large folder. No child metadata is needed.
+        var count = 0
+        while cancelled?.isSet != true {
+            let hasEntry = autoreleasepool {
+                guard let entry = entries.nextObject() as? URL else { return false }
+                if hidden || !entry.lastPathComponent.hasPrefix(".") { count += 1 }
+                return true
+            }
+            if !hasEntry { break }
+        }
+        return Format.items(count)
     }
 
     /// Picture size and camera, page count, running time, where a download came from.

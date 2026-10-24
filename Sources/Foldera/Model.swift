@@ -173,6 +173,8 @@ final class FileItem {
     static let leanKeys: [URLResourceKey] = [
         .isDirectoryKey, .isSymbolicLinkKey, .fileSizeKey, .contentModificationDateKey, .creationDateKey, .contentAccessDateKey,
     ]
+    private static let keySet = Set(keys)
+    private static let leanKeySet = Set(leanKeys)
 
     /// Folders Windows keeps out of sight at the top of a drive.
     private static let windowsHidden: Set<String> = ["System Volume Information", "$RECYCLE.BIN"]
@@ -202,7 +204,7 @@ final class FileItem {
         key = url.key
         name = url.lastPathComponent
         byName = foreign
-        let values = try? url.resourceValues(forKeys: Set(foreign ? Self.leanKeys : Self.keys))
+        let values = try? url.resourceValues(forKeys: foreign ? Self.leanKeySet : Self.keySet)
         isImage = (values?.contentType ?? UTType(filenameExtension: url.pathExtension))?.conforms(to: .image) ?? false
         isSymlink = values?.isSymbolicLink ?? false
         var directory = values?.isDirectory ?? false
@@ -350,9 +352,13 @@ final class FileItem {
         var found: [FileItem] = []
         var told = Date()
         var pause: TimeInterval = 0.5
-        while let url = walker.next() {
+        // Drain temporary URL and metadata objects between entries instead
+        // of keeping them until a large directory finishes loading.
+        while let item = try autoreleasepool(invoking: { () throws -> FileItem? in
             if cancelled.isSet { throw CancellationError() }
-            let item = FileItem(url: url, foreign: foreign)
+            guard let url = walker.next() else { return nil }
+            return FileItem(url: url, foreign: foreign)
+        }) {
             if foreign && !showHidden && item.isHidden { continue }
             found.append(item)
             if let step, Date().timeIntervalSince(told) > pause {

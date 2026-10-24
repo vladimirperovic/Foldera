@@ -29,6 +29,9 @@ enum ImageText {
 
 /// A cancellable sheet tied to the requested image; closing it leaves the clipboard alone.
 final class ImageTextCopy {
+    /// Each recognition decodes up to 4096 pixels across before Vision runs.
+    /// Multiple windows share this limit instead of decoding all their images at once.
+    private static let recognitions = BackgroundTask.queue("Foldera.image-text", limit: 2)
     private let request = VNRecognizeTextRequest()
     private let cancelled = CancelFlag()
     private let alert = NSAlert()
@@ -74,8 +77,8 @@ final class ImageTextCopy {
                 NSAlert(error: error).beginSheetModal(for: parent)
             }
         }
-        DispatchQueue.global(qos: .userInitiated).async { [self] in
-            let recognized = Result { try ImageText.recognize(url, request: request, cancelled: cancelled) }
+        Self.recognitions.addOperation { [self] in
+            let recognized = autoreleasepool { Result { try ImageText.recognize(url, request: request, cancelled: cancelled) } }
             DispatchQueue.main.async { [self] in
                 guard !cancelled.isSet, let parent, parent.attachedSheet === alert.window else { return }
                 result = recognized

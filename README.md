@@ -4,7 +4,7 @@
 
 <p align="center">
 A small file manager for the Mac that works like Windows Explorer.<br>
-Native Swift and AppKit, no dependencies, about 2.3 MB.
+Native Swift and AppKit, no dependencies, only a few megabytes.
 </p>
 
 > [!WARNING]

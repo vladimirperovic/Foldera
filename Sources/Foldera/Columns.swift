@@ -30,11 +30,18 @@ final class ColumnNode {
     }
 
     /// What is inside, in order, or why it couldn't be read. On any thread.
-    static func read(_ url: URL, item: FileItem?, sort: SortSpec, showHidden: Bool) -> [ColumnNode] {
+    static func read(_ url: URL, item: FileItem?, sort: SortSpec, showHidden: Bool,
+                     cancelled: CancelFlag = CancelFlag()) -> [ColumnNode] {
+        guard !cancelled.isSet else { return [] }
         let target = item?.isSymlink == true ? url.resolvingSymlinksInPath() : url
         do {
-            return try FileItem.contents(of: target, showHidden: showHidden).sorted(by: sort).map { ColumnNode(url: $0.url, item: $0) }
+            let items = try FileItem.contents(of: target, showHidden: showHidden, cancelled: cancelled)
+            guard !cancelled.isSet else { return [] }
+            let sorted = items.sorted(by: sort)
+            guard !cancelled.isSet else { return [] }
+            return sorted.map { ColumnNode(url: $0.url, item: $0) }
         } catch {
+            guard !cancelled.isSet else { return [] }
             return [ColumnNode(url: url, item: nil, problem: "Couldn't be read: \(error.localizedDescription)")]
         }
     }
@@ -66,6 +73,9 @@ final class Columns: NSObject, NSBrowserDelegate {
     var onOpen: (() -> Void)?
     var onDrop: (([URL], URL, _ move: Bool) -> Void)?
     private var root: ColumnNode?
+    private static let reads = BackgroundTask.queue("Foldera.columns", limit: 2)
+    private var loading: [ObjectIdentifier: (node: ColumnNode, task: BackgroundTask)] = [:]
+    var readChildren: (URL, FileItem?, SortSpec, Bool, CancelFlag) -> [ColumnNode] = ColumnNode.read
 
     override init() {
         super.init()
@@ -92,6 +102,7 @@ final class Columns: NSObject, NSBrowserDelegate {
     /// opened inside it stay open through a refresh of the same folder.
     func show(_ folder: URL, items: [FileItem]) {
         let keep = root?.url.key == folder.key ? openPath() : []
+        cancelLoads()
         let node = ColumnNode(url: folder, item: nil)
         node.children = items.map { ColumnNode(url: $0.url, item: $0) }
         root = node
@@ -137,20 +148,37 @@ final class Columns: NSObject, NSBrowserDelegate {
         if !node.loading {
             node.loading = true
             let (url, item, order, hidden) = (node.url, node.item, self.sort, Prefs.showHidden)
-            DispatchQueue.global(qos: .userInitiated).async { [weak self] in
-                let made = ColumnNode.read(url, item: item, sort: order, showHidden: hidden)
-                DispatchQueue.main.async {
-                    node.loading = false
-                    node.children = made
-                    self?.loaded(node)
-                    let waiting = node.whenLoaded
-                    node.whenLoaded = []
-                    waiting.forEach { $0() }
-                }
-            }
+            let task = BackgroundTask(queue: Self.reads), read = readChildren
+            let id = ObjectIdentifier(node)
+            loading[id] = (node, task)
+            task.runCancellable({ cancelled in
+                read(url, item, order, hidden, cancelled)
+            }, then: { [weak self, weak node] made in
+                guard let self, let node else { return }
+                self.loading[id] = nil
+                node.loading = false
+                node.children = made
+                self.loaded(node)
+                let waiting = node.whenLoaded
+                node.whenLoaded = []
+                waiting.forEach { $0() }
+            })
         }
         return [node.loadingRow]
     }
+
+    /// Leaving a branch or refreshing its tree releases its queued reads
+    /// and asks active enumeration to stop between entries.
+    private func cancelLoads(keeping visible: Set<ObjectIdentifier> = []) {
+        for id in Array(loading.keys) where !visible.contains(id) {
+            guard let old = loading.removeValue(forKey: id) else { continue }
+            old.task.cancel()
+            old.node.loading = false
+            old.node.whenLoaded = []
+        }
+    }
+
+    func cancelLoading() { cancelLoads() }
 
     /// Puts what was read in place of "Loading…", if that folder is still on screen.
     private func loaded(_ node: ColumnNode) {
@@ -194,7 +222,18 @@ final class Columns: NSObject, NSBrowserDelegate {
         return (browser.parentForItems(inColumn: column) as? ColumnNode)?.url ?? root?.url
     }
 
-    @objc private func clicked(_ sender: Any?) { onSelect?() }
+    @objc private func clicked(_ sender: Any?) {
+        var visible = Set<ObjectIdentifier>()
+        if browser.lastColumn >= 0 {
+            for column in 0...browser.lastColumn {
+                if let parent = browser.parentForItems(inColumn: column) as? ColumnNode {
+                    visible.insert(ObjectIdentifier(parent))
+                }
+            }
+        }
+        cancelLoads(keeping: visible)
+        onSelect?()
+    }
 
     @objc private func doubleClicked(_ sender: Any?) {
         guard browser.clickedRow >= 0 else { return }

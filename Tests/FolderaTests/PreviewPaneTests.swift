@@ -2,6 +2,25 @@ import AppKit
 import Testing
 @testable import Foldera
 
+@Suite struct PreviewDetails {
+    @Test func folderCountIncludesOnlyImmediateEntriesAndHonorsHiddenNames() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("FolderaDetails-\(UUID().uuidString)")
+        let nested = root.appendingPathComponent("nested")
+        try FileManager.default.createDirectory(at: nested, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        for path in ["visible.txt", ".hidden.txt", "nested/first.txt", "nested/second.txt"] {
+            try Data().write(to: root.appendingPathComponent(path))
+        }
+        try FileManager.default.createSymbolicLink(at: root.appendingPathComponent("link"), withDestinationURL: nested)
+
+        #expect(PreviewPane.countDescription(root, hidden: false) == Format.items(3))
+        #expect(PreviewPane.countDescription(root, hidden: true) == Format.items(4))
+        let cancelled = CancelFlag()
+        cancelled.set()
+        #expect(PreviewPane.countDescription(root, hidden: true, cancelled: cancelled) == Format.items(0))
+    }
+}
+
 @Suite(.serialized) @MainActor struct DetachedPreview {
     private func descendants(of view: NSView) -> [NSView] {
         [view] + view.subviews.flatMap { descendants(of: $0) }

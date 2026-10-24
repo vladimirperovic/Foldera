@@ -135,11 +135,15 @@ final class CancelFlag {
 /// list fills while it looks.
 final class FolderSearch {
     static let limit = 20_000
-    private var current: CancelFlag?
+    private static let reads = BackgroundTask.queue("Foldera.search", limit: 2)
+    private let task: BackgroundTask
+
+    init(queue: OperationQueue? = nil) {
+        task = BackgroundTask(queue: queue ?? Self.reads)
+    }
 
     func cancel() {
-        current?.set()
-        current = nil
+        task.cancel()
     }
 
     /// `filesOnly`: folders are walked into but not listed, as Total Commander's branch view has it.
@@ -147,16 +151,13 @@ final class FolderSearch {
                filesOnly: Bool = false,
                found: @escaping ([FileItem]) -> Void,
                finished: @escaping (_ truncated: Bool, _ unreadable: Int) -> Void) {
-        cancel()
-        let flag = CancelFlag()
-        current = flag
         let matches = Self.matcher(for: query)
         // Words are matched against the name alone, and most of what is walked
         // doesn't match: its kind, type and iCloud state aren't asked for, only
         // those of the items found. With no words every item is listed, and
         // reading it all along with the folder is quicker.
         let keys = query.trimmingCharacters(in: .whitespaces).isEmpty ? FileItem.keys : []
-        DispatchQueue.global(qos: .userInitiated).async {
+        task.runCancellable({ flag -> (rest: [FileItem], truncated: Bool, unreadable: Int) in
             var options: FileManager.DirectoryEnumerationOptions = [.skipsPackageDescendants]
             if !showHidden { options.insert(.skipsHiddenFiles) }
             // Folders that can't be searched are counted, so no results there isn't taken for none there.
@@ -168,24 +169,31 @@ final class FolderSearch {
             var total = 0
             var truncated = false
             var lastSent = Date()
-            while let url = walker?.nextObject() as? URL {
-                if flag.isSet { return }
-                // The system volume shows up again under /System/Volumes; once is enough.
-                let path = url.path
-                if path == "/System/Volumes" || path == "/Volumes" {
-                    walker?.skipDescendants()
-                    continue
-                }
-                if matches(url.lastPathComponent) {
-                    let item = FileItem(url: url)
-                    guard filters.matches(item), !(filesOnly && item.isFolder) else { continue }
-                    batch.append(item)
-                    total += 1
-                    if total >= Self.limit {
-                        truncated = true
-                        break
+            let now = lastSent, calendar = Calendar.current
+            while !flag.isSet && !truncated {
+                // Drain metadata and matching temporaries even when a long
+                // traversal finds no results to hand over to the UI.
+                let hasEntry = autoreleasepool {
+                    guard let url = walker?.nextObject() as? URL else { return false }
+                    // The system volume shows up again under /System/Volumes; once is enough.
+                    let path = url.path
+                    if path == "/System/Volumes" || path == "/Volumes" {
+                        walker?.skipDescendants()
+                        return true
                     }
+                    if matches(url.lastPathComponent) {
+                        let item = FileItem(url: url)
+                        guard filters.matches(item, now: now, calendar: calendar), !(filesOnly && item.isFolder) else { return true }
+                        batch.append(item)
+                        total += 1
+                        if total >= Self.limit {
+                            truncated = true
+                            return true
+                        }
+                    }
+                    return true
                 }
+                if !hasEntry { break }
                 if !batch.isEmpty && Date().timeIntervalSince(lastSent) > 0.15 {
                     let ready = batch
                     batch = []
@@ -193,14 +201,11 @@ final class FolderSearch {
                     DispatchQueue.main.async { if !flag.isSet { found(ready) } }
                 }
             }
-            let rest = batch
-            let missed = unreadable
-            DispatchQueue.main.async {
-                guard !flag.isSet else { return }
-                if !rest.isEmpty { found(rest) }
-                finished(truncated, missed)
-            }
-        }
+            return (batch, truncated, unreadable)
+        }, then: { result in
+            if !result.rest.isEmpty { found(result.rest) }
+            finished(result.truncated, result.unreadable)
+        })
     }
 
     /// Plain words match anywhere in the name, ignoring case and accents;

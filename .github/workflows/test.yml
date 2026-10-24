@@ -19,6 +19,7 @@ jobs:
       # file presenter (as Windows App does). Hosted runners don't provide
       # that interactive handoff, though ordinary AppKit windows work there.
       NEEDS_A_DESKTOP: "aFileAnotherAppFillsInOnlyWhenReadArrivesWhole|aFolderWithSuchAFileInsideArrivesWhole|anAppALittleLateIsAskedAgain|aSlowHandOverIsSaid"
+      SNAPSHOT_BINARY: .build/${{ matrix.configuration }}/Foldera
     steps:
       - uses: actions/checkout@v4
       - name: Toolchain
@@ -89,6 +90,8 @@ jobs:
         run: |
           ./build.sh
           codesign --verify --deep --strict build/Foldera.app
+          # Exercise the shipped, stripped executable in the UI checks below.
+          echo "SNAPSHOT_BINARY=$GITHUB_WORKSPACE/build/Foldera.app/Contents/MacOS/Foldera" >> "$GITHUB_ENV"
       - name: Preview window snapshots
         id: previews
         if: ${{ !cancelled() && success() && steps.build.outcome == 'success' }}
@@ -114,13 +117,13 @@ jobs:
 
           > Editing remains available when you need it.
           MARKDOWN
-          .build/${{ matrix.configuration }}/Foldera --snapshot "$RUNNER_TEMP/preview-fixture" "$RUNNER_TEMP/preview-snapshots/attached.png" --pane --select Reading.md --light --wait 6
-          .build/${{ matrix.configuration }}/Foldera --snapshot "$RUNNER_TEMP/preview-fixture" "$RUNNER_TEMP/preview-snapshots/detached-light.png" --pane --select Reading.md --act detachpreview --light --wait 6
-          .build/${{ matrix.configuration }}/Foldera --snapshot "$RUNNER_TEMP/preview-fixture" "$RUNNER_TEMP/preview-snapshots/detached-dark.png" --pane --select Reading.md --act detachpreview --dark --wait 6
+          "$SNAPSHOT_BINARY" --snapshot "$RUNNER_TEMP/preview-fixture" "$RUNNER_TEMP/preview-snapshots/attached.png" --pane --select Reading.md --light --wait 6
+          "$SNAPSHOT_BINARY" --snapshot "$RUNNER_TEMP/preview-fixture" "$RUNNER_TEMP/preview-snapshots/detached-light.png" --pane --select Reading.md --act detachpreview --light --wait 6
+          "$SNAPSHOT_BINARY" --snapshot "$RUNNER_TEMP/preview-fixture" "$RUNNER_TEMP/preview-snapshots/detached-dark.png" --pane --select Reading.md --act detachpreview --dark --wait 6
       - name: Native preview full-screen round trip
         if: ${{ !cancelled() && steps.previews.outcome == 'success' }}
         timeout-minutes: 1
-        run: .build/${{ matrix.configuration }}/Foldera --snapshot "$RUNNER_TEMP/preview-fixture" "$RUNNER_TEMP/preview-snapshots/fullscreen.png" --pane --select Reading.md --light --verify-preview
+        run: '"$SNAPSHOT_BINARY" --snapshot "$RUNNER_TEMP/preview-fixture" "$RUNNER_TEMP/preview-snapshots/fullscreen.png" --pane --select Reading.md --light --verify-preview'
       - uses: actions/upload-artifact@v4
         if: ${{ !cancelled() && steps.previews.outcome == 'success' }}
         with:

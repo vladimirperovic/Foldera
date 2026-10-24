@@ -7,6 +7,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
     private var openedAtLaunch = false
 
     func applicationWillFinishLaunching(_ notification: Notification) {
+        // Migrate old preferences even if Connect to Server is never opened.
+        _ = Servers.recent
         if !CommandLine.arguments.contains("--snapshot") && !Self.anotherFolderaRunning {
             // This must precede the open-file and reveal events delivered at launch.
             try? ArchiveFolders.prepareForLaunch()

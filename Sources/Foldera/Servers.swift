@@ -17,12 +17,21 @@ enum Servers {
     /// Kept as plain text, so a password typed into an address is used for
     /// the connection but never kept here (nor shown again, from before).
     static var recent: [String] {
-        get { (UserDefaults.standard.stringArray(forKey: key) ?? []).map(withoutPassword) }
+        get {
+            cleanRecent()
+        }
         set {
             var seen = Set<String>()
             let entries = newValue.map(withoutPassword).filter { seen.insert($0).inserted }
             UserDefaults.standard.set(Array(entries.prefix(10)), forKey: key)
         }
+    }
+
+    static func cleanRecent(in defaults: UserDefaults = .standard) -> [String] {
+        let saved = defaults.stringArray(forKey: key) ?? []
+        let clean = saved.map(withoutPassword)
+        if clean != saved { defaults.set(clean, forKey: key) }
+        return clean
     }
 
     static func withoutPassword(_ address: String) -> String {

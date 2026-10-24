@@ -177,6 +177,12 @@ final class Columns: NSObject, NSBrowserDelegate {
         return rows.compactMap { (browser.item(atRow: $0, inColumn: column) as? ColumnNode)?.item }
     }
 
+    var itemsInSelectedColumn: [FileItem] {
+        let column = browser.selectedColumn
+        guard column >= 0, let parent = browser.parentForItems(inColumn: column) as? ColumnNode else { return [] }
+        return parent.children?.compactMap(\.item) ?? []
+    }
+
     /// The folder you are looking at: the selected folder when it is the
     /// last column shown, otherwise the one the selection is in.
     var folder: URL? {

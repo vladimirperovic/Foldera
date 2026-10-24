@@ -13,6 +13,7 @@ final class BackgroundTask {
 
     private let queue: OperationQueue
     private var operation: BlockOperation?
+    private var cancellation: CancelFlag?
     private(set) var generation = 0
 
     init(queue: OperationQueue) { self.queue = queue }
@@ -21,6 +22,8 @@ final class BackgroundTask {
         generation += 1
         operation?.cancel()
         operation = nil
+        cancellation?.set()
+        cancellation = nil
     }
 
     /// Ahead of the queue's other work, as for the picture on screen.
@@ -29,16 +32,25 @@ final class BackgroundTask {
     }
 
     func run<Value>(_ work: @escaping () -> Value, then deliver: @escaping (Value) -> Void) {
+        runCancellable({ _ in work() }, then: deliver)
+    }
+
+    /// Running filesystem/parser work checks this token between its units;
+    /// invalidating only the eventual UI callback leaves expensive work alive.
+    func runCancellable<Value>(_ work: @escaping (CancelFlag) -> Value, then deliver: @escaping (Value) -> Void) {
         cancel()
         let generation = self.generation
+        let cancelled = CancelFlag()
+        cancellation = cancelled
         let operation = BlockOperation()
         operation.addExecutionBlock { [weak self, weak operation] in
             guard let operation, !operation.isCancelled else { return }
-            let value = autoreleasepool(invoking: work)
+            let value = autoreleasepool { work(cancelled) }
             guard !operation.isCancelled else { return }
             DispatchQueue.main.async { [weak self] in
                 guard let self, generation == self.generation, !operation.isCancelled else { return }
                 self.operation = nil
+                self.cancellation = nil
                 deliver(value)
             }
         }
@@ -46,7 +58,7 @@ final class BackgroundTask {
         queue.addOperation(operation)
     }
 
-    deinit { operation?.cancel() }
+    deinit { operation?.cancel(); cancellation?.set() }
 }
 
 /// A burst of main-thread events gets one pass over the latest state. Unlike

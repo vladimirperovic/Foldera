@@ -24,6 +24,10 @@ final class Unpacker {
 
     func cancel() { cancelled.set() }
 
+    func checkCancellation() throws {
+        if cancelled.isSet { throw CancellationError() }
+    }
+
     /// Unpacks everything into `destination` (created if needed; a new
     /// folder, as all it holds takes the archive's quarantine). Returns the
     /// names that were left out for pointing outside it.
@@ -95,8 +99,10 @@ final class Unpacker {
             }
         }
         guard archive_write_close(writer) >= ARCHIVE_WARN else { throw failure(writer) }
-        if let quarantine = Self.quarantine(of: archive) { Self.mark(destination, with: quarantine) }
+        if let quarantine = Self.quarantine(of: archive) { try Self.mark(destination, with: quarantine, cancelled: cancelled) }
+        try checkCancellation()
         progress?(1)
+        try checkCancellation()
         return skipped
     }
 
@@ -118,7 +124,7 @@ final class Unpacker {
 
     /// `folder` and everything in it. Links are marked themselves, never what
     /// they point to; an item unpacked read-only is opened up for a moment.
-    static func mark(_ folder: URL, with quarantine: Data) {
+    static func mark(_ folder: URL, with quarantine: Data, cancelled: CancelFlag = CancelFlag()) throws {
         func mark(_ path: String) {
             let set = { quarantine.withUnsafeBytes { setxattr(path, quarantineName, $0.baseAddress, quarantine.count, 0, XATTR_NOFOLLOW) } }
             guard set() != 0, errno == EACCES || errno == EPERM else { return }
@@ -129,11 +135,14 @@ final class Unpacker {
             _ = set()
             chmod(path, mode)
         }
+        if cancelled.isSet { throw CancellationError() }
         mark(folder.path)
         guard let walker = FileManager.default.enumerator(atPath: folder.path) else { return }
         while let name = walker.nextObject() as? String {
+            if cancelled.isSet { throw CancellationError() }
             mark(folder.appendingPathComponent(name).path)
         }
+        if cancelled.isSet { throw CancellationError() }
     }
 
     /// A name that stands for the folder unpacked into: ".", "./", "/".
@@ -228,6 +237,7 @@ enum ArchiveFolders {
             let staging = root.appendingPathComponent(".partial-\(UUID().uuidString)", isDirectory: true)
             do {
                 let skipped = try unpacker.unpack(into: staging, password: password, progress: progress)
+                try unpacker.checkCancellation()
                 if FileOps.exists(folder) { FileOps.removeOwn(staging) } else {
                     try FileManager.default.moveItem(at: staging, to: folder)
                 }

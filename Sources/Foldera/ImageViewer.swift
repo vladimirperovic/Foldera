@@ -450,6 +450,9 @@ final class ImageViewer: NSWindowController, NSWindowDelegate, NSMenuItemValidat
     private let rough = BackgroundTask(queue: ImageViewer.previews)
     /// Copy image: the whole picture read for the clipboard.
     private let copying = BackgroundTask(queue: ImageViewer.previews)
+    private static let metadataReads = BackgroundTask.queue("Foldera.viewer-metadata", limit: 2)
+    private let sizeRead = BackgroundTask(queue: ImageViewer.metadataReads)
+    private let infoRead = BackgroundTask(queue: ImageViewer.metadataReads)
     /// Behind the menu's Share item, which works only while its picker lives.
     private var sharePicker: NSSharingServicePicker?
     /// Which way the pages are turning (1 or −1), to read ahead that way.
@@ -697,6 +700,8 @@ final class ImageViewer: NSWindowController, NSWindowDelegate, NSMenuItemValidat
     private func go(to newIndex: Int) {
         index = newIndex
         labelledSize = nil
+        sizeRead.cancel()
+        infoRead.cancel()
         turns = 0
         sharpening = false
         sharpen.cancel()
@@ -760,10 +765,10 @@ final class ImageViewer: NSWindowController, NSWindowDelegate, NSMenuItemValidat
         let task = BackgroundTask(queue: Self.decodes)
         inFlight[url.key] = task
         let screen = ImageFiles.screenPixels
-        task.run({ ImageFiles.decodeBitmap(url, maxPixels: screen) }) { [weak self] bitmap in
+        task.run({ ImageFiles.decodeBitmap(url, maxPixels: screen) ?? ImageFiles.decodeOther(url) }) { [weak self] bitmap in
             guard let self else { return }
             self.inFlight[url.key] = nil
-            guard let loaded = bitmap ?? ImageFiles.decodeOther(url) else {
+            guard let loaded = bitmap else {
                 if url.key == self.current?.key { self.failed(url) }
                 return
             }
@@ -797,6 +802,8 @@ final class ImageViewer: NSWindowController, NSWindowDelegate, NSMenuItemValidat
         sharpen.cancel()
         sharpening = false
         rough.cancel()
+        sizeRead.cancel()
+        infoRead.cancel()
     }
 
     private func failed(_ url: URL) {
@@ -964,7 +971,14 @@ final class ImageViewer: NSWindowController, NSWindowDelegate, NSMenuItemValidat
         if let pixels = shown?.full { parts.append("\(Int(pixels.width)) × \(Int(pixels.height))") }
         // Read once per picture: zooming comes here many times a second, and the file may be on a share.
         if labelledSize?.key != url.key {
-            labelledSize = (url.key, (try? url.resourceValues(forKeys: [.fileSizeKey]).fileSize).map { Format.bytes(Int64($0)) })
+            labelledSize = (url.key, nil)
+            sizeRead.run({
+                (try? URL(fileURLWithPath: url.path).resourceValues(forKeys: [.fileSizeKey]).fileSize).map { Format.bytes(Int64($0)) }
+            }) { [weak self] text in
+                guard let self, self.current?.key == url.key else { return }
+                self.labelledSize = (url.key, text)
+                self.updateLabels()
+            }
         }
         if let size = labelledSize?.text { parts.append(size) }
         if shown != nil { parts.append("\(Int((scroll.magnification * 100).rounded()))%") }
@@ -993,12 +1007,20 @@ final class ImageViewer: NSWindowController, NSWindowDelegate, NSMenuItemValidat
 
     @objc func toggleInfo(_ sender: Any?) {
         infoPanel.isHidden.toggle()
-        if !infoPanel.isHidden { fillInfo() }
+        if !infoPanel.isHidden { fillInfo() } else { infoRead.cancel() }
     }
 
     private func fillInfo() {
         guard let url = current else { return }
-        let rows = ImageFiles.details(url, pixels: original?.full)
+        let pixels = original?.full
+        infoText.stringValue = "Loading…"
+        infoRead.run({ ImageFiles.details(url, pixels: pixels) }) { [weak self] rows in
+            guard let self, self.current?.key == url.key, !self.infoPanel.isHidden else { return }
+            self.showInfo(rows)
+        }
+    }
+
+    private func showInfo(_ rows: [(String, String)]) {
         let text = NSMutableAttributedString()
         for (i, row) in rows.enumerated() {
             if i > 0 { text.append(NSAttributedString(string: "\n")) }
@@ -1037,6 +1059,7 @@ final class ImageViewer: NSWindowController, NSWindowDelegate, NSMenuItemValidat
     }
 
     @objc func copy(_ sender: Any?) {
+        copying.cancel()
         if let url = current { FileClipboard.shared.put([url], cut: false) }
     }
 
@@ -1046,15 +1069,24 @@ final class ImageViewer: NSWindowController, NSWindowDelegate, NSMenuItemValidat
 
     /// The picture itself, full size and turned as shown; read in the background, as a big one takes a moment.
     func copyImage(to pasteboard: NSPasteboard, done: (() -> Void)? = nil) {
+        copyImage(to: pasteboard, prepare: { ImageFiles.clipboardData($0, quarterTurns: $1) }, done: done)
+    }
+
+    func copyImage(to pasteboard: NSPasteboard,
+                   prepare: @escaping (URL, Int) -> Data?,
+                   done: (() -> Void)? = nil) {
         guard let url = current else { return }
         let turns = turns
-        copying.run({ ImageFiles.clipboardData(url, quarterTurns: turns) }) { data in
+        let changeCount = pasteboard.changeCount
+        copying.run({ prepare(url, turns) }) { data in
+            guard pasteboard.changeCount == changeCount else { done?(); return }
             if !ImageFiles.writeClipboard(data, to: pasteboard) { NSSound.beep() }
             done?()
         }
     }
 
     @objc func copyPath(_ sender: Any?) {
+        copying.cancel()
         if let url = current { FileOps.copyPaths([url]) }
     }
 
@@ -1213,16 +1245,29 @@ final class ImageViewer: NSWindowController, NSWindowDelegate, NSMenuItemValidat
 
     /// Delete: to the Trash, and on to the next picture.
     @objc func delete(_ sender: Any?) {
+        deleteCurrent()
+    }
+
+    func deleteCurrent(using recycle: ([URL], @escaping ([URL]) -> Void) -> Void = { FileOps.trash($0, done: $1) }) {
         guard let url = current else { return }
-        FileOps.trash([url]) { [weak self] removed in
+        recycle([url]) { [weak self] removed in
             guard let self, !removed.isEmpty else { return }
+            let displayed = self.current?.key
             self.urls.removeAll { $0.key == url.key }
             self.filmstrip.urls = self.urls
             self.cache[url.key] = nil
             if self.urls.isEmpty {
                 self.close()
             } else {
-                self.go(to: min(self.index, self.urls.count - 1))
+                if let displayed, displayed != url.key,
+                   let kept = self.urls.firstIndex(where: { $0.key == displayed }) {
+                    self.index = kept
+                    self.filmstrip.current = kept
+                    self.prefetch()
+                    self.updateLabels()
+                } else {
+                    self.go(to: min(self.index, self.urls.count - 1))
+                }
             }
         }
     }
@@ -1291,6 +1336,7 @@ final class ImageViewer: NSWindowController, NSWindowDelegate, NSMenuItemValidat
 
     func windowWillClose(_ notification: Notification) {
         cancelLoads()
+        copying.cancel()
         slideshow?.invalidate()
         slideshow = nil
         playButton.isOn = false

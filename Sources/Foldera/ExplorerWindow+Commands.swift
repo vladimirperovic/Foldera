@@ -115,12 +115,27 @@ extension ExplorerTab: NSMenuItemValidation {
     func openInViewer(_ chosen: [FileItem]) -> Bool {
         guard !chosen.isEmpty, chosen.allSatisfy(isPicture) else { return false }
         if chosen.count == 1 {
-            let pictures = items.filter(isPicture).map(\.url)
+            let pictures = picturesForViewer(chosen[0])
             ImageViewer.show(pictures, at: pictures.firstIndex { $0.key == chosen[0].key } ?? 0)
+            if pictures.count == 1 && !items.contains(where: { $0.key == chosen[0].key }) {
+                let url = chosen[0].url
+                DispatchQueue.global(qos: .userInitiated).async {
+                    let siblings = ImageFiles.images(in: url.deletingLastPathComponent())
+                    DispatchQueue.main.async { ImageViewer.widen(to: siblings, around: url) }
+                }
+            }
         } else {
             ImageViewer.show(chosen.map(\.url), at: 0)
         }
         return true
+    }
+
+    /// Columns may be several folders below `items`; a requested picture
+    /// must always belong to the gallery we pass to the viewer.
+    func picturesForViewer(_ chosen: FileItem) -> [URL] {
+        let siblings = shownMode == .columns ? columns.itemsInSelectedColumn : items
+        let pictures = siblings.filter(isPicture).map(\.url)
+        return pictures.contains(where: { $0.key == chosen.key }) ? pictures : [chosen.url]
     }
 
     @objc func viewPictures(_ sender: Any?) {
@@ -799,7 +814,7 @@ extension ExplorerTab: NSMenuItemValidation {
         resort()
     }
 
-    func resort() {
+    func resort(using sortItems: @escaping ([FileItem], SortSpec) -> [FileItem] = { $0.sorted(by: $1) }) {
         pendingSelection = Set(selectedItems.map(\.key))
         sortGeneration += 1
         if searchRunning { searchSorted = true }
@@ -807,16 +822,18 @@ extension ExplorerTab: NSMenuItemValidation {
         // reads every file's; do it off the main thread, as loading does.
         // Search results keep arriving, so they sort here.
         guard items.count > 2000 || sort.key == .tags, !isSearching else {
-            items = items.sorted(by: sort)
+            items = sortItems(items, sort)
             return showItems()
         }
         let unsorted = items
         let order = sort
         let generation = (load: loadGeneration, sort: sortGeneration)
+        let revision = itemsRevision
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
-            let sorted = unsorted.sorted(by: order)
+            let sorted = sortItems(unsorted, order)
             DispatchQueue.main.async {
-                guard let self, generation == (self.loadGeneration, self.sortGeneration), order == self.sort else { return }
+                guard let self, generation == (self.loadGeneration, self.sortGeneration),
+                      revision == self.itemsRevision, order == self.sort else { return }
                 self.items = sorted
                 self.showItems()
             }

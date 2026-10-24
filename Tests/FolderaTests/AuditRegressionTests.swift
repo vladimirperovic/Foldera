@@ -38,8 +38,8 @@ extension BackgroundWork {
             ExplorerTab.readFolderInSteps = original
             for _ in 0..<8 { next.signal(); finish.signal() }
         }
-        ExplorerTab.readFolderInSteps = { url, hidden, step in
-            let all = try original(url, hidden, { _ in })
+        ExplorerTab.readFolderInSteps = { url, hidden, cancelled, step in
+            let all = try original(url, hidden, CancelFlag(), { _ in })
             guard url.key == slow.key else { return all }
             Thread.sleep(forTimeInterval: 0.35)
             step(all.filter { ["b.txt", "c.txt"].contains($0.name) })
@@ -75,9 +75,9 @@ extension BackgroundWork {
         let original = ExplorerTab.readFolderInSteps
         let gate = DispatchSemaphore(value: 0), started = CancelFlag()
         defer { ExplorerTab.readFolderInSteps = original; gate.signal() }
-        ExplorerTab.readFolderInSteps = { url, hidden, step in
-            guard url.key == fixture.url.key else { return try original(url, hidden, step) }
-            let before = try original(url, hidden, { _ in })
+        ExplorerTab.readFolderInSteps = { url, hidden, cancelled, step in
+            guard url.key == fixture.url.key else { return try original(url, hidden, cancelled, step) }
+            let before = try original(url, hidden, CancelFlag(), { _ in })
             started.set()
             _ = gate.wait(timeout: .now() + 10)
             return before
@@ -104,8 +104,8 @@ extension BackgroundWork {
         let original = ExplorerTab.readFolderInSteps
         let gate = DispatchSemaphore(value: 0)
         defer { ExplorerTab.readFolderInSteps = original; gate.signal() }
-        ExplorerTab.readFolderInSteps = { url, hidden, step in
-            let all = try original(url, hidden, { _ in })
+        ExplorerTab.readFolderInSteps = { url, hidden, cancelled, step in
+            let all = try original(url, hidden, CancelFlag(), { _ in })
             guard url.key == slow.key else { return all }
             Thread.sleep(forTimeInterval: 0.35)
             step(all)

@@ -62,6 +62,7 @@ final class Transfer {
         // one name (from different folders, or search results) must not be
         // given the same place.
         var planned = Set<String>()
+        var names = FileOps.NameAllocator()
         func add(_ step: Step) {
             plan.steps.append(step)
             planned.insert(step.to.key)
@@ -72,7 +73,7 @@ final class Transfer {
             let parent = source.deletingLastPathComponent()
             if topLevel && (parent.key == folder.key || FileOps.isSameItem(parent.resolvingSymlinksInPath(), folder.resolvingSymlinksInPath())) {
                 // Already here: moving does nothing, copying makes "name - Copy".
-                if !move { add(Step(from: source, to: FileOps.copyName(for: source, in: folder, taken: planned), replace: false)) }
+                if !move { add(Step(from: source, to: names.name(for: source, in: folder, copy: true, taken: planned), replace: false)) }
                 return true
             }
             if FileOps.isFolder(source) && FileOps.isInside(folder, source) {
@@ -82,7 +83,7 @@ final class Transfer {
             let target = folder.appendingPathComponent(source.lastPathComponent)
             if planned.contains(target.key) {
                 // Another source of this very plan goes there: both are kept, without asking.
-                add(Step(from: source, to: FileOps.keepBothName(for: source, in: folder, taken: planned), replace: false))
+                add(Step(from: source, to: names.name(for: source, in: folder, taken: planned), replace: false))
                 return true
             }
             guard FileOps.exists(target) else {
@@ -108,7 +109,7 @@ final class Transfer {
             case .replace:
                 add(Step(from: source, to: target, replace: true))
             case .keepBoth:
-                add(Step(from: source, to: FileOps.keepBothName(for: source, in: folder, taken: planned), replace: false))
+                add(Step(from: source, to: names.name(for: source, in: folder, taken: planned), replace: false))
             case .merge:
                 guard folders else {
                     add(Step(from: source, to: target, replace: true))
@@ -295,7 +296,7 @@ final class Transfer {
                     try copier.whileReading(step.from) { try fm.moveItem(at: $0, to: step.to) }
                     outcome.changes.append(.moved(from: step.from, to: step.to))
                 } else {
-                    try copier.copy(step.from, to: step.to)
+                    try copier.copy(step.from, to: step.to, verifyingSource: move)
                     outcome.failures += copier.errors
                     if move {
                         // The original goes only once every byte arrived.
@@ -303,7 +304,7 @@ final class Transfer {
                             // Even if removing the original fails, this new
                             // copy still belongs in Undo.
                             outcome.changes.append(.created(step.to))
-                            try fm.removeItem(at: step.from)
+                            try copier.removeCopiedSource(step.from)
                             outcome.changes[outcome.changes.count - 1] = .moved(from: step.from, to: step.to)
                         } else {
                             outcome.changes.append(.created(step.to))
@@ -342,7 +343,6 @@ final class Transfer {
     /// Prepare a replacement before touching the existing destination. A
     /// cancelled/failed copy leaves it in place, including for a Move.
     private func replace(_ step: Step, into outcome: inout Outcome) throws {
-        let fm = FileManager.default
         let before = FileOps.revision(of: step.to)
         if move && sameVolume(step) {
             // Keep a same-volume move a rename (including its hard links),
@@ -357,12 +357,12 @@ final class Transfer {
         let staging = try FileOps.stagingFolder(beside: step.to)
         defer { FileOps.removeOwn(staging) }
         let ready = staging.appendingPathComponent(step.to.lastPathComponent)
-        try copier.copy(step.from, to: ready)
+        try copier.copy(step.from, to: ready, verifyingSource: move)
         guard copier.errors.isEmpty else { throw OpError(copier.errors.joined(separator: "\n")) }
         try installReplacement(ready, step: step, expected: before, into: &outcome)
         outcome.changes.append(.created(step.to))
         if move {
-            try fm.removeItem(at: step.from)
+            try copier.removeCopiedSource(step.from)
             outcome.changes[outcome.changes.count - 1] = .moved(from: step.from, to: step.to)
         }
     }
@@ -442,21 +442,38 @@ final class TreeCopier {
     private var finished: Int64 = 0
     private var fileCopied: Int64 = 0
     private var copyError: Int32?
+    private var sourceRevision: FileOps.TreeRevision?
+    private var revisionRoot: URL?
+    private var copyingFile: (url: URL, revision: FileOps.Revision)?
 
     init(cancelled: CancelFlag) {
         self.cancelled = cancelled
     }
 
     /// Nothing half-copied is left behind when it fails or is cancelled.
-    func copy(_ from: URL, to: URL) throws {
+    func copy(_ from: URL, to: URL, verifyingSource: Bool = false) throws {
         errors = []
+        sourceRevision = nil
+        revisionRoot = nil
         guard !FileOps.exists(to) else {
             throw OpError("There is already an item named “\(to.lastPathComponent)”.")
         }
         let staging = try FileOps.stagingFolder(beside: to)
         defer { FileOps.removeOwn(staging) }
         let ready = staging.appendingPathComponent("item")
-        try whileReading(from) { try copyNow($0, to: ready) }
+        try whileReading(from) { source in
+            if verifyingSource {
+                revisionRoot = source
+                sourceRevision = try FileOps.treeRevision(of: source, cancelled: cancelled)
+            }
+            var info = stat()
+            let isDirectory = lstat(source.path, &info) == 0 && info.st_mode & S_IFMT == S_IFDIR
+            let before = isDirectory ? nil : FileOps.revision(of: source)
+            try copyNow(source, to: ready)
+            if !isDirectory && (before == nil || FileOps.revision(of: source) != before) {
+                throw OpError("The source changed while copying. Try again after it finishes being saved.")
+            }
+        }
         guard FileOps.exists(ready) else {
             throw OpError(errors.isEmpty ? "The source couldn't be copied." : errors.joined(separator: "\n"))
         }
@@ -464,6 +481,28 @@ final class TreeCopier {
         if cancelled.isSet { throw CancellationError() }
         guard renamex_np(ready.path, to.path, UInt32(RENAME_EXCL)) == 0 else {
             throw NSError(domain: NSPOSIXErrorDomain, code: Int(errno))
+        }
+    }
+
+    /// Only a Move requests a source snapshot. Coordinate the final write
+    /// separately from the read and retain the source if any part changed.
+    func removeCopiedSource(_ source: URL) throws {
+        guard let expected = sourceRevision else { throw OpError("The source could not be verified, so it was kept.") }
+        let lock = NSLock()
+        var said = false
+        defer {
+            lock.lock()
+            if said { waiting?(false) }
+            lock.unlock()
+        }
+        try coordinated(source, lock: lock, waiting: {
+            if !said { said = true; self.waiting?(true) }
+        }, deleting: true) { url in
+            guard try FileOps.treeRevision(of: url, cancelled: self.cancelled) == expected else {
+                throw OpError("The source changed while copying, so both the source and its copy were kept.")
+            }
+            if self.cancelled.isSet { throw CancellationError() }
+            try FileManager.default.removeItem(at: url)
         }
     }
 
@@ -525,28 +564,38 @@ final class TreeCopier {
     /// handed over. Meanwhile another thread watches: when the app takes a
     /// while, it says so, and lets Cancel end the wait.
     private func coordinated<T>(_ url: URL, lock: NSLock, waiting say: @escaping () -> Void,
+                                deleting: Bool = false,
                                 _ body: (URL) throws -> T) throws -> T {
         var granted = false
-        DispatchQueue.global(qos: .userInitiated).async { [cancelled, coordinator] in
-            while true {
-                Thread.sleep(forTimeInterval: 0.25)
-                lock.lock()
-                defer { lock.unlock() }
-                if granted { return }
-                if cancelled.isSet { coordinator.cancel() }
-                say()
-            }
+        let watchdog = DispatchSource.makeTimerSource(queue: .global(qos: .userInitiated))
+        watchdog.schedule(deadline: .now() + .milliseconds(250), repeating: .milliseconds(250))
+        watchdog.setEventHandler { [cancelled, coordinator] in
+            lock.lock()
+            defer { lock.unlock() }
+            guard !granted else { return }
+            if cancelled.isSet { coordinator.cancel() }
+            say()
         }
+        watchdog.resume()
+        defer { watchdog.cancel() }
         func stopWatching() {
             lock.lock()
             granted = true
             lock.unlock()
+            watchdog.cancel()
         }
         var refused: NSError?
         var result: Result<T, Error>?
-        coordinator.coordinate(readingItemAt: url, options: [], error: &refused) { url in
-            stopWatching()
-            result = Result { try body(url) }
+        if deleting {
+            coordinator.coordinate(writingItemAt: url, options: .forDeleting, error: &refused) { url in
+                stopWatching()
+                result = Result { try body(url) }
+            }
+        } else {
+            coordinator.coordinate(readingItemAt: url, options: [], error: &refused) { url in
+                stopWatching()
+                result = Result { try body(url) }
+            }
         }
         stopWatching()
         if let result { return try result.get() }
@@ -566,6 +615,7 @@ final class TreeCopier {
         finished = 0
         fileCopied = 0
         copyError = nil
+        copyingFile = nil
         let state = copyfile_state_alloc()
         defer { copyfile_state_free(state) }
         let callback: copyfile_callback_t = copierStatus
@@ -602,6 +652,12 @@ final class TreeCopier {
             if let source, case let path = String(cString: source), Self.isPlaceholder(path) {
                 do {
                     try whileReading(URL(fileURLWithPath: path)) { _ in }
+                    // Hydration was requested by us before these bytes were
+                    // read. Update just this placeholder's Move baseline.
+                    if let root = revisionRoot, path.hasPrefix(root.path + "/"),
+                       let revision = FileOps.revision(of: URL(fileURLWithPath: path)) {
+                        sourceRevision?.entries[String(path.dropFirst(root.path.count + 1))] = revision
+                    }
                 } catch is CancellationError {
                     return COPYFILE_QUIT
                 } catch {
@@ -609,7 +665,17 @@ final class TreeCopier {
                     return COPYFILE_SKIP
                 }
             }
+            if let source {
+                let url = URL(fileURLWithPath: String(cString: source))
+                copyingFile = FileOps.revision(of: url).map { (url, $0) }
+            }
         case (COPYFILE_RECURSE_FILE, COPYFILE_FINISH):
+            if let copyingFile, FileOps.revision(of: copyingFile.url) != copyingFile.revision {
+                copyError = EBUSY
+                errors.append("“\(copyingFile.url.lastPathComponent)” changed while copying.")
+                return COPYFILE_QUIT
+            }
+            copyingFile = nil
             var info = stat()
             if let source, lstat(source, &info) == 0 { finished += Int64(info.st_size) }
             fileCopied = 0

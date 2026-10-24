@@ -130,8 +130,19 @@ enum FileUndo {
             }
             do {
                 try fm.createDirectory(at: from.deletingLastPathComponent(), withIntermediateDirectories: true)
-                try fm.moveItem(at: to, to: from)
-                back.append(.moved(from: to, to: from))
+                if isSlow(change) {
+                    let copier = TreeCopier(cancelled: CancelFlag())
+                    try copier.copy(to, to: from, verifyingSource: true)
+                    // Keep a completed copy undoable even if source removal
+                    // fails or its contents changed while crossing volumes.
+                    back.append(.created(from))
+                    guard copier.errors.isEmpty else { throw OpError(copier.errors.joined(separator: "\n")) }
+                    try copier.removeCopiedSource(to)
+                    back[back.count - 1] = .moved(from: to, to: from)
+                } else {
+                    try fm.moveItem(at: to, to: from)
+                    back.append(.moved(from: to, to: from))
+                }
             } catch {
                 failures.append(error.localizedDescription)
             }

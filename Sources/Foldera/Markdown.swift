@@ -1,4 +1,5 @@
 import AppKit
+import ImageIO
 import UniformTypeIdentifiers
 import WebKit
 
@@ -10,10 +11,32 @@ enum Markdown {
 
     static func isMarkdown(_ url: URL) -> Bool { extensions.contains(url.pathExtension.lowercased()) }
 
-    static func html(_ text: String) -> String {
-        let lines = text.replacingOccurrences(of: "\r\n", with: "\n").replacingOccurrences(of: "\t", with: "    ")
+    static let previewBytes = 2_000_000
+
+    private final class RenderBudget {
+        let cancelled: CancelFlag
+        let deadline: UInt64
+        var stopped = false
+        init(cancelled: CancelFlag, seconds: TimeInterval) {
+            self.cancelled = cancelled
+            deadline = DispatchTime.now().uptimeNanoseconds + UInt64(max(0, seconds) * 1_000_000_000)
+        }
+        func shouldStop() -> Bool {
+            if cancelled.isSet || DispatchTime.now().uptimeNanoseconds >= deadline { stopped = true }
+            return stopped
+        }
+    }
+
+    static func html(_ text: String, cancelled: CancelFlag = CancelFlag(), timeLimit: TimeInterval = 2) -> String {
+        let budget = RenderBudget(cancelled: cancelled, seconds: timeLimit)
+        guard !budget.shouldStop() else { return "" }
+        let prefix = text.utf8.prefix(previewBytes)
+        let shortened = prefix.endIndex != text.utf8.endIndex
+        let lines = String(decoding: prefix, as: UTF8.self).replacingOccurrences(of: "\r\n", with: "\n").replacingOccurrences(of: "\t", with: "    ")
             .components(separatedBy: "\n")
-        return blocks(lines[...])
+        let body = blocks(lines[...], budget: budget)
+        guard !cancelled.isSet else { return "" }
+        return body + (shortened || budget.stopped ? "<p><em>This preview was shortened. Open the document to read the rest.</em></p>\n" : "")
     }
 
     // MARK: Blocks
@@ -68,14 +91,15 @@ enum Markdown {
     /// further, so no file can run the parser out of stack.
     static let deepest = 32
 
-    private static func blocks(_ input: ArraySlice<String>, depth: Int = 0) -> String {
+    private static func blocks(_ input: ArraySlice<String>, depth: Int = 0, budget: RenderBudget) -> String {
+        guard !budget.shouldStop() else { return "" }
         guard depth < deepest else {
             let text = input.filter { !isBlank($0) }.map { escape($0) }.joined(separator: "<br>\n")
             return text.isEmpty ? "" : "<p>\(text)</p>\n"
         }
         var out = ""
         var lines = input
-        while let line = lines.first {
+        while let line = lines.first, !budget.shouldStop() {
             if isBlank(line) {
                 lines.removeFirst()
                 continue
@@ -84,7 +108,7 @@ enum Markdown {
             if let fence = match(#"^ {0,3}(```+|~~~+) *([^ `]*)"#, line) {
                 lines.removeFirst()
                 var code: [String] = []
-                while let next = lines.first, !next.trimmingCharacters(in: .whitespaces).hasPrefix(fence[1]) {
+                while let next = lines.first, !budget.shouldStop(), !next.trimmingCharacters(in: .whitespaces).hasPrefix(fence[1]) {
                     code.append(next)
                     lines.removeFirst()
                 }
@@ -96,7 +120,7 @@ enum Markdown {
             // Heading.
             if let h = match(#"^ {0,3}(#{1,6})(?: +(.*?))?(?: +#+)? *$"#, line) {
                 lines.removeFirst()
-                out += "<h\(h[1].count)>\(inline(h[2]))</h\(h[1].count)>\n"
+                out += "<h\(h[1].count)>\(inline(h[2], budget: budget))</h\(h[1].count)>\n"
                 continue
             }
             if isRule(line) {
@@ -107,22 +131,22 @@ enum Markdown {
             // Quote: strip the markers and render what is inside.
             if match(#"^ {0,3}>"#, line) != nil {
                 var inner: [String] = []
-                while let next = lines.first, !isBlank(next), match(#"^ {0,3}>"#, next) != nil || !startsBlock(next) {
+                while let next = lines.first, !budget.shouldStop(), !isBlank(next), match(#"^ {0,3}>"#, next) != nil || !startsBlock(next) {
                     inner.append(next.replacingOccurrences(of: #"^ {0,3}> ?"#, with: "", options: .regularExpression))
                     lines.removeFirst()
                 }
-                out += "<blockquote>\n\(blocks(inner[...], depth: depth + 1))</blockquote>\n"
+                out += "<blockquote>\n\(blocks(inner[...], depth: depth + 1, budget: budget))</blockquote>\n"
                 continue
             }
             // List.
             if let first = listMarker(line) {
-                out += list(&lines, first, depth: depth)
+                out += list(&lines, first, depth: depth, budget: budget)
                 continue
             }
             // Indented code.
             if indent(line) >= 4 {
                 var code: [String] = []
-                while let next = lines.first, indent(next) >= 4 || isBlank(next) {
+                while let next = lines.first, !budget.shouldStop(), indent(next) >= 4 || isBlank(next) {
                     code.append(String(next.dropFirst(min(4, indent(next)))))
                     lines.removeFirst()
                 }
@@ -132,18 +156,18 @@ enum Markdown {
             }
             // Table: a row of cells over a divider row.
             if line.contains("|"), lines.count > 1, isTableDivider(lines[lines.startIndex + 1]) {
-                out += table(&lines)
+                out += table(&lines, budget: budget)
                 continue
             }
             // Paragraph, or a setext heading when underlined.
             var text: [String] = []
-            while let next = lines.first, !isBlank(next) {
+            while let next = lines.first, !budget.shouldStop(), !isBlank(next) {
                 // An underline is looked for before anything else: "---" under
                 // a line of text makes it a heading, not a rule.
                 if !text.isEmpty, let underline = match(#"^ {0,3}(=+|-+) *$"#, next) {
                     lines.removeFirst()
                     let level = underline[1].hasPrefix("=") ? 1 : 2
-                    out += "<h\(level)>\(inline(text.joined(separator: " ")))</h\(level)>\n"
+                    out += "<h\(level)>\(inline(text.joined(separator: " "), budget: budget))</h\(level)>\n"
                     text = []
                     break
                 }
@@ -151,27 +175,31 @@ enum Markdown {
                 text.append(next)
                 lines.removeFirst()
             }
-            if !text.isEmpty { out += "<p>\(paragraph(text))</p>\n" }
+            if !text.isEmpty { out += "<p>\(paragraph(text, budget: budget))</p>\n" }
         }
         return out
     }
 
     /// Lines joined; two trailing spaces or a backslash make a line break.
-    private static func paragraph(_ text: [String]) -> String {
-        text.enumerated().map { i, line -> String in
+    private static func paragraph(_ text: [String], budget: RenderBudget) -> String {
+        var rendered: [String] = []
+        for (i, line) in text.enumerated() {
+            if budget.shouldStop() { break }
             let last = i == text.count - 1
             if !last && (line.hasSuffix("  ") || line.hasSuffix("\\")) {
-                return inline(line.trimmingCharacters(in: CharacterSet(charactersIn: " \\"))) + "<br>"
+                rendered.append(inline(line.trimmingCharacters(in: CharacterSet(charactersIn: " \\")), budget: budget) + "<br>")
+            } else {
+                rendered.append(inline(line.trimmingCharacters(in: .whitespaces), budget: budget))
             }
-            return inline(line.trimmingCharacters(in: .whitespaces))
-        }.joined(separator: "\n")
+        }
+        return rendered.joined(separator: "\n")
     }
 
     private static func list(_ lines: inout ArraySlice<String>, _ first: (indent: Int, ordered: Bool, start: Int, content: Int),
-                             depth: Int) -> String {
+                             depth: Int, budget: RenderBudget) -> String {
         var items: [[String]] = []
         var loose = false
-        while let line = lines.first {
+        while let line = lines.first, !budget.shouldStop() {
             if let marker = listMarker(line), marker.indent < first.content, marker.ordered == first.ordered {
                 lines.removeFirst()
                 items.append([String(line.dropFirst(marker.content))])
@@ -200,13 +228,14 @@ enum Markdown {
         let start = first.ordered && first.start != 1 ? " start=\"\(first.start)\"" : ""
         var out = "<\(tag)\(start)>\n"
         for item in items {
+            if budget.shouldStop() { break }
             var content = item
             var task = ""
             if let box = match(#"^\[([ xX])\] "#, content[0]) {
                 task = "<input type=\"checkbox\" disabled\(box[1] == " " ? "" : " checked")> "
                 content[0].removeFirst(4)
             }
-            let inner = blocks(content[...], depth: depth + 1)
+            let inner = blocks(content[...], depth: depth + 1, budget: budget)
             let tight = !loose && inner.hasPrefix("<p>") && inner.components(separatedBy: "<p>").count == 2
             let body = tight ? inner.replacingOccurrences(of: "<p>", with: "").replacingOccurrences(of: "</p>", with: "") : inner
             out += "<li\(task.isEmpty ? "" : " class=\"task\"")>\(task)\(body.trimmingCharacters(in: .newlines))</li>\n"
@@ -214,7 +243,7 @@ enum Markdown {
         return out + "</\(tag)>\n"
     }
 
-    private static func table(_ lines: inout ArraySlice<String>) -> String {
+    private static func table(_ lines: inout ArraySlice<String>, budget: RenderBudget) -> String {
         let header = cells(lines.removeFirst())
         let aligns = cells(lines.removeFirst()).map { cell -> String in
             switch (cell.hasPrefix(":"), cell.hasSuffix(":")) {
@@ -225,11 +254,11 @@ enum Markdown {
             }
         }
         func align(_ i: Int) -> String { i < aligns.count ? aligns[i] : "" }
-        var out = "<table>\n<thead><tr>" + header.enumerated().map { "<th\(align($0))>\(inline($1))</th>" }.joined() + "</tr></thead>\n<tbody>\n"
-        while let line = lines.first, !isBlank(line), line.contains("|") {
+        var out = "<table>\n<thead><tr>" + header.enumerated().map { "<th\(align($0))>\(inline($1, budget: budget))</th>" }.joined() + "</tr></thead>\n<tbody>\n"
+        while let line = lines.first, !budget.shouldStop(), !isBlank(line), line.contains("|") {
             lines.removeFirst()
             let row = cells(line)
-            out += "<tr>" + header.indices.map { "<td\(align($0))>\($0 < row.count ? inline(row[$0]) : "")</td>" }.joined() + "</tr>\n"
+            out += "<tr>" + header.indices.map { "<td\(align($0))>\($0 < row.count ? inline(row[$0], budget: budget) : "")</td>" }.joined() + "</tr>\n"
         }
         return out + "</tbody>\n</table>\n"
     }
@@ -281,14 +310,24 @@ enum Markdown {
     }
 
     static func inline(_ source: String) -> String {
-        let deadline = deadline(for: source)
+        inline(source, budget: nil)
+    }
+
+    private static func inline(_ source: String, budget: RenderBudget?) -> String {
+        guard budget?.shouldStop() != true else { return "" }
+        let deadline = min(deadline(for: source), budget?.deadline ?? .max)
         // Code spans first, kept aside so nothing inside them is formatted.
         // Each is marked by a number between two NULs; a NUL in the file
         // itself becomes U+FFFD first (as a browser would show it), so the
         // text can never pass for a mark.
         var kept: [String] = []
         func keep(_ html: String) -> String {
-            kept.append(html)
+            // A link label can contain an already-kept code span/image.
+            // Expand those before keeping the complete generated link.
+            let expanded = replace(html, #"\x00(\d+)\x00"#) {
+                Int($0[1]).flatMap { kept.indices.contains($0) ? kept[$0] : nil } ?? ""
+            }
+            kept.append(expanded)
             return "\u{0}\(kept.count - 1)\u{0}"
         }
         var text = replace(source.replacingOccurrences(of: "\u{0}", with: "\u{FFFD}"), #"(`+)(.+?)\1"#, until: deadline) {
@@ -300,15 +339,20 @@ enum Markdown {
             keep("<img src=\"\(safe($0[2]))\" alt=\"\($0[1])\"\($0[3].isEmpty ? "" : " title=\"\($0[3])\"")>")
         }
         text = replace(text, #"\[([^\]]+)\]\(([^)\s]+)(?: &quot;([^&]*)&quot;)?\)"#, until: deadline) {
-            "<a href=\"\(safe($0[2]))\"\($0[3].isEmpty ? "" : " title=\"\($0[3])\"")>\($0[1])</a>"
+            keep("<a href=\"\(safe($0[2]))\"\($0[3].isEmpty ? "" : " title=\"\($0[3])\"")>\(emphasis($0[1], until: deadline))</a>")
         }
-        text = replace(text, #"&lt;((?:https?|mailto):[^&\s]+)&gt;"#, until: deadline) { "<a href=\"\($0[1])\">\($0[1])</a>" }
-        text = replace(text, #"(\*\*|__)(?=\S)(.+?)(?<=\S)\1"#, until: deadline) { "<strong>\($0[2])</strong>" }
+        text = replace(text, #"&lt;((?:https?|mailto):[^&\s]+)&gt;"#, until: deadline) { keep("<a href=\"\($0[1])\">\($0[1])</a>") }
+        text = emphasis(text, until: deadline)
+        // Always to the end: protected HTML goes back even after the time budget.
+        return replace(text, #"\x00(\d+)\x00"#) { Int($0[1]).flatMap { kept.indices.contains($0) ? kept[$0] : nil } ?? "" }
+    }
+
+    private static func emphasis(_ source: String, until deadline: UInt64) -> String {
+        var text = replace(source, #"(\*\*|__)(?=\S)(.+?)(?<=\S)\1"#, until: deadline) { "<strong>\($0[2])</strong>" }
         text = replace(text, #"(?<![\w*])\*(?=\S)(.+?)(?<=\S)\*(?!\*)"#, until: deadline) { "<em>\($0[1])</em>" }
         text = replace(text, #"(?<![\w_])_(?=\S)(.+?)(?<=\S)_(?![\w_])"#, until: deadline) { "<em>\($0[1])</em>" }
         text = replace(text, #"~~(?=\S)(.+?)(?<=\S)~~"#, until: deadline) { "<del>\($0[1])</del>" }
-        // Always to the end, however long the rest took: what was kept aside goes back in.
-        return replace(text, #"\x00(\d+)\x00"#) { Int($0[1]).flatMap { kept.indices.contains($0) ? kept[$0] : nil } ?? "" }
+        return text
     }
 
     // MARK: Page
@@ -390,8 +434,8 @@ final class MarkdownView: NSView, WKNavigationDelegate {
 
     /// Renders `text`; pictures and links are found relative to `file`'s folder.
     func show(_ text: String, file: URL) {
-        render.run({
-            let html = Markdown.html(text)
+        render.runCancellable({ cancelled in
+            let html = Markdown.html(text, cancelled: cancelled)
             let literal = (try? JSONEncoder().encode(html)).flatMap { String(data: $0, encoding: .utf8) }
             return (html, literal)
         }) { [weak self] rendered, literal in
@@ -468,6 +512,8 @@ final class MarkdownView: NSView, WKNavigationDelegate {
 final class LocalPictures: NSObject, WKURLSchemeHandler {
     static let scheme = "foldera-md"
     private static let pageName = ".foldera-page.html"
+    private static let reads = BackgroundTask.queue("Foldera.markdown-pictures", limit: 2)
+    static let maximumImageBytes = 32 << 20
     /// The folder that stands for "/" in the page's address.
     private var root = URL(fileURLWithPath: "/")
     private(set) var base = URL(string: "\(scheme)://files/")!
@@ -476,6 +522,8 @@ final class LocalPictures: NSObject, WKURLSchemeHandler {
 
     /// Serves `folder`, with up to two folders above it (never above the home folder or a drive).
     func serve(_ folder: URL) {
+        running.values.forEach { $0.cancel() }
+        running.removeAll()
         var top = folder.standardizedFileURL
         let home = FileManager.default.homeDirectoryForCurrentUser.standardizedFileURL.path
         for _ in 0..<2 where top.path != home && top.path != "/" && !isVolumeRoot(top) {
@@ -505,7 +553,49 @@ final class LocalPictures: NSObject, WKURLSchemeHandler {
     }
 
     /// Tasks WebKit hasn't stopped; a stopped one must not be answered.
-    private var running = Set<ObjectIdentifier>()
+    private var running: [ObjectIdentifier: BlockOperation] = [:]
+
+    /// Chunked, bounded reads keep one large document from retaining all of
+    /// its full-size photos at once. Cancellation is checked before each read.
+    static func readImage(_ file: URL, limit: Int = maximumImageBytes, cancelled: () -> Bool) -> Data? {
+        guard limit >= 0, !cancelled(), let handle = try? FileHandle(forReadingFrom: file) else { return nil }
+        defer { try? handle.close() }
+        var result = Data()
+        do {
+            while !cancelled() {
+                guard let chunk = try handle.read(upToCount: min(1 << 20, max(limit - result.count + 1, 1))),
+                      !chunk.isEmpty else { return cancelled() ? nil : result }
+                guard chunk.count <= limit - result.count else { return nil }
+                result.append(chunk)
+            }
+        } catch {}
+        return nil
+    }
+
+    struct PictureData {
+        let body: Data
+        let type: String
+    }
+
+    /// Oversized raster images still get a usable preview, without loading
+    /// their entire original into Data or WebKit. Large SVGs stay bounded.
+    static func pictureData(_ file: URL, kind: UTType, originalLimit: Int = maximumImageBytes,
+                            cancelled: () -> Bool) -> PictureData? {
+        guard !cancelled() else { return nil }
+        let attributes = try? FileManager.default.attributesOfItem(atPath: file.path)
+        let size = (attributes?[.size] as? NSNumber)?.int64Value
+        if let size, size > Int64(originalLimit) {
+            guard !kind.conforms(to: .svg), !cancelled(), let image = Thumbnails.decode(file, pixels: 2048),
+                  !cancelled() else { return nil }
+            let data = NSMutableData()
+            guard let output = CGImageDestinationCreateWithData(data, "public.png" as CFString, 1, nil) else { return nil }
+            CGImageDestinationAddImage(output, image, nil)
+            guard CGImageDestinationFinalize(output), !cancelled() else { return nil }
+            return PictureData(body: data as Data, type: "image/png")
+        }
+        guard let data = readImage(file, limit: originalLimit, cancelled: cancelled) else { return nil }
+        return PictureData(body: data, type: kind.preferredMIMEType ?? "application/octet-stream")
+    }
 
     /// WebKit calls this on the main thread, where `serve` and `page` are set.
     /// Pictures are read in the background: a big one, or one on a slow
@@ -519,19 +609,28 @@ final class LocalPictures: NSObject, WKURLSchemeHandler {
             return answer(task, url: url, body: nil, type: "")
         }
         let id = ObjectIdentifier(task)
-        running.insert(id)
-        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
-            let body = try? Data(contentsOf: file)
-            DispatchQueue.main.async {
-                guard let self, self.running.remove(id) != nil else { return }
-                self.answer(task, url: url, body: body, type: kind.preferredMIMEType ?? "application/octet-stream")
+        let operation = BlockOperation()
+        operation.addExecutionBlock { [weak self, weak operation] in
+            guard let operation, !operation.isCancelled else { return }
+            let picture = autoreleasepool { Self.pictureData(file, kind: kind, cancelled: { operation.isCancelled }) }
+            // Keep this read slot until delivery too: a busy main queue must
+            // not accumulate a separate full Data value for every picture.
+            DispatchQueue.main.sync {
+                guard let self, self.running[id] === operation, !operation.isCancelled else { return }
+                self.running[id] = nil
+                self.answer(task, url: url, body: picture?.body, type: picture?.type ?? "")
             }
         }
+        running[id]?.cancel()
+        running[id] = operation
+        Self.reads.addOperation(operation)
     }
 
     func webView(_ webView: WKWebView, stop task: WKURLSchemeTask) {
-        running.remove(ObjectIdentifier(task))
+        running.removeValue(forKey: ObjectIdentifier(task))?.cancel()
     }
+
+    deinit { running.values.forEach { $0.cancel() } }
 
     private func answer(_ task: WKURLSchemeTask, url: URL, body: Data?, type: String) {
         guard let body else { return task.didFailWithError(URLError(.fileDoesNotExist)) }
@@ -574,6 +673,22 @@ final class MarkdownTextView: NSScrollView {
 /// what another app wrote since the file was read is not overwritten unasked.
 enum TextFile {
     enum Conflict { case overwrite, reload, cancel }
+    static let maximumBytes = 32 << 20
+
+    /// The renderer's preview limit is too late to bound reading the input.
+    /// Reject an oversized document whole; never edit or save a partial read.
+    static func data(_ url: URL, limit: Int = maximumBytes) throws -> Data {
+        let file = try FileHandle(forReadingFrom: url)
+        defer { try? file.close() }
+        var bytes = Data()
+        while let chunk = try file.read(upToCount: min(1 << 20, max(1, limit - bytes.count + 1))), !chunk.isEmpty {
+            guard bytes.count + chunk.count <= limit else {
+                throw OpError("This document is too large for the built-in text preview and editor (32 MiB maximum).")
+            }
+            bytes.append(chunk)
+        }
+        return bytes
+    }
 
     struct Document {
         let text: String
@@ -600,7 +715,7 @@ enum TextFile {
     }
 
     static func read(_ url: URL) -> String? {
-        try? document(Data(contentsOf: url)).text
+        try? document(data(url)).text
     }
 
     /// When the file last changed on disk (a fresh URL, since a URL keeps what it has read).
@@ -613,7 +728,7 @@ enum TextFile {
 
     static func write(_ text: String, to url: URL) throws {
         try FileOps.refuseInArchive([url])
-        let original = FileOps.exists(url) ? try document(Data(contentsOf: url)) : Document(text: "", encoding: .utf8, prefix: Data())
+        let original = FileOps.exists(url) ? try document(data(url)) : Document(text: "", encoding: .utf8, prefix: Data())
         guard let encoded = text.data(using: original.encoding, allowLossyConversion: false) else {
             throw OpError("The text cannot be saved in this file's original encoding.")
         }

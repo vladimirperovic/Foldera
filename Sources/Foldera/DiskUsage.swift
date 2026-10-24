@@ -13,6 +13,7 @@ final class UsageNode {
     /// Items in this folder's tree that couldn't be read, so its size is a
     /// lower bound. Kept on every folder, for when one is opened from the cache.
     var unreadable = 0
+    private var childrenUnreadable = 0
     /// Files too small to keep one by one, summed per folder…
     var smallFiles: Int64 = 0
     var smallCount = 0
@@ -51,21 +52,34 @@ final class UsageNode {
 
     /// Adds up the sizes from the bottom, and puts the biggest first.
     @discardableResult
-    func total() -> Int64 {
-        var bytes = smallFiles
-        var count = smallCount
-        var missing = unreadable
-        for child in children {
-            if child.isFolder { child.total() }
-            bytes += child.size
-            count += child.isFolder ? child.files : 1
-            missing += child.isFolder ? child.unreadable : 0
+    func total(cancelled: CancelFlag? = nil) -> Int64 {
+        // Postorder without recursion: deeply nested folders must not exhaust
+        // the stack, and cancellation still works during the final tally.
+        var pending: [(UsageNode, Bool)] = [(self, false)]
+        while let (node, visited) = pending.popLast() {
+            if cancelled?.isSet == true { return size }
+            if !visited {
+                pending.append((node, true))
+                for child in node.children where child.isFolder { pending.append((child, false)) }
+                continue
+            }
+            var bytes = node.smallFiles
+            var count = node.smallCount
+            var missing = 0
+            for child in node.children {
+                if cancelled?.isSet == true { return size }
+                bytes += child.size
+                count += child.isFolder ? child.files : 1
+                missing += child.isFolder ? child.unreadable : 0
+            }
+            node.size = bytes
+            node.files = count
+            node.unreadable += missing - node.childrenUnreadable
+            node.childrenUnreadable = missing
+            node.dominant = nil
+            node.children.sort { $0.size > $1.size }
         }
-        size = bytes
-        files = count
-        unreadable = missing
-        children.sort { $0.size > $1.size }
-        return bytes
+        return size
     }
 
     /// The node for `url` somewhere below (or at) this one.
@@ -85,14 +99,19 @@ final class UsageNode {
 
     /// Gone (to the Trash): out of the tree, its size out of every folder above.
     func remove() {
-        var ancestor = parent
+        guard let parent, parent.children.contains(where: { $0 === self }) else { return }
+        parent.children.removeAll { $0 === self }
+        var ancestor: UsageNode? = parent
         while let node = ancestor {
             node.size -= size
             node.files -= isFolder ? files : 1
             node.unreadable -= isFolder ? unreadable : 0
+            node.childrenUnreadable -= isFolder ? unreadable : 0
+            node.dominant = nil
+            node.children.sort { $0.size > $1.size }
             ancestor = node.parent
         }
-        parent?.children.removeAll { $0 === self }
+        self.parent = nil
     }
 
     /// Children as the treemap shows them: the folder's small files as one more block.
@@ -176,6 +195,7 @@ final class UsageScanner {
 
     /// `foreign` is worked out from the disk when not given.
     func scan(_ root: URL, foreign: Bool? = nil) -> UsageNode? {
+        if cancelled.isSet { return nil }
         let foreign = foreign ?? Self.isForeign(root)
         let keys: [URLResourceKey] = foreign
             ? [.isDirectoryKey, .isSymbolicLinkKey, .isVolumeKey, .fileAllocatedSizeKey, .fileSizeKey]
@@ -261,7 +281,8 @@ final class UsageScanner {
             let node = folders[path] ?? folders[(path as NSString).deletingLastPathComponent] ?? top
             node.unreadable += 1
         }
-        top.total()
+        top.total(cancelled: cancelled)
+        if cancelled.isSet { return nil }
         return top
     }
 }
@@ -270,6 +291,27 @@ final class UsageScanner {
 /// is instant. F5 measures again.
 enum UsageCache {
     private static var trees: [UsageNode] = []
+    final class Scan {
+        let url: URL
+        var isCurrent = true
+        init(_ url: URL) { self.url = url }
+    }
+    private struct WeakScan { weak var value: Scan? }
+    private static var scans: [WeakScan] = []
+
+    /// Invalidations apply to running scans too; a late result must not
+    /// repopulate a cache that changed while its tree was being read.
+    static func beginScan(_ url: URL) -> Scan {
+        scans.removeAll { $0.value == nil }
+        let scan = Scan(url)
+        scans.append(WeakScan(value: scan))
+        return scan
+    }
+
+    private static func overlaps(_ a: URL, _ b: URL) -> Bool {
+        let x = a.standardizedFileURL.path, y = b.standardizedFileURL.path
+        return x == y || x.hasPrefix(y == "/" ? "/" : y + "/") || y.hasPrefix(x == "/" ? "/" : x + "/")
+    }
 
     static func node(for url: URL) -> UsageNode? {
         for tree in trees { if let node = tree.find(url) { return node } }
@@ -284,11 +326,9 @@ enum UsageCache {
 
     /// Drops every measure that `url` is part of, and every measure made inside it.
     static func forget(_ url: URL) {
-        let path = url.standardizedFileURL.path
-        trees.removeAll {
-            let root = $0.url.standardizedFileURL.path
-            return path == root || path.hasPrefix(root == "/" ? "/" : root + "/") || root.hasPrefix(path == "/" ? "/" : path + "/")
-        }
+        trees.removeAll { overlaps(url, $0.url) }
+        scans.removeAll { $0.value == nil }
+        for scan in scans.compactMap(\.value) where overlaps(url, scan.url) { scan.isCurrent = false }
     }
 
     /// Something was added to or taken from `folder`: its size, and its parents', are no longer known.
@@ -311,11 +351,15 @@ enum Treemap {
             guard side > 0 else { break }
             var end = start + 1
             var sum = areas[start]
-            var worst = worstRatio(areas[start..<end], sum: sum, side: side)
+            var smallest = areas[start], largest = areas[start]
+            var worst = worstRatio(smallest: smallest, largest: largest, sum: sum, side: side)
             while end < areas.count {
-                let candidate = worstRatio(areas[start...end], sum: sum + areas[end], side: side)
+                let nextSmallest = min(smallest, areas[end]), nextLargest = max(largest, areas[end])
+                let candidate = worstRatio(smallest: nextSmallest, largest: nextLargest, sum: sum + areas[end], side: side)
                 if candidate > worst { break }
                 sum += areas[end]
+                smallest = nextSmallest
+                largest = nextLargest
                 worst = candidate
                 end += 1
             }
@@ -337,8 +381,8 @@ enum Treemap {
         return result
     }
 
-    private static func worstRatio(_ row: ArraySlice<Double>, sum: Double, side: Double) -> Double {
-        guard let largest = row.max(), let smallest = row.min(), smallest > 0, sum > 0 else { return .infinity }
+    private static func worstRatio(smallest: Double, largest: Double, sum: Double, side: Double) -> Double {
+        guard smallest > 0, sum > 0 else { return .infinity }
         let s2 = sum * sum, w2 = side * side
         return max(w2 * largest / s2, s2 / (w2 * smallest))
     }
@@ -356,7 +400,7 @@ final class TreemapView: NSView {
             hovered = nil
             laidOut = .zero
             legend = root.map(Self.legend(of:)) ?? []
-            freeSpace = root.flatMap(Self.diskFreeSpace(at:))
+            readFreeSpace()
             needsDisplay = true
         }
     }
@@ -376,10 +420,22 @@ final class TreemapView: NSView {
     /// Asked once per tree, not on every draw: resizing draws many times a
     /// second, and a network drive can be slow to answer.
     private var freeSpace: Int64?
+    private static let metadataReads = BackgroundTask.queue("Foldera.usage-metadata", limit: 2)
+    private let spaceRead = BackgroundTask(queue: TreemapView.metadataReads)
     private static let headerHeight: CGFloat = 54
 
     private static func diskFreeSpace(at node: UsageNode) -> Int64? {
         try? node.url.resourceValues(forKeys: [.volumeAvailableCapacityForImportantUsageKey]).volumeAvailableCapacityForImportantUsage
+    }
+
+    private func readFreeSpace() {
+        spaceRead.cancel()
+        freeSpace = nil
+        guard let root else { return }
+        spaceRead.run({ Self.diskFreeSpace(at: root) }) { [weak self] space in
+            self?.freeSpace = space
+            self?.needsDisplay = true
+        }
     }
 
     override var isFlipped: Bool { true }
@@ -400,8 +456,8 @@ final class TreemapView: NSView {
         laidOut = .zero
         if let root {
             legend = Self.legend(of: root)
-            freeSpace = Self.diskFreeSpace(at: root)
         }
+        readFreeSpace()
         needsDisplay = true
     }
 
@@ -416,15 +472,15 @@ final class TreemapView: NSView {
     /// Sizes by kind of file, biggest first; small files count as "other".
     static func legend(of root: UsageNode) -> [(kind: SearchFilters.Kind?, size: Int64)] {
         var totals: [SearchFilters.Kind?: Int64] = [:]
-        func walk(_ node: UsageNode) {
+        var pending = [root]
+        while let node = pending.popLast() {
             if let small = node.smallByKind {
                 for (index, size) in small.enumerated() where size > 0 { totals[UsageNode.kinds[index], default: 0] += size }
             }
             for child in node.children {
-                if child.isFolder && !child.isPackage { walk(child) } else { totals[child.kind, default: 0] += child.size }
+                if child.isFolder && !child.isPackage { pending.append(child) } else { totals[child.kind, default: 0] += child.size }
             }
         }
-        walk(root)
         return totals.filter { $0.value > 0 }.map { ($0.key, $0.value) }.sorted { $0.size > $1.size }
     }
 

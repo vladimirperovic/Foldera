@@ -90,11 +90,11 @@ import Testing
         func counts() -> (reads: Int, active: Int, peak: Int) { lock.lock(); defer { lock.unlock() }; return (reads, active, peak) }
         let original = ExplorerTab.readFolderInSteps
         ExplorerTab.readFolder = { url, hidden in
-            guard url.key == folder.key else { return try original(url, hidden, { _ in }) }
+            guard url.key == folder.key else { return try original(url, hidden, CancelFlag(), { _ in }) }
             lock.lock(); reads += 1; active += 1; peak = max(peak, active); lock.unlock()
             _ = gate.wait(timeout: .now() + 5)
             lock.lock(); active -= 1; lock.unlock()
-            return try original(url, hidden, { _ in })
+            return try original(url, hidden, CancelFlag(), { _ in })
         }
         defer {
             ExplorerTab.readFolderInSteps = original
@@ -136,7 +136,7 @@ import Testing
         let original = ExplorerTab.readFolderInSteps
         ExplorerTab.readFolder = { url, hidden in
             if url.key == slow.key { _ = gate.wait(timeout: .now() + 5) }
-            return try original(url, hidden, { _ in })
+            return try original(url, hidden, CancelFlag(), { _ in })
         }
         defer {
             ExplorerTab.readFolderInSteps = original
@@ -179,9 +179,9 @@ import Testing
         // A slow disk that hands over two pictures, then takes its time over the third.
         let gate = DispatchSemaphore(value: 0)
         let original = ExplorerTab.readFolderInSteps
-        ExplorerTab.readFolderInSteps = { url, hidden, step in
-            guard url.key == slow.key else { return try original(url, hidden, step) }
-            let all = try original(url, hidden, { _ in })
+        ExplorerTab.readFolderInSteps = { url, hidden, cancelled, step in
+            guard url.key == slow.key else { return try original(url, hidden, cancelled, step) }
+            let all = try original(url, hidden, CancelFlag(), { _ in })
             Thread.sleep(forTimeInterval: 0.4)
             step(Array(all.prefix(2)))
             _ = gate.wait(timeout: .now() + 5)
@@ -283,7 +283,7 @@ import Testing
         let gate = DispatchSemaphore(value: 0)
         let original = ExplorerTab.readFolderInSteps
         ExplorerTab.readFolder = { url, hidden in
-            guard url.key == folder.key else { return try original(url, hidden, { _ in }) }
+            guard url.key == folder.key else { return try original(url, hidden, CancelFlag(), { _ in }) }
             _ = gate.wait(timeout: .now() + 5)
             return before.map { FileItem(url: $0) }
         }

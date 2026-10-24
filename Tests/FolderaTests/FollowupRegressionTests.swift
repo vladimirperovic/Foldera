@@ -185,9 +185,9 @@ extension BackgroundWork {
         let tab = ExplorerTab(location: .folder(first.url))
         defer { tab.watcher.stop(); ExplorerTab.readFolderInSteps = original; gate.signal() }
         try await followupEventually { tab.items.count == 1 }
-        ExplorerTab.readFolderInSteps = { url, hidden, step in
-            guard url.key == slow.url.key else { return try original(url, hidden, step) }
-            let all = try original(url, hidden, { _ in })
+        ExplorerTab.readFolderInSteps = { url, hidden, cancelled, step in
+            guard url.key == slow.url.key else { return try original(url, hidden, cancelled, step) }
+            let all = try original(url, hidden, CancelFlag(), { _ in })
             Thread.sleep(forTimeInterval: 0.25)
             step(all)
             _ = gate.wait(timeout: .now() + 10)
@@ -209,10 +209,10 @@ extension BackgroundWork {
         let folder = try FollowupFolder()
         try folder.file("first.txt")
         let meter = FollowupReads(), original = ExplorerTab.readFolderInSteps
-        ExplorerTab.readFolderInSteps = { url, hidden, step in
-            guard url.key == folder.url.key else { return try original(url, hidden, step) }
+        ExplorerTab.readFolderInSteps = { url, hidden, cancelled, step in
+            guard url.key == folder.url.key else { return try original(url, hidden, cancelled, step) }
             meter.start(); defer { meter.finish() }
-            return try original(url, hidden, step)
+            return try original(url, hidden, cancelled, step)
         }
         defer { ExplorerTab.readFolderInSteps = original }
         let tab = ExplorerTab(location: .folder(folder.url))
@@ -235,11 +235,11 @@ extension BackgroundWork {
         tab.setViewMode(.details)
         tab.watcher.stop()
         let meter = FollowupReads(), original = ExplorerTab.readFolderInSteps
-        ExplorerTab.readFolderInSteps = { url, hidden, step in
-            guard url.key == folder.url.key else { return try original(url, hidden, step) }
+        ExplorerTab.readFolderInSteps = { url, hidden, cancelled, step in
+            guard url.key == folder.url.key else { return try original(url, hidden, cancelled, step) }
             meter.start(); defer { meter.finish() }
             Thread.sleep(forTimeInterval: 0.2)
-            return try original(url, hidden, step)
+            return try original(url, hidden, cancelled, step)
         }
         defer { ExplorerTab.readFolderInSteps = original }
         for item in Array(tab.items.prefix(3)) {

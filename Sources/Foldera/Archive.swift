@@ -135,8 +135,8 @@ enum Archive {
     static func compress(_ urls: [URL], as format: Format = .zip) -> Job {
         let job = Job(output: archiveURL(for: urls, format: format), format: format)
         let parent = urls[0].deletingLastPathComponent()
-        // "./" keeps a name that starts with a dash from being read as an option.
-        let names = urls.map { $0.lastPathComponent.hasPrefix("-") ? "./" + $0.lastPathComponent : $0.lastPathComponent }
+        // Both '-' options and bsdtar's '@archive' operands must stay filenames.
+        let names = urls.map { "./" + $0.lastPathComponent }
         job.process.currentDirectoryURL = parent
         switch format {
         case .zip:
@@ -161,6 +161,7 @@ enum Archive {
         let staging = parent.appendingPathComponent(".explorer-extract-\(UUID().uuidString)", isDirectory: true)
         do {
             let skipped = try unpacker.unpack(into: staging, password: password, progress: progress)
+            try unpacker.checkCancellation()
             let target = FileOps.freeURL(in: parent, base: baseName(of: archive), ext: "")
             return (try settle(staging, as: target), skipped)
         } catch {

@@ -103,11 +103,11 @@ enum Sync {
 
     /// What is at `url` now, if anything.
     static func item(at url: URL) -> Item? {
-        (try? url.resourceValues(forKeys: keySet)).map(Item.init)
+        (try? URL(fileURLWithPath: url.path).resourceValues(forKeys: keySet)).map(Item.init)
     }
 
     static func stamp(at url: URL) -> Stamp? {
-        (try? url.resourceValues(forKeys: keySet)).map(Stamp.init)
+        (try? URL(fileURLWithPath: url.path).resourceValues(forKeys: keySet)).map(Stamp.init)
     }
 
     /// The path with every symbolic link in it followed, as the disk has it
@@ -121,8 +121,17 @@ enum Sync {
     /// Which folder this is, on which disk: another drive mounted in the
     /// same place is another folder.
     static func identity(of url: URL) -> String? {
-        guard let values = try? url.resourceValues(forKeys: [.volumeUUIDStringKey, .fileIdentifierKey]) else { return nil }
-        return "\(values.volumeUUIDString ?? "?")/\(values.fileIdentifier ?? 0)"
+        if let persistent = persistentIdentity(of: url) { return persistent }
+        // Useful within one mounted run, but never persisted as deletion history.
+        return FileOps.revision(of: url).map { "mounted:\($0.device)/\($0.inode)" }
+    }
+
+    static func persistentIdentity(of url: URL) -> String? {
+        let fresh = URL(fileURLWithPath: url.path)
+        guard let values = try? fresh.resourceValues(forKeys: [.volumeUUIDStringKey, .fileIdentifierKey]),
+              let volume = values.volumeUUIDString, !volume.isEmpty,
+              let file = values.fileIdentifier, file != 0 else { return nil }
+        return "\(volume)/\(file)"
     }
 
     /// Never synced: Finder's and the drive's own bookkeeping.
@@ -212,7 +221,10 @@ enum Sync {
         var rightIdentity: String?
         var memory = Memory()
 
-        var problems: [String] { leftSide.problems + rightSide.problems }
+        var problems: [String] {
+            leftSide.problems + rightSide.problems + (memory.requiresReview
+                ? ["Foldera needs to compare these folders again before using their saved sync history."] : [])
+        }
 
         /// Couldn't be read, or lies inside something that couldn't.
         func isBlocked(_ key: String) -> Bool {
@@ -269,7 +281,15 @@ enum Sync {
         scan.rightSide = try list(right, ignoreCase: ignoreCase, excluding: exclusion, cancelled: cancelled) {
             report("Reading “\(right.lastPathComponent)”… \(Format.items($0))")
         }
+        guard identity(of: left) == scan.leftIdentity, identity(of: right) == scan.rightIdentity else {
+            throw OpError("One of the folders changed while being compared. Compare again.")
+        }
         scan.memory = Memory.load(left, right)
+        func stillListed(_ key: String, onLeft: Bool) -> Bool {
+            let side = onLeft ? scan.leftSide : scan.rightSide
+            let url = (onLeft ? left : right).appendingPathComponent(side.path(key))
+            return item(at: url) == side.items[key] && stamp(at: url) == side.stamps[key]
+        }
         if comparison == .content {
             let keys = scan.leftSide.items.compactMap { key, l -> String? in
                 guard !l.folder, !l.link, let r = scan.rightSide.items[key], !r.folder, !r.link, l.size == r.size else { return nil }
@@ -285,6 +305,12 @@ enum Sync {
                 let a = left.appendingPathComponent(scan.leftSide.path(key))
                 let b = right.appendingPathComponent(scan.rightSide.path(key))
                 if let (same, hash) = sameBytes(a, b, cancelled: cancelled) {
+                    guard stillListed(key, onLeft: true), stillListed(key, onLeft: false) else {
+                        scan.leftSide.unreadable.insert(key)
+                        scan.rightSide.unreadable.insert(key)
+                        scan.leftSide.problems.append("“\(scan.leftSide.path(key))” changed while its content was being compared. Compare again.")
+                        continue
+                    }
                     scan.sameContent[key] = same
                     if let hash {
                         scan.leftHashes[key] = hash
@@ -306,23 +332,41 @@ enum Sync {
                     if cancelled.isSet { throw CancellationError() }
                     report("Comparing contents… “\(side.path(key))”")
                     let hash = self.hash((onLeft ? left : right).appendingPathComponent(side.path(key)), cancelled: cancelled)
-                    if onLeft { scan.leftHashes[key] = hash } else { scan.rightHashes[key] = hash }
+                    if let hash, stillListed(key, onLeft: onLeft) {
+                        if onLeft { scan.leftHashes[key] = hash } else { scan.rightHashes[key] = hash }
+                    } else if !cancelled.isSet {
+                        let problem = "“\(side.path(key))” couldn't be read unchanged. Compare again."
+                        if onLeft {
+                            scan.leftSide.unreadable.insert(key)
+                            scan.leftSide.problems.append(problem)
+                        } else {
+                            scan.rightSide.unreadable.insert(key)
+                            scan.rightSide.problems.append(problem)
+                        }
+                    }
                 }
             }
         }
         if cancelled.isSet { throw CancellationError() }
+        guard identity(of: left) == scan.leftIdentity, identity(of: right) == scan.rightIdentity else {
+            throw OpError("One of the folders changed while being compared. Compare again.")
+        }
         let remembered = scan.memory
         scan.memory.remember(scan)
         // Written again only when it changed: a hundred thousand files make a file of megabytes.
-        if scan.memory != remembered { try? scan.memory.save() }
+        if scan.memory.requiresReview || scan.memory != remembered { try? scan.memory.save() }
         return scan
     }
 
     /// `top`: `root` is one of the two folders synced, where a drive's own folders may be.
     static func list(_ root: URL, ignoreCase: Bool, top: Bool = true, excluding exclusion: Exclusion = .none,
                      cancelled: CancelFlag, found: (Int) -> Void = { _ in }) throws -> Listing {
-        // An unreadable folder must not look empty: that would read as everything deleted.
-        _ = try FileManager.default.contentsOfDirectory(atPath: root.path)
+        if cancelled.isSet { throw CancellationError() }
+        // The enumerator's error handler covers the root too. Never pre-list
+        // it: a wide network folder would otherwise be read twice.
+        let directory = open(root.path, O_RDONLY | O_DIRECTORY)
+        guard directory >= 0 else { throw NSError(domain: NSPOSIXErrorDomain, code: Int(errno)) }
+        defer { close(directory) }
         var listing = Listing()
         let bases = [root.key, root.resolvingSymlinksInPath().key]
         func relative(_ url: URL) -> String? {
@@ -338,6 +382,7 @@ enum Sync {
             failed.append((url, error))
             return true
         })
+        guard walker != nil else { throw CocoaError(.fileReadUnknown) }
         while let url = walker?.nextObject() as? URL {
             if cancelled.isSet { throw CancellationError() }
             let path = url.pathComponents.suffix(walker?.level ?? 1).joined(separator: "/")
@@ -354,12 +399,14 @@ enum Sync {
             guard let values = try? url.resourceValues(forKeys: keySet) else {
                 listing.unreadable.insert(key)
                 listing.problems.append("“\(path)” couldn't be looked at.")
+                walker?.skipDescendants()
                 continue
             }
             if listing.items[key] != nil {
                 // Two names that differ only in case, and the other drive can't keep both.
                 listing.unreadable.insert(key)
                 listing.problems.append("“\(path)” and another item differ only in upper and lower case, so neither is synced.")
+                walker?.skipDescendants()
                 continue
             }
             let item = Item(values)
@@ -376,6 +423,7 @@ enum Sync {
             if key != path { listing.spelled[key] = path }
             if listing.items.count % 500 == 0 { found(listing.items.count) }
         }
+        if cancelled.isSet { throw CancellationError() }
         for (url, error) in failed {
             guard let path = relative(url) else {
                 throw OpError("Part of “\(root.lastPathComponent)” couldn't be read: \(error.localizedDescription)")
@@ -831,6 +879,16 @@ enum Sync {
         /// The shared destination of each symbolic link, in either comparison mode.
         /// Missing in older memory: such a link needs review until compared equal again.
         var targets: [String: String]?
+        var leftIdentity: String?
+        var rightIdentity: String?
+        var identityVersion: Int? = 1
+        /// Only this compare needs review; the persisted fresh baseline no
+        /// longer knows deletions from a different or unverifiable root.
+        var requiresReview = false
+
+        enum CodingKeys: String, CodingKey {
+            case left, right, items, hashes, targets, leftIdentity, rightIdentity, identityVersion
+        }
 
         static var folder = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
             .appendingPathComponent("Foldera/Sync", isDirectory: true)
@@ -843,15 +901,27 @@ enum Sync {
         }
 
         static func load(_ left: URL, _ right: URL) -> Memory {
-            let fresh = Memory(left: left.key, right: right.key)
+            var fresh = Memory(left: left.key, right: right.key,
+                               leftIdentity: Sync.persistentIdentity(of: left), rightIdentity: Sync.persistentIdentity(of: right))
             guard let data = try? Data(contentsOf: file(left, right)),
                   let memory = try? JSONDecoder().decode(Memory.self, from: data) else { return fresh }
-            if memory.left == left.key && memory.right == right.key { return memory }
-            if memory.left == right.key && memory.right == left.key {
+            if let l = fresh.leftIdentity, let r = fresh.rightIdentity,
+               memory.left == left.key && memory.right == right.key,
+               memory.leftIdentity == l && memory.rightIdentity == r { return memory }
+            if let l = fresh.leftIdentity, let r = fresh.rightIdentity,
+               memory.left == right.key && memory.right == left.key,
+               memory.leftIdentity == r && memory.rightIdentity == l {
                 return Memory(left: left.key, right: right.key,
                               items: memory.items.mapValues { Pair(left: $0.right, right: $0.left) },
-                              hashes: memory.hashes, targets: memory.targets)
+                              hashes: memory.hashes, targets: memory.targets,
+                              leftIdentity: l, rightIdentity: r)
             }
+            // On volumes without a stable identity, never reuse deletion
+            // history. After migration the safe fresh comparison may still
+            // copy files; it must not get stuck asking for review forever.
+            fresh.requiresReview = memory.identityVersion != 1
+                || memory.left != left.key || memory.right != right.key
+                || memory.leftIdentity != fresh.leftIdentity || memory.rightIdentity != fresh.rightIdentity
             return fresh
         }
 
@@ -966,6 +1036,10 @@ enum Sync {
         /// Does it all on the calling thread (`run` calls it in the background).
         func perform() -> Outcome {
             var outcome = Outcome()
+            guard !scan.memory.requiresReview else {
+                outcome.failures = ["Compare the folders again before synchronizing; their saved history could not be verified."]
+                return outcome
+            }
             // The same two folders, where they were: not another drive mounted in their place.
             guard Sync.identity(of: left) == scan.leftIdentity, Sync.identity(of: right) == scan.rightIdentity,
                   Sync.realPath(left) == left.path, Sync.realPath(right) == right.path else {
@@ -982,6 +1056,10 @@ enum Sync {
             func step(_ row: Row, _ work: (Row) throws -> Void) -> Bool {
                 if cancelled.isSet {
                     outcome.cancelled = true
+                    return false
+                }
+                guard rootsUnchanged else {
+                    outcome.failures.append("One of the folders changed during synchronization. Compare again before continuing.")
                     return false
                 }
                 progress.current = row.name
@@ -1014,16 +1092,31 @@ enum Sync {
             if trashFailed {
                 outcome.failures.append("Some items couldn't be moved to the Trash; network drives often have none. With “Delete files permanently” they can be synced.")
             }
-            if !cancelled.isSet {
+            if !cancelled.isSet && rootsUnchanged {
                 progress.current = "Checking the result…"
                 publish(force: true)
-                outcome.scan = try? Sync.compare(left, right, by: scan.comparison, excluding: scan.exclusion,
-                                                 cancelled: cancelled) { [unowned self] text in
-                    self.progress.current = text
-                    self.publish(force: false)
+                do {
+                    outcome.scan = try Sync.compare(left, right, by: scan.comparison, excluding: scan.exclusion,
+                                                    cancelled: cancelled) { [unowned self] text in
+                        self.progress.current = text
+                        self.publish(force: false)
+                    }
+                } catch is CancellationError {
+                    outcome.cancelled = true
+                } catch {
+                    outcome.failures.append("The result couldn't be checked: \(error.localizedDescription)")
                 }
             }
+            if cancelled.isSet { outcome.cancelled = true }
+            if !rootsUnchanged && outcome.failures.isEmpty {
+                outcome.failures.append("One of the folders changed during synchronization. The result could not be verified.")
+            }
             return outcome
+        }
+
+        private var rootsUnchanged: Bool {
+            Sync.identity(of: left) == scan.leftIdentity && Sync.identity(of: right) == scan.rightIdentity
+                && Sync.realPath(left) == left.path && Sync.realPath(right) == right.path
         }
 
         private func url(_ row: Row, onLeft: Bool) -> URL {
@@ -1033,6 +1126,7 @@ enum Sync {
         /// Nothing is read or written through a folder that has become a
         /// symbolic link since the compare: that could lead outside both folders.
         private func guardInside(_ url: URL, onLeft: Bool) throws {
+            guard rootsUnchanged else { throw OpError("One of the folders changed. Compare again.") }
             let root = onLeft ? left : right
             let folder = url.deletingLastPathComponent()
             guard Sync.realPath(folder) == folder.path, folder.path == root.path || folder.path.hasPrefix(root.path + "/") else {
@@ -1192,6 +1286,7 @@ enum Sync {
 
         /// Makes `folder` and whatever above it is missing, but never above `root`.
         private func makeFolders(_ folder: URL, below root: URL) throws -> [Change] {
+            guard rootsUnchanged else { throw OpError("One of the folders changed. Compare again.") }
             var missing: [URL] = []
             var url = folder
             while !FileOps.exists(url) {

@@ -336,8 +336,9 @@ final class FileItem {
         return AnyIterator { walker.nextObject() as? URL }
     }
 
-    static func contents(of folder: URL, showHidden: Bool, step: (([FileItem]) -> Void)? = nil,
+    static func contents(of folder: URL, showHidden: Bool, cancelled: CancelFlag = CancelFlag(), step: (([FileItem]) -> Void)? = nil,
                          enumerate: Enumerator = FileItem.enumerate) throws -> [FileItem] {
+        if cancelled.isSet { throw CancellationError() }
         let foreign = UsageScanner.isForeign(folder)
         // Foreign disks use names and native stat flags below, avoiding a
         // Foundation hidden-file check that can look into every "._" file.
@@ -350,6 +351,7 @@ final class FileItem {
         var told = Date()
         var pause: TimeInterval = 0.5
         while let url = walker.next() {
+            if cancelled.isSet { throw CancellationError() }
             let item = FileItem(url: url, foreign: foreign)
             if foreign && !showHidden && item.isHidden { continue }
             found.append(item)
@@ -364,6 +366,7 @@ final class FileItem {
             }
         }
         // A partial list is not a successful read, even when some entries arrived.
+        if cancelled.isSet { throw CancellationError() }
         if let failure { throw failure }
         return found
     }

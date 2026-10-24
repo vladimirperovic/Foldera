@@ -10,15 +10,25 @@ final class DirectoryWatcher {
     private var opening = false
     private static let opens = BackgroundTask.queue("Foldera.directory-watches", limit: 4)
     private var openTask: BlockOperation?
+    private var target: URL?
+    private var retry: DispatchWorkItem?
+    private var retryDelay: TimeInterval = 0.5
 
-    var isIdle: Bool { source == nil && !opening }
+    var isIdle: Bool { source == nil && !opening && retry == nil }
     var isOpening: Bool { opening }
+    var isWatching: Bool { source != nil }
 
     /// With `ready`, the first read starts after the watch is armed, closing
     /// the observation gap without a second unconditional directory walk.
     func watch(_ url: URL?, ready: (() -> Void)? = nil) {
         stop()
         guard let url else { ready?(); return }
+        target = url
+        openTarget(ready: ready)
+    }
+
+    private func openTarget(ready: (() -> Void)?) {
+        guard let url = target else { return }
         opening = true
         let generation = self.generation
         let task = BlockOperation()
@@ -32,7 +42,12 @@ final class DirectoryWatcher {
                 }
                 self.opening = false
                 self.openTask = nil
-                guard fd >= 0 else { ready?(); return }
+                guard fd >= 0 else {
+                    ready?()
+                    self.retryOpening()
+                    return
+                }
+                self.retryDelay = 0.5
                 self.install(fd)
                 ready?()
             }
@@ -41,12 +56,31 @@ final class DirectoryWatcher {
         Self.opens.addOperation(task)
     }
 
+    /// A renamed/deleted inode never starts reporting events for its
+    /// replacement. Retry a temporarily missing path with bounded backoff.
+    private func retryOpening() {
+        let generation = self.generation
+        let work = DispatchWorkItem { [weak self] in
+            guard let self, generation == self.generation else { return }
+            self.retry = nil
+            self.openTarget(ready: { [weak self] in self?.changed() })
+        }
+        retry = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + retryDelay, execute: work)
+        retryDelay = min(5, retryDelay * 2)
+    }
+
     private func install(_ fd: Int32) {
         let generation = self.generation
         let s = DispatchSource.makeFileSystemObjectSource(
-            fileDescriptor: fd, eventMask: [.write, .delete, .rename, .link, .attrib], queue: .main)
+            fileDescriptor: fd, eventMask: [.write, .delete, .rename, .revoke, .link, .attrib], queue: .main)
         s.setEventHandler { [weak self] in
             guard let self, generation == self.generation else { return }
+            if let flags = self.source?.data, !flags.intersection([.delete, .rename, .revoke]).isEmpty,
+               let url = self.target {
+                self.watch(url, ready: { [weak self] in self?.changed() })
+                return
+            }
             self.changed()
         }
         s.setCancelHandler { close(fd) }
@@ -61,6 +95,10 @@ final class DirectoryWatcher {
         opening = false
         openTask?.cancel()
         openTask = nil
+        target = nil
+        retry?.cancel()
+        retry = nil
+        retryDelay = 0.5
         source?.cancel()
         source = nil
         pending?.cancel()

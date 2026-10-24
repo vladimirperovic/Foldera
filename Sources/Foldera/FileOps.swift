@@ -66,6 +66,36 @@ enum FileOps {
                         changed: value.st_ctimespec.tv_sec, changedNanos: value.st_ctimespec.tv_nsec)
     }
 
+    /// Includes every descendant, without following symbolic links. A
+    /// directory's own date does not tell whether an existing child changed.
+    struct TreeRevision: Equatable {
+        var entries: [String: Revision]
+    }
+
+    static func treeRevision(of root: URL, cancelled: CancelFlag) throws -> TreeRevision {
+        if cancelled.isSet { throw CancellationError() }
+        guard let own = revision(of: root) else { throw CocoaError(.fileReadUnknown) }
+        var entries = ["": own]
+        var info = stat()
+        guard lstat(root.path, &info) == 0 else { throw CocoaError(.fileReadUnknown) }
+        if info.st_mode & S_IFMT == S_IFDIR {
+            var failure: Error?
+            guard let walker = FileManager.default.enumerator(at: root, includingPropertiesForKeys: nil,
+                options: [], errorHandler: { _, error in failure = error; return false }) else {
+                throw CocoaError(.fileReadUnknown)
+            }
+            while let child = walker.nextObject() as? URL {
+                if cancelled.isSet { throw CancellationError() }
+                guard let value = revision(of: child) else { throw CocoaError(.fileReadUnknown) }
+                let path = child.pathComponents.suffix(walker.level).joined(separator: "/")
+                entries[path] = value
+            }
+            if let failure { throw failure }
+        }
+        if cancelled.isSet { throw CancellationError() }
+        return TreeRevision(entries: entries)
+    }
+
     /// Like fileExists, but a broken symbolic link still counts as being there.
     static func exists(_ url: URL) -> Bool {
         (try? FileManager.default.attributesOfItem(atPath: url.path)) != nil
@@ -92,7 +122,7 @@ enum FileOps {
         while true {
             let stem = n == 1 ? base : "\(base) (\(n))"
             let url = folder.appendingPathComponent(ext.isEmpty ? stem : "\(stem).\(ext)")
-            if !exists(url) && !taken.contains(url.key) { return url }
+            if !taken.contains(url.key) && !exists(url) { return url }
             n += 1
         }
     }
@@ -110,6 +140,29 @@ enum FileOps {
     static func keepBothName(for source: URL, in folder: URL, taken: Set<String> = []) -> URL {
         let (stem, ext) = split(source)
         return freeURL(in: folder, base: stem, ext: ext, from: 2, taken: taken)
+    }
+
+    /// A transfer can collect thousands of identically named search results.
+    /// Resume the suffix search instead of scanning all previous names again.
+    struct NameAllocator {
+        private struct Key: Hashable { let folder: String; let stem: String; let ext: String }
+        private var next: [Key: Int] = [:]
+
+        mutating func name(for source: URL, in folder: URL, copy: Bool = false, taken: Set<String>) -> URL {
+            let parts = FileOps.split(source)
+            let stem = copy ? parts.stem + " - Copy" : parts.stem
+            let key = Key(folder: folder.key, stem: stem, ext: parts.ext)
+            var n = next[key] ?? (copy ? 1 : 2)
+            while true {
+                let base = n == 1 ? stem : "\(stem) (\(n))"
+                let url = folder.appendingPathComponent(parts.ext.isEmpty ? base : base + "." + parts.ext)
+                n += 1
+                if !taken.contains(url.key) && !FileOps.exists(url) {
+                    next[key] = n
+                    return url
+                }
+            }
+        }
     }
 
     /// True when `folder` is `source` itself or somewhere inside it.

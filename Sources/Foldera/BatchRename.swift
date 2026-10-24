@@ -42,10 +42,16 @@ struct RenameRule: Codable, Equatable {
     }()
 
     /// The new name for the `index`th of the items, counting from 0.
+    func counter(at index: Int) -> Int? {
+        let (offset, multiplied) = index.multipliedReportingOverflow(by: step)
+        let (value, added) = start.addingReportingOverflow(offset)
+        return multiplied || added ? nil : value
+    }
+
     func newName(for item: FileItem, index: Int, regex compiled: NSRegularExpression? = nil) -> String {
         let oldExt = item.isFolder ? "" : item.url.pathExtension
         let stem = oldExt.isEmpty ? item.name : String(item.name.dropLast(oldExt.count + 1))
-        let counter = start + index * step
+        guard let counter = counter(at: index) else { return item.name }
         let values = [
             "N": stem, "E": oldExt,
             "C": digits > 1 ? String(format: "%0\(digits)ld", counter) : String(counter),
@@ -118,14 +124,15 @@ enum BatchRename {
             }
         }
         var rows = items.enumerated().map { index, item in
-            Row(item: item, newName: rule.newName(for: item, index: index, regex: compiled), problem: nil)
+            Row(item: item, newName: rule.newName(for: item, index: index, regex: compiled),
+                problem: rule.counter(at: index) == nil ? "The counter is outside the supported number range" : nil)
         }
         let sources = Set(items.map { $0.key.lowercased() })
         // Names that stay where they are, and how many items want each new one.
         let staying = Set(rows.filter { !$0.changes }.map { $0.item.key.lowercased() })
         var wanted: [String: Int] = [:]
         for row in rows where row.changes { wanted[row.target.key.lowercased(), default: 0] += 1 }
-        for i in rows.indices where rows[i].changes {
+        for i in rows.indices where rows[i].changes && rows[i].problem == nil {
             let name = rows[i].newName
             let target = rows[i].target
             let key = target.key.lowercased()

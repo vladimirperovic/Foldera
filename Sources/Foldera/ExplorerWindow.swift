@@ -17,7 +17,8 @@ final class ExplorerTab: NSViewController, NSSplitViewDelegate {
     var forwardStack: [Location] = []
 
     // What the list shows.
-    var items: [FileItem] = []
+    var items: [FileItem] = [] { didSet { itemsRevision &+= 1 } }
+    private(set) var itemsRevision = 0
     var loadError: Error?
     var sort = SortSpec.saved
     var viewMode: ViewMode
@@ -38,6 +39,8 @@ final class ExplorerTab: NSViewController, NSSplitViewDelegate {
     // Bookkeeping between a request and the list catching up with it.
     let search = FolderSearch()
     let watcher = DirectoryWatcher()
+    private static let folderReads = BackgroundTask.queue("Foldera.folder-listings", limit: 2)
+    private let folderLoading = BackgroundTask(queue: ExplorerTab.folderReads)
     var loadGeneration = 0
     /// The folder read under way, whether the folder changed meanwhile, and
     /// the pause before reading it again: a folder that keeps changing (a
@@ -54,16 +57,16 @@ final class ExplorerTab: NSViewController, NSSplitViewDelegate {
     private(set) var waitingForFolder = false
     /// Reads a folder for the list, handing over what it has so far as it
     /// goes; tests stand a slow disk in for it.
-    static var readFolderInSteps: (URL, Bool, @escaping ([FileItem]) -> Void) throws -> [FileItem] = { url, hidden, step in
-        try FileItem.contents(of: url, showHidden: hidden, step: step)
+    static var readFolderInSteps: (URL, Bool, CancelFlag, @escaping ([FileItem]) -> Void) throws -> [FileItem] = { url, hidden, cancelled, step in
+        try FileItem.contents(of: url, showHidden: hidden, cancelled: cancelled, step: step)
     }
     /// The same without the steps, as most tests stand it in.
     static var readFolder: (URL, Bool) throws -> [FileItem] {
         get {
             let steps = readFolderInSteps
-            return { url, hidden in try steps(url, hidden, { _ in }) }
+            return { url, hidden in try steps(url, hidden, CancelFlag(), { _ in }) }
         }
-        set { readFolderInSteps = { url, hidden, _ in try newValue(url, hidden) } }
+        set { readFolderInSteps = { url, hidden, _, _ in try newValue(url, hidden) } }
     }
     /// The read whose items so far are on screen, a folder still being read.
     private var shownSoFar = 0
@@ -130,6 +133,7 @@ final class ExplorerTab: NSViewController, NSSplitViewDelegate {
     let deleteButton = ToolButton(symbol: "trash", tip: "Move to Trash (Delete)")
     let sortButton = ToolButton(symbol: "arrow.up.arrow.down", label: "Sort", tip: "Sort", dropdown: true)
     let viewButton = ToolButton(symbol: "rectangle.grid.1x2", label: "View", tip: "Layout and hidden items", dropdown: true)
+    let detailsButton = ToolButton(symbol: "list.bullet", tip: "Details view (⌘1)")
     let syncButton = ToolButton(label: "Sync folder", tip: "Sync folders…")
     let moreButton = ToolButton(symbol: "ellipsis", tip: "See more")
     let paneButton = ToolButton(symbol: "sidebar.right", label: "Details", tip: "Preview and details pane (⇧⌘P)")
@@ -165,6 +169,8 @@ final class ExplorerTab: NSViewController, NSSplitViewDelegate {
 
     // Disk usage: the measuring under way, and who is waiting for it.
     var usageScanner: UsageScanner?
+    private static let usageReads = BackgroundTask.queue("Foldera.usage-scans", limit: 2)
+    private let usageLoading = BackgroundTask(queue: ExplorerTab.usageReads)
     var measuring: Location?
     var waitingForUsage: [(UsageNode) -> Void] = []
     private var iconReload: DispatchWorkItem?
@@ -206,6 +212,7 @@ final class ExplorerTab: NSViewController, NSSplitViewDelegate {
             (renameButton, #selector(renameSelection(_:))), (shareButton, #selector(share(_:))),
             (deleteButton, #selector(delete(_:))), (sortButton, #selector(showSortMenu(_:))),
             (viewButton, #selector(showViewMenu(_:))), (syncButton, #selector(openSync(_:))), (moreButton, #selector(showMoreMenu(_:))),
+            (detailsButton, #selector(setDetailsView(_:))),
             (detailsToggle, #selector(setDetailsView(_:))), (iconsToggle, #selector(setIconsView(_:))),
             (columnsToggle, #selector(setColumnsView(_:))), (paneButton, #selector(togglePreviewPane(_:))),
             (usageToggle, #selector(setUsageView(_:))),
@@ -242,7 +249,7 @@ final class ExplorerTab: NSViewController, NSSplitViewDelegate {
         fileCommandDividers = [divider(), divider()]
         let commandViews: [NSView] = [
             newButton, fileCommandDividers[0], cutButton, copyButton, pasteButton, renameButton, shareButton, deleteButton,
-            fileCommandDividers[1], sortButton, viewButton, divider(), syncButton, moreButton,
+            fileCommandDividers[1], sortButton, viewButton, detailsButton, divider(), syncButton, moreButton,
         ]
         let command = NSStackView(views: commandViews)
         command.orientation = .horizontal
@@ -675,6 +682,7 @@ final class ExplorerTab: NSViewController, NSSplitViewDelegate {
         typeSelection.reset()
         pendingRecentVisit = true
         navigationGeneration += 1
+        folderLoading.cancel()
         if renamingKey != nil { focusList() }
         addressBar.endEditing()
         let previous = location
@@ -686,6 +694,8 @@ final class ExplorerTab: NSViewController, NSSplitViewDelegate {
         justRemoved = [:]
         cloudRefresh?.cancel()
         usageScanner?.cancel()
+        usageScanner = nil
+        usageLoading.cancel()
         measuring = nil
         waitingForUsage = []
         waitingForFolderSizes = false
@@ -812,12 +822,9 @@ final class ExplorerTab: NSViewController, NSSplitViewDelegate {
         switch location {
         case .thisMac:
             // A network drive that stopped answering can hold this up; keep it off the main thread too.
-            DispatchQueue.global(qos: .userInitiated).async { [weak self] in
-                let volumes = FileItem.volumes()
-                DispatchQueue.main.async {
-                    guard let self, generation == self.loadGeneration else { return }
-                    self.apply(volumes, error: nil)
-                }
+            folderLoading.run({ FileItem.volumes() }) { [weak self] volumes in
+                guard let self, generation == self.loadGeneration else { return }
+                self.apply(volumes, error: nil)
             }
         case .folder(let url):
             let hidden = Prefs.showHidden
@@ -829,38 +836,46 @@ final class ExplorerTab: NSViewController, NSSplitViewDelegate {
             let removedKeys = Set(removed.keys)
             folderRead = (generation, Date())
             // Sorting a big folder takes a while; it happens here, off the main thread.
-            DispatchQueue.global(qos: .userInitiated).async { [weak self] in
-                let result = Result { () -> [FileItem] in
-                    var found = try read(url, hidden) { soFar in
+            folderLoading.runCancellable({ [weak self] cancelled in
+                Result { () -> [FileItem] in
+                    var found = try read(url, hidden, cancelled) { soFar in
+                        guard !cancelled.isSet else { return }
                         // Cache tag reads on the reader's instances too, so
                         // later snapshots do not fetch the same tags again.
-                        if order.key == .tags { soFar.forEach { _ = $0.tags } }
+                        if order.key == .tags {
+                            for item in soFar {
+                                if cancelled.isSet { return }
+                                _ = item.tags
+                            }
+                        }
                         // The reader retains its objects until the final result.
                         // Publish separate snapshots so its later size writes
                         // cannot race with the table, preview or user sorting.
                         let shown = soFar.map { item in
                             FileItem(snapshot: item, folderSize: item.isFolder && item.volume == nil ? sizes?[item.name] : nil)
                         }.sorted(by: order)
-                        DispatchQueue.main.async { self?.showSoFar(shown, generation: generation) }
+                        if !cancelled.isSet {
+                            DispatchQueue.main.async { self?.showSoFar(shown, generation: generation) }
+                        }
                     }
+                    if cancelled.isSet { throw CancellationError() }
                     if !removed.isEmpty {
                         found.removeAll { Self.isAmong($0, removedKeys) && !FileOps.exists($0.url) }
                     }
                     if let sizes { for item in found where item.isFolder && item.volume == nil { item.folderSize = sizes[item.name] } }
                     return found.sorted(by: order)
                 }
-                DispatchQueue.main.async {
-                    guard let self, generation == self.loadGeneration else { return }
-                    switch result {
-                    case .success(let loaded):
-                        // A removal after this read began wins over its stale snapshot.
-                        // Older tombstones were checked on disk above, so Undo can restore them.
-                        let newer = Set(self.justRemoved.compactMap { key, revision in removed[key] != revision ? key : nil })
-                        self.apply(loaded.filter { !Self.isAmong($0, newer) }, error: nil, sortedBy: order, sized: sizes != nil)
-                    case .failure(let error): self.apply([], error: error)
-                    }
-                    self.folderReadFinished()
+            }) { [weak self] result in
+                guard let self, generation == self.loadGeneration else { return }
+                switch result {
+                case .success(let loaded):
+                    // A removal after this read began wins over its stale snapshot.
+                    // Older tombstones were checked on disk above, so Undo can restore them.
+                    let newer = Set(self.justRemoved.compactMap { key, revision in removed[key] != revision ? key : nil })
+                    self.apply(loaded.filter { !Self.isAmong($0, newer) }, error: nil, sortedBy: order, sized: sizes != nil)
+                case .failure(let error): self.apply([], error: error)
                 }
+                self.folderReadFinished()
             }
         }
     }
@@ -1465,6 +1480,7 @@ final class ExplorerTab: NSViewController, NSSplitViewDelegate {
     }
 
     func runSearch() {
+        folderLoading.cancel()
         let root = location.url ?? FileManager.default.homeDirectoryForCurrentUser
         // A folder listing still on its way must not land among the results.
         loadGeneration += 1
@@ -1605,6 +1621,7 @@ final class ExplorerTab: NSViewController, NSSplitViewDelegate {
         treemap.isHidden = mode != .usage
         iconSlider.doubleValue = Double(viewMode == .icons ? Prefs.iconSize : Self.listNotch)
         detailsToggle.isOn = viewMode == .details
+        detailsButton.isOn = viewMode == .details
         iconsToggle.isOn = viewMode == .icons
         columnsToggle.isOn = viewMode == .columns
         usageToggle.isOn = viewMode == .usage
@@ -1685,6 +1702,11 @@ final class ExplorerTab: NSViewController, NSSplitViewDelegate {
     /// Measures the folder on screen, or takes the measure already made;
     /// the treemap and the folder sizes share one scan.
     func measure(force: Bool = false, done: @escaping (UsageNode) -> Void) {
+        measure(force: force, scan: { $0.scan($1) }, done: done)
+    }
+
+    func measure(force: Bool = false, scan read: @escaping (UsageScanner, URL) -> UsageNode?,
+                 done: @escaping (UsageNode) -> Void) {
         guard let url = location.url else { return }
         if force {
             UsageCache.forget(url)
@@ -1694,7 +1716,12 @@ final class ExplorerTab: NSViewController, NSSplitViewDelegate {
         if !force, let tree = UsageCache.node(for: url) { return done(tree) }
         waitingForUsage.append(done)
         guard measuring != location else { return }
+        startMeasure(url, scan: read)
+    }
+
+    private func startMeasure(_ url: URL, scan read: @escaping (UsageScanner, URL) -> UsageNode?) {
         let scanner = UsageScanner()
+        let cacheScan = UsageCache.beginScan(url)
         usageScanner = scanner
         measuring = location
         let target = location
@@ -1711,18 +1738,26 @@ final class ExplorerTab: NSViewController, NSSplitViewDelegate {
             self.updateStatus()
         }
         RunLoop.main.add(ticker, forMode: .common)
-        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
-            let tree = scanner.scan(url)
-            DispatchQueue.main.async {
-                guard let self, let tree, self.location == target else { return }
-                UsageCache.store(tree)
-                self.usageNote = nil
-                self.measuring = nil
-                let waiting = self.waitingForUsage
-                self.waitingForUsage = []
-                waiting.forEach { $0(tree) }
-                self.updateStatus()
+        usageLoading.run({ read(scanner, url) }) { [weak self] tree in
+            ticker.invalidate()
+            guard let self, self.location == target, self.usageScanner === scanner else { return }
+            guard cacheScan.isCurrent else {
+                self.startMeasure(url, scan: read)
+                return
             }
+            self.usageScanner = nil
+            self.usageNote = nil
+            self.measuring = nil
+            let waiting = self.waitingForUsage
+            self.waitingForUsage = []
+            self.waitingForFolderSizes = false
+            if let tree {
+                UsageCache.store(tree)
+                waiting.forEach { $0(tree) }
+            } else {
+                self.treemap.message = "Measurement stopped. Refresh to try again."
+            }
+            self.updateStatus()
         }
     }
 
@@ -1963,6 +1998,8 @@ final class ExplorerTab: NSViewController, NSSplitViewDelegate {
 
     /// The tab is closing (or its window is): stop watching and listening.
     func tearDown() {
+        folderLoading.cancel()
+        loadGeneration += 1
         navigationGeneration += 1
         searchDelay?.cancel()
         search.cancel()
@@ -1978,7 +2015,11 @@ final class ExplorerTab: NSViewController, NSSplitViewDelegate {
         opening = nil
         cancelThumbnailsAhead()
         usageScanner?.cancel()
+        usageScanner = nil
+        usageLoading.cancel()
         measuring = nil
+        waitingForUsage = []
+        waitingForFolderSizes = false
         previewWindow?.onClose = nil
         previewWindow?.close()
         previewWindow = nil

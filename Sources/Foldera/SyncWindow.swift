@@ -769,7 +769,8 @@ final class SyncWindow: NSWindowController, NSWindowDelegate, NSTableViewDataSou
         replan()
         let problems = scan.problems
         guard !problems.isEmpty else { return }
-        alert(problems.count == 1 ? "An item couldn't be read, so it is left alone." : "\(problems.count) items couldn't be read, so they are left alone.",
+        alert(scan.memory.requiresReview ? "Compare these folders again before synchronizing."
+              : problems.count == 1 ? "An item couldn't be read, so it is left alone." : "\(problems.count) items couldn't be read, so they are left alone.",
               info: problems.prefix(6).joined(separator: "\n"))
     }
 
@@ -800,6 +801,7 @@ final class SyncWindow: NSWindowController, NSWindowDelegate, NSTableViewDataSou
     @objc func synchronize(_ sender: Any?) {
         guard let scan, comparing == nil, !syncing, planShown == planWanted,
               plan.rows.contains(where: { $0.action != .none }) else { return }
+        guard !scan.memory.requiresReview else { return alert("Compare these folders again before synchronizing.") }
         let permanently = self.permanently
         guard confirmed(scan, permanently: permanently) else { return }
         let lock: SyncLibrary.RunLock
@@ -845,7 +847,8 @@ final class SyncWindow: NSWindowController, NSWindowDelegate, NSTableViewDataSou
             self.syncing = false
             var done = [outcome.copied == 1 ? "1 item copied" : "\(Format.count(Int64(outcome.copied))) items copied"]
             if outcome.deleted > 0 { done.append("\(Format.count(Int64(outcome.deleted))) deleted") }
-            self.result = (outcome.cancelled ? "Stopped: " : "Done: ") + done.joined(separator: ", ") + "."
+            self.result = (outcome.cancelled ? "Stopped: " : outcome.failures.isEmpty ? "Done: " : "Finished with errors: ")
+                + done.joined(separator: ", ") + "."
             if let after = outcome.scan {
                 // Read again with the same comparison once the sync was done.
                 self.show(after)
@@ -909,7 +912,9 @@ final class SyncWindow: NSWindowController, NSWindowDelegate, NSTableViewDataSou
         if conflicts > 0 { parts.append(conflicts == 1 ? "1 conflict" : "\(Format.count(Int64(conflicts))) conflicts") }
         let same = plan.equal == 1 ? "1 file the same" : "\(Format.count(Int64(plan.equal))) files the same"
         var text = parts.isEmpty ? "Nothing to sync. \(same)." : parts.joined(separator: "  ·  ") + "  ·  " + same
-        if !scan.problems.isEmpty { text += "  ·  \(Format.count(Int64(scan.problems.count))) couldn't be read" }
+        let unreadable = scan.leftSide.problems.count + scan.rightSide.problems.count
+        if unreadable > 0 { text += "  ·  \(Format.count(Int64(unreadable))) couldn't be read" }
+        if scan.memory.requiresReview { text += "  ·  Compare again to verify sync history" }
         if let result { text = result + "  " + text }
         summary.stringValue = text
         summary.textColor = .labelColor
@@ -919,7 +924,8 @@ final class SyncWindow: NSWindowController, NSWindowDelegate, NSTableViewDataSou
         let idle = comparing == nil && !syncing
         compareButton.title = comparing == nil ? "Compare" : "Stop"
         compareButton.isEnabled = !syncing && (comparing != nil || (leftField.url != nil && rightField.url != nil))
-        syncButton.isEnabled = idle && scan != nil && planShown == planWanted && plan.rows.contains { $0.action != .none }
+        syncButton.isEnabled = idle && scan != nil && scan?.memory.requiresReview != true
+            && planShown == planWanted && plan.rows.contains { $0.action != .none }
         // While a sync runs, the window shows the settings it runs with.
         for control in [leftField, rightField, chooseLeft, chooseRight, swapButton, recentButton, comparePopup,
                         excludeField, removalPopup] as [NSControl] {

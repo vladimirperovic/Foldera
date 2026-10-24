@@ -472,6 +472,7 @@ extension BackgroundWork {
         let f = try OctoberFiles()
         try octoberPicture(f.url("root.png"))
         try f.file("child/chosen.png")
+        try f.file("child/other.png")
         let chosen = FileItem(url: f.url("child/chosen.png"))
         let tab = ExplorerTab(location: .folder(f.root))
         defer { tab.tearDown() }
@@ -480,9 +481,12 @@ extension BackgroundWork {
         tab.setViewMode(.columns)
         let child = try #require(tab.items.firstIndex { $0.name == "child" })
         tab.columns.browser.selectRow(child, inColumn: 0)
-        try await octoberEventually { tab.columns.browser.numberOfRows(inColumn: 1) == 1 }
+        try await octoberEventually {
+            tab.columns.browser.lastColumn >= 1
+                && (tab.columns.browser.parentForItems(inColumn: 1) as? ColumnNode)?.children?.count == 2
+        }
         tab.columns.browser.selectRow(0, inColumn: 1)
-        #expect(tab.picturesForViewer(chosen).map(\.key) == [chosen.key])
+        #expect(Set(tab.picturesForViewer(chosen).map(\.key)) == [chosen.key, f.url("child/other.png").key])
     }
 
     @Test func cancellingRunningWorkReleasesTheNextQueuedJob() async throws {

@@ -252,24 +252,64 @@ extension ExplorerTab: NSMenuItemValidation {
     }
 
     @objc func paste(_ sender: Any?) {
-        let clipboard = FileClipboard.shared
-        let urls = clipboard.urls
-        guard let folder = currentFolder, !urls.isEmpty else { return }
-        let move = urls.contains { clipboard.isCut($0.key) }
-        transfer(urls, into: folder, move: move) { if move { clipboard.clearCut() } }
+        pasteFiles(move: false)
     }
 
     /// ⌥⌘V, Finder's way of saying "move here".
     @objc func pasteMove(_ sender: Any?) {
-        let urls = FileClipboard.shared.urls
-        guard let folder = currentFolder, !urls.isEmpty else { return }
-        transfer(urls, into: folder, move: true) { FileClipboard.shared.clearCut() }
+        pasteFiles(move: true)
+    }
+
+    private func pasteFiles(move requested: Bool) {
+        guard let folder = currentFolder, !ArchiveFolders.isInside(folder) else { return }
+        let clipboard = FileClipboard.shared
+        let change = clipboard.changeCount
+        let urls = clipboard.urls
+        if !urls.isEmpty {
+            let move = requested || urls.contains { clipboard.isCut($0.key) }
+            transfer(urls, into: folder, move: move) { outcome in
+                guard move else { return }
+                let moved = outcome.changes.compactMap { change -> URL? in
+                    switch change {
+                    case .moved(let from, _): return from
+                    case .removedFolder(let from): return from
+                    case .created: return nil
+                    }
+                }
+                clipboard.completeMove(of: urls, changeCount: change, moved: moved)
+            }
+            return
+        }
+
+        let receivers = clipboard.promises
+        guard !receivers.isEmpty else { return }
+        let job = PromisedFiles(receivers: receivers)
+        let progress = ProgressWindow(title: "Receiving files from another app")
+        progress.update(text: "Waiting for the other app to send the files…")
+        progress.onCancel = { job.cancel() }
+        progress.showSoon()
+        job.start { [weak self] received in
+            progress.finish()
+            FileOps.report(received.failures)
+            guard let self, !received.cancelled, !received.urls.isEmpty else {
+                received.cleanup()
+                return
+            }
+            // Promises supply temporary copies. Moving or cutting these must
+            // never be interpreted as permission to delete the remote originals.
+            self.transfer(received.urls, into: folder, move: false) { _ in received.cleanup() }
+        }
     }
 
     /// Copy or move with Windows' questions first, then a progress window
     /// that can be cancelled. Undo takes all of it back.
-    func transfer(_ urls: [URL], into folder: URL, move requested: Bool, then: (() -> Void)? = nil) {
-        guard !ArchiveFolders.isInside(folder) else { return FileOps.report(["An opened archive is read-only. Extract it to add to it."]) }
+    func transfer(_ urls: [URL], into folder: URL, move requested: Bool, then: ((Transfer.Outcome) -> Void)? = nil) {
+        guard !ArchiveFolders.isInside(folder) else {
+            let failures = ["An opened archive is read-only. Extract it to add to it."]
+            FileOps.report(failures)
+            then?(Transfer.Outcome(failures: failures))
+            return
+        }
         // What comes out of an opened archive is always a copy; the archive stays as it is.
         let move = requested && !urls.contains(where: ArchiveFolders.isInside)
         let cancelled = CancelFlag()
@@ -277,12 +317,20 @@ extension ExplorerTab: NSMenuItemValidation {
         progress.onCancel = { cancelled.set() }
         progress.showSoon()
         Transfer.planInBackground(urls, into: folder, move: move, cancelled: cancelled, ask: Transfer.askWithAlert) { [weak self] planned in
-            guard let self, let plan = planned else { progress.finish(); return }
+            guard let self, let plan = planned else {
+                progress.finish()
+                then?(Transfer.Outcome(cancelled: true))
+                return
+            }
             FileOps.report(plan.problems)
-            guard !cancelled.isSet else { progress.finish(); return }
+            guard !cancelled.isSet else {
+                progress.finish()
+                then?(Transfer.Outcome(cancelled: true))
+                return
+            }
             guard !plan.steps.isEmpty || (move && !plan.emptied.isEmpty) else {
                 progress.finish()
-                then?()
+                then?(Transfer.Outcome(failures: plan.problems))
                 return
             }
             let verb = move ? "Moving" : "Copying"
@@ -304,7 +352,7 @@ extension ExplorerTab: NSMenuItemValidation {
                 if move { urls.forEach { UsageCache.changed($0.deletingLastPathComponent()) } }
                 FileUndo.record(outcome.changes, name: move ? "Move" : "Copy")
                 FileOps.report(outcome.failures)
-                then?()
+                then?(outcome)
                 guard let self else { return }
                 self.busyText = nil
                 if folder.key == self.currentFolder?.key || folder.key == self.location.url?.key {

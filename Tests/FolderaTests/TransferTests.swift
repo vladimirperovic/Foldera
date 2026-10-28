@@ -56,16 +56,62 @@ private final class Answers {
     }
 
     /// Windows App can be a moment late to start handing over a placeholder it has just made.
-    @Test(arguments: [0, 0.6])
-    func aFolderWithSuchAFileInsideArrivesWhole(readyAfter: TimeInterval) throws {
+    @Test(arguments: [0, 0.6], [false, true])
+    func aFolderWithSuchAFileInsideArrivesWhole(readyAfter: TimeInterval, move: Bool) throws {
         let s = try Sandbox()
         let lazy = try LazyFile(try s.folder("remote/Scans").appendingPathComponent("scan.pdf"), contents: LazyFile.bytes(100_000),
                                 readyAfter: readyAfter)
         defer { lazy.stop() }
         let plan = try #require(Transfer.plan([s.url.appendingPathComponent("remote/Scans")], into: try s.folder("dest"),
-                                              move: false, ask: Answers(.stop).ask))
-        _ = Transfer(plan: plan, move: false).perform()
+                                              move: move, ask: Answers(.stop).ask))
+        let outcome = Transfer(plan: plan, move: move).perform()
+        #expect(outcome.failures.isEmpty)
         #expect(try Data(contentsOf: s.url.appendingPathComponent("dest/Scans/scan.pdf")) == lazy.contents)
+        #expect(s.exists("remote/Scans") == !move)
+    }
+
+    @Test(arguments: [Data(), Data("incomplete".utf8)], [false, true])
+    func aRemoteFolderCoordinatesChildrenThatAreNotSparse(initialContents: Data, move: Bool) throws {
+        let s = try Sandbox()
+        let source = try s.folder("remote/Scans")
+        let lazy = try LazyFile(source.appendingPathComponent("scan.pdf"), contents: LazyFile.bytes(100_000),
+                                initialContents: initialContents)
+        defer { lazy.stop() }
+        let plan = try #require(Transfer.plan([source], into: try s.folder("dest"), move: move, ask: Answers(.stop).ask))
+        let outcome = Transfer(plan: plan, move: move).perform()
+        #expect(outcome.failures.isEmpty)
+        #expect(try Data(contentsOf: s.url.appendingPathComponent("dest/Scans/scan.pdf")) == lazy.contents)
+    }
+
+    @Test(arguments: [false, true])
+    func mergingARemoteFolderRequestsItsListingBeforePlanning(move: Bool) throws {
+        let s = try Sandbox()
+        let source = s.url.appendingPathComponent("remote/Scans")
+        let bytes = LazyFile.bytes(5000)
+        let lazy = try LazyDirectory(source, contents: ["scan.pdf": bytes])
+        defer { lazy.stop() }
+        try s.file("dest/Scans/keep.txt", "keep")
+        let plan = try #require(Transfer.plan([source], into: s.url.appendingPathComponent("dest"), move: move,
+                                              ask: Answers(.merge).ask))
+        #expect(plan.steps.count == 1)
+        let outcome = Transfer(plan: plan, move: move).perform()
+        #expect(outcome.failures.isEmpty)
+        #expect(try Data(contentsOf: s.url.appendingPathComponent("dest/Scans/scan.pdf")) == bytes)
+        #expect(s.text("dest/Scans/keep.txt") == "keep")
+    }
+
+    @Test func aFolderMoveWaitsForItsUnfulfilledChild() throws {
+        let s = try Sandbox()
+        let source = try s.folder("remote/Scans")
+        _ = try LazyFile(source.appendingPathComponent("scan.pdf"), contents: LazyFile.bytes(5000), readyAfter: nil)
+        let target = s.url.appendingPathComponent("Scans")
+        let copier = TreeCopier(cancelled: CancelFlag())
+        copier.patience = 0.5
+        #expect(throws: OpError.self) {
+            try copier.whileReadingTree(source) { try FileManager.default.moveItem(at: $0, to: target) }
+        }
+        #expect(s.exists("remote/Scans/scan.pdf"))
+        #expect(!s.exists("Scans"))
     }
 
     @Test func anAppALittleLateIsAskedAgain() throws {
@@ -99,6 +145,25 @@ private final class Answers {
         try TreeCopier(cancelled: CancelFlag()).copy(sparse, to: s.url.appendingPathComponent("copy.img"))
         #expect(Date().timeIntervalSince(started) < 1)
         #expect(try Data(contentsOf: s.url.appendingPathComponent("copy.img")) == Data(count: 1 << 20))
+    }
+
+    @Test func aPlaceholderCannotAgeOutWhileWaiting() throws {
+        let s = try Sandbox()
+        let source = try s.folder("remote").appendingPathComponent("scan.pdf")
+        _ = try LazyFile(source, contents: LazyFile.bytes(5000), readyAfter: nil)
+        let copier = TreeCopier(cancelled: CancelFlag())
+        copier.patience = 0.5
+        var aged = false
+        copier.waiting = { waiting in
+            guard waiting else { return }
+            do {
+                try FileManager.default.setAttributes([.creationDate: Date(timeIntervalSinceNow: -3600)], ofItemAtPath: source.path)
+                aged = true
+            } catch { Issue.record(error) }
+        }
+        #expect(throws: OpError.self) { try copier.copy(source, to: s.url.appendingPathComponent("scan.pdf")) }
+        #expect(aged)
+        #expect(!s.exists("scan.pdf"))
     }
 
     @Test func aSlowHandOverIsSaid() throws {
@@ -209,6 +274,17 @@ private final class Answers {
         let plan = try #require(Transfer.plan([parent], into: child, move: true, ask: Answers(.stop).ask))
         #expect(plan.steps.isEmpty)
         #expect(plan.problems.count == 1)
+    }
+
+    @Test(arguments: [false, true])
+    func aPackageCannotGoInsideItself(move: Bool) throws {
+        let s = try Sandbox()
+        let package = try s.folder("Example.app")
+        let child = try s.folder("Example.app/Contents")
+        let plan = try #require(Transfer.plan([package], into: child, move: move, ask: Answers(.stop).ask))
+        #expect(plan.steps.isEmpty)
+        #expect(plan.problems.count == 1)
+        #expect(try FileManager.default.contentsOfDirectory(atPath: child.path).isEmpty)
     }
 
     @Test func cancelledCopiesLeaveNothingHalfDone() throws {

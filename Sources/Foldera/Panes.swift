@@ -17,7 +17,7 @@ extension ExplorerTab {
         guard let other = host?.otherPane(of: self), let folder = other.currentFolder, folder.key != currentFolder?.key else { return }
         let urls = selectedItems.filter { $0.volume == nil }.map(\.url)
         guard !urls.isEmpty, !(move && isInArchive) else { return }
-        transfer(urls, into: folder, move: move) { [weak self, weak other] in
+        transfer(urls, into: folder, move: move) { [weak self, weak other] _ in
             other?.reload()
             if move { self?.reload() }
         }

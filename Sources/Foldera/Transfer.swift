@@ -87,7 +87,10 @@ final class Transfer {
                 if !move { add(Step(from: source, to: names.name(for: source, in: folder, copy: true, taken: planned, ignoreCase: ignoreCase), replace: false)) }
                 return true
             }
-            if FileOps.isFolder(source) && FileOps.isInside(folder, source) {
+            // Packages are directories too. Copying an app into its own
+            // Contents would otherwise recursively copy the staging folder.
+            if (try? source.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) == true,
+               FileOps.isInside(folder, source) {
                 plan.problems.append("The destination folder “\(folder.lastPathComponent)” is inside “\(source.lastPathComponent)”.")
                 return true
             }
@@ -126,9 +129,13 @@ final class Transfer {
                     add(Step(from: source, to: target, replace: true))
                     return true
                 }
-                let children: [URL]
+                var children: [URL] = []
                 do {
-                    children = try readDirectory(source)
+                    // A remote app may supply a folder's children only when
+                    // a coordinated reader asks for them.
+                    try TreeCopier(cancelled: cancelled).whileReading(source) {
+                        children = try readDirectory($0)
+                    }
                 } catch {
                     plan.problems.append("“\(source.lastPathComponent)”: \(error.localizedDescription)")
                     return true
@@ -304,7 +311,7 @@ final class Transfer {
                     try replace(step, into: &outcome)
                 } else if move && sameVolume(step) {
                     // A placeholder renamed is still a placeholder: its app fills it in first.
-                    try copier.whileReading(step.from) { try fm.moveItem(at: $0, to: step.to) }
+                    try copier.whileReadingTree(step.from) { try fm.moveItem(at: $0, to: step.to) }
                     outcome.changes.append(.moved(from: step.from, to: step.to))
                 } else {
                     try copier.copy(step.from, to: step.to, verifyingSource: move)
@@ -358,7 +365,7 @@ final class Transfer {
         if move && sameVolume(step) {
             // Keep a same-volume move a rename (including its hard links),
             // but wait for the source before taking the destination away.
-            try copier.whileReading(step.from) { source in
+            try copier.whileReadingTree(step.from) { source in
                 guard FileOps.exists(source) else { throw CocoaError(.fileNoSuchFile) }
                 try installReplacement(source, step: step, expected: before, into: &outcome)
                 outcome.changes.append(.moved(from: step.from, to: step.to))
@@ -531,8 +538,9 @@ final class TreeCopier {
     }
 
     /// Runs `body` on this thread as a coordinated reader of `url`, the way
-    /// Finder copies: an app presenting the item (not what is inside a
-    /// folder) gets to save it first. Windows App puts a file copied in a
+    /// Finder copies. A batch preparation also asks presenters of a folder's
+    /// descendants to save: a plain coordinated folder read does not.
+    /// Windows App puts a file copied in a
     /// remote session on the clipboard as an empty placeholder of the right
     /// size and fetches its contents only for such a reader; read plainly,
     /// every byte is zero.
@@ -551,10 +559,14 @@ final class TreeCopier {
             lock.unlock()
         }
         let started = Date()
+        // Once a fresh placeholder is detected, aging past 60 seconds while
+        // waiting must not turn it into an ordinary sparse file full of zeros.
+        var awaitingPlaceholder = Self.isPlaceholder(url.path, bornWithin: 60)
         // A fresh placeholder nobody filled in (its app busy, or gone with the
         // session) is asked for again for a while, and is never copied as zeros.
         while try !coordinated(url, lock: lock, waiting: say, { url -> Bool in
-            guard Self.isPlaceholder(url.path, bornWithin: 60) else {
+            awaitingPlaceholder = awaitingPlaceholder || Self.isPlaceholder(url.path, bornWithin: 60)
+            guard awaitingPlaceholder && Self.isPlaceholder(url.path) else {
                 try body(url)
                 return true
             }
@@ -568,6 +580,30 @@ final class TreeCopier {
             lock.unlock()
             Thread.sleep(forTimeInterval: 0.25)
             if cancelled.isSet { throw CancellationError() }
+        }
+    }
+
+    /// Renaming a directory skips copyfile's per-file callbacks. Finish any
+    /// late placeholders before moving their paths away from their provider.
+    func whileReadingTree(_ url: URL, _ body: (URL) throws -> Void) throws {
+        try whileReading(url) { source in
+            var info = stat()
+            if lstat(source.path, &info) == 0, info.st_mode & S_IFMT == S_IFDIR {
+                var failure: Error?
+                guard let walker = FileManager.default.enumerator(at: source, includingPropertiesForKeys: nil,
+                    options: [], errorHandler: { _, error in failure = error; return false }) else {
+                    throw CocoaError(.fileReadUnknown)
+                }
+                while let child = walker.nextObject() as? URL {
+                    if cancelled.isSet { throw CancellationError() }
+                    if Self.isPlaceholder(child.path, bornWithin: 60) {
+                        try whileReading(child) { _ in }
+                    }
+                }
+                if let failure { throw failure }
+            }
+            if cancelled.isSet { throw CancellationError() }
+            try body(source)
         }
     }
 
@@ -603,9 +639,29 @@ final class TreeCopier {
                 result = Result { try body(url) }
             }
         } else {
-            coordinator.coordinate(readingItemAt: url, options: [], error: &refused) { url in
-                stopWatching()
-                result = Result { try body(url) }
+            var info = stat()
+            let directory = lstat(url.path, &info) == 0 && info.st_mode & S_IFMT == S_IFDIR
+            func read(options: NSFileCoordinator.ReadingOptions) {
+                coordinator.coordinate(readingItemAt: url, options: options, error: &refused) { url in
+                    stopWatching()
+                    result = Result {
+                        if self.cancelled.isSet { throw CancellationError() }
+                        return try body(url)
+                    }
+                }
+            }
+            if directory {
+                var preparationError: NSError?
+                coordinator.prepare(forReadingItemsAt: [url], options: [], writingItemsAt: [], options: [],
+                                    error: &preparationError) { complete in
+                    defer { complete() }
+                    // prepare has already requested the saves, including for
+                    // descendants that aren't recognizable as sparse files.
+                    read(options: .withoutChanges)
+                }
+                if refused == nil { refused = preparationError }
+            } else {
+                read(options: [])
             }
         }
         stopWatching()
@@ -657,9 +713,8 @@ final class TreeCopier {
         switch (what, stage) {
         case (COPYFILE_RECURSE_FILE, COPYFILE_START):
             fileCopied = 0
-            // Reading a folder doesn't ask the apps presenting what is inside
-            // it, so a file that looks like a placeholder is asked for itself.
-            // Asking for every file would cost a round trip each.
+            // A provider can register a child after the folder's batch
+            // preparation. Retry a remaining placeholder individually.
             if let source, case let path = String(cString: source), Self.isPlaceholder(path) {
                 do {
                     try whileReading(URL(fileURLWithPath: path)) { _ in }
@@ -826,6 +881,9 @@ final class ProgressWindow: NSWindowController {
 
     func finish() {
         finished = true
+        // The cancel action can retain a job whose progress callback retains
+        // this window. Finishing must release that cycle.
+        onCancel = nil
         close()
         Self.open.removeAll { $0 === self }
     }

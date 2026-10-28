@@ -10,17 +10,21 @@ final class LazyFile: NSObject, NSFilePresenter {
     let contents: Data
     private let delay: TimeInterval
 
-    init(_ url: URL, contents: Data, delay: TimeInterval = 0, readyAfter: TimeInterval? = 0) throws {
+    init(_ url: URL, contents: Data, delay: TimeInterval = 0, readyAfter: TimeInterval? = 0,
+         initialContents: Data? = nil) throws {
         presentedItemURL = url
         self.contents = contents
         self.delay = delay
         super.init()
-        FileManager.default.createFile(atPath: url.path, contents: nil)
-        let placeholder = try FileHandle(forWritingTo: url)
-        defer { try? placeholder.close() }
-        try placeholder.truncate(atOffset: UInt64(contents.count))
+        FileManager.default.createFile(atPath: url.path, contents: initialContents)
+        if initialContents == nil {
+            let placeholder = try FileHandle(forWritingTo: url)
+            defer { try? placeholder.close() }
+            try placeholder.truncate(atOffset: UInt64(contents.count))
+        }
         guard let readyAfter else { return }
-        DispatchQueue.global().asyncAfter(deadline: .now() + readyAfter) { NSFileCoordinator.addFilePresenter(self) }
+        if readyAfter == 0 { NSFileCoordinator.addFilePresenter(self) }
+        else { DispatchQueue.global().asyncAfter(deadline: .now() + readyAfter) { NSFileCoordinator.addFilePresenter(self) } }
     }
 
     /// Some bytes, none of them zero, so a placeholder copied instead shows.
@@ -36,6 +40,34 @@ final class LazyFile: NSObject, NSFilePresenter {
         } catch {
             completionHandler(error)
         }
+    }
+
+    func stop() { NSFileCoordinator.removeFilePresenter(self) }
+}
+
+/// A remote directory whose listing becomes available only after coordination.
+final class LazyDirectory: NSObject, NSFilePresenter {
+    let presentedItemURL: URL?
+    let presentedItemOperationQueue = OperationQueue()
+    let contents: [String: Data]
+
+    init(_ url: URL, contents: [String: Data]) throws {
+        presentedItemURL = url
+        self.contents = contents
+        super.init()
+        try FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
+        NSFileCoordinator.addFilePresenter(self)
+    }
+
+    func savePresentedItemChanges(completionHandler: @escaping (Error?) -> Void) {
+        do {
+            for (name, bytes) in contents {
+                let file = presentedItemURL!.appendingPathComponent(name)
+                try FileManager.default.createDirectory(at: file.deletingLastPathComponent(), withIntermediateDirectories: true)
+                try bytes.write(to: file)
+            }
+            completionHandler(nil)
+        } catch { completionHandler(error) }
     }
 
     func stop() { NSFileCoordinator.removeFilePresenter(self) }

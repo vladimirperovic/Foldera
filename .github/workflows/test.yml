@@ -18,7 +18,7 @@ jobs:
       # These require another app to supply promised file bytes through a
       # file presenter (as Windows App does). Hosted runners don't provide
       # that interactive handoff, though ordinary AppKit windows work there.
-      NEEDS_A_DESKTOP: "aFileAnotherAppFillsInOnlyWhenReadArrivesWhole|aFolderWithSuchAFileInsideArrivesWhole|anAppALittleLateIsAskedAgain|aSlowHandOverIsSaid"
+      NEEDS_A_DESKTOP: "aFileAnotherAppFillsInOnlyWhenReadArrivesWhole|aFolderWithSuchAFileInsideArrivesWhole|anAppALittleLateIsAskedAgain|aSlowHandOverIsSaid|aRemoteFolderCoordinatesChildrenThatAreNotSparse|mergingARemoteFolderRequestsItsListingBeforePlanning"
       SNAPSHOT_BINARY: .build/${{ matrix.configuration }}/Foldera
     steps:
       - uses: actions/checkout@v4

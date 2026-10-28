@@ -308,38 +308,75 @@ enum FileOps {
 /// which URLs it put there as cut; pasting those moves them.
 final class FileClipboard {
     static let shared = FileClipboard()
+    private let pasteboard: NSPasteboard
     private var cutKeys: Set<String> = []
     private var cutChangeCount = -1
+    private var movedKeys: Set<String> = []
+    private var movedChangeCount = -1
+
+    init(pasteboard: NSPasteboard = .general) {
+        self.pasteboard = pasteboard
+    }
+
+    var changeCount: Int { pasteboard.changeCount }
 
     func put(_ urls: [URL], cut: Bool) {
-        let pb = NSPasteboard.general
+        let pb = pasteboard
         pb.clearContents()
         pb.writeObjects(urls as [NSURL])
         cutKeys = cut ? Set(urls.map(\.key)) : []
         cutChangeCount = pb.changeCount
+        movedKeys = []
+        movedChangeCount = -1
         NotificationCenter.default.post(name: .explorerClipboardChanged, object: nil)
     }
 
     var urls: [URL] {
-        NSPasteboard.general.readObjects(forClasses: [NSURL.self], options: [.urlReadingFileURLsOnly: true]) as? [URL] ?? []
+        let urls = pasteboard.readObjects(forClasses: [NSURL.self], options: [.urlReadingFileURLsOnly: true]) as? [URL] ?? []
+        guard pasteboard.changeCount == movedChangeCount else { return urls }
+        return urls.filter { !movedKeys.contains($0.key) }
     }
+
+    var promises: [NSFilePromiseReceiver] { PromisedFiles.read(from: pasteboard) }
 
     private var checkedChangeCount = -1
     private var checkedHasFiles = false
 
     /// Asked on every selection change; the pasteboard is only read again once its contents change.
     var hasFiles: Bool {
-        let pb = NSPasteboard.general
+        let pb = pasteboard
         if pb.changeCount != checkedChangeCount {
             checkedChangeCount = pb.changeCount
             checkedHasFiles = pb.canReadObject(forClasses: [NSURL.self], options: [.urlReadingFileURLsOnly: true])
+            if checkedHasFiles {
+                if movedChangeCount == pb.changeCount { checkedHasFiles = !urls.isEmpty }
+            } else {
+                checkedHasFiles = PromisedFiles.hasFiles(in: pb)
+            }
         }
         return checkedHasFiles
     }
 
-    var isCut: Bool { !cutKeys.isEmpty && NSPasteboard.general.changeCount == cutChangeCount }
+    var isCut: Bool { !cutKeys.isEmpty && pasteboard.changeCount == cutChangeCount }
 
     func isCut(_ key: String) -> Bool { isCut && cutKeys.contains(key) }
+
+    /// A transfer may finish after another Copy/Cut. Consume only sources
+    /// that really moved, and only from the clipboard that started it.
+    /// Skipped, failed and partially merged sources stay available to retry.
+    func completeMove(of sources: [URL], changeCount: Int, moved: [URL]) {
+        guard pasteboard.changeCount == changeCount else { return }
+        let completed = Set(sources.map(\.key)).intersection(moved.map(\.key))
+        guard !completed.isEmpty else { return }
+        if movedChangeCount != changeCount {
+            movedKeys = []
+            movedChangeCount = changeCount
+        }
+        movedKeys.formUnion(completed)
+        if cutChangeCount == changeCount { cutKeys.subtract(completed) }
+        checkedChangeCount = -1
+        NotificationCenter.default.post(name: .explorerClipboardChanged, object: nil)
+    }
 
     func clearCut() {
         guard !cutKeys.isEmpty else { return }

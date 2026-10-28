@@ -87,7 +87,10 @@ final class Transfer {
                 if !move { add(Step(from: source, to: names.name(for: source, in: folder, copy: true, taken: planned, ignoreCase: ignoreCase), replace: false)) }
                 return true
             }
-            if FileOps.isFolder(source) && FileOps.isInside(folder, source) {
+            // Packages are directories too. Copying an app into its own
+            // Contents would otherwise recursively copy the staging folder.
+            if (try? source.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) == true,
+               FileOps.isInside(folder, source) {
                 plan.problems.append("The destination folder “\(folder.lastPathComponent)” is inside “\(source.lastPathComponent)”.")
                 return true
             }
@@ -126,9 +129,13 @@ final class Transfer {
                     add(Step(from: source, to: target, replace: true))
                     return true
                 }
-                let children: [URL]
+                var children: [URL] = []
                 do {
-                    children = try readDirectory(source)
+                    // A remote app may supply a folder's children only when
+                    // a coordinated reader asks for them.
+                    try TreeCopier(cancelled: cancelled).whileReading(source) {
+                        children = try readDirectory($0)
+                    }
                 } catch {
                     plan.problems.append("“\(source.lastPathComponent)”: \(error.localizedDescription)")
                     return true
@@ -304,10 +311,10 @@ final class Transfer {
                     try replace(step, into: &outcome)
                 } else if move && sameVolume(step) {
                     // A placeholder renamed is still a placeholder: its app fills it in first.
-                    try copier.whileReading(step.from) { try fm.moveItem(at: $0, to: step.to) }
+                    try copier.whileReadingTree(step.from) { try fm.moveItem(at: $0, to: step.to) }
                     outcome.changes.append(.moved(from: step.from, to: step.to))
                 } else {
-                    try copier.copy(step.from, to: step.to, verifyingSource: move)
+                    try copier.copy(step.from, to: step.to, verifyingSource: move, retryBusySource: !move)
                     outcome.failures += copier.errors
                     if move {
                         // The original goes only once every byte arrived.
@@ -358,7 +365,7 @@ final class Transfer {
         if move && sameVolume(step) {
             // Keep a same-volume move a rename (including its hard links),
             // but wait for the source before taking the destination away.
-            try copier.whileReading(step.from) { source in
+            try copier.whileReadingTree(step.from) { source in
                 guard FileOps.exists(source) else { throw CocoaError(.fileNoSuchFile) }
                 try installReplacement(source, step: step, expected: before, into: &outcome)
                 outcome.changes.append(.moved(from: step.from, to: step.to))
@@ -368,7 +375,7 @@ final class Transfer {
         let staging = try FileOps.stagingFolder(beside: step.to)
         defer { FileOps.removeOwn(staging) }
         let ready = staging.appendingPathComponent(step.to.lastPathComponent)
-        try copier.copy(step.from, to: ready, verifyingSource: move)
+        try copier.copy(step.from, to: ready, verifyingSource: move, retryBusySource: !move)
         guard copier.errors.isEmpty else { throw OpError(copier.errors.joined(separator: "\n")) }
         try installReplacement(ready, step: step, expected: before, into: &outcome)
         outcome.changes.append(.created(step.to))
@@ -436,6 +443,13 @@ final class Transfer {
 /// dates, extended attributes. On APFS a copy is a clone and takes no space.
 /// Copying and Sync both use it; it reports as the bytes arrive.
 final class TreeCopier {
+    struct SourceChangedError: LocalizedError {
+        let url: URL
+        var errorDescription: String? {
+            "“\(url.lastPathComponent)” changed while copying. Wait for the app providing it to finish, then try again."
+        }
+    }
+
     /// Bytes of the current item that have arrived so far (on the copying thread).
     var copied: ((Int64) -> Void)?
     /// Names inside a folder being copied that are left out.
@@ -453,6 +467,7 @@ final class TreeCopier {
     private var finished: Int64 = 0
     private var fileCopied: Int64 = 0
     private var copyError: Int32?
+    private var changedSource: URL?
     private var sourceRevision: FileOps.TreeRevision?
     private var revisionRoot: URL?
     private var copyingFile: (url: URL, revision: FileOps.Revision)?
@@ -462,7 +477,7 @@ final class TreeCopier {
     }
 
     /// Nothing half-copied is left behind when it fails or is cancelled.
-    func copy(_ from: URL, to: URL, verifyingSource: Bool = false) throws {
+    func copy(_ from: URL, to: URL, verifyingSource: Bool = false, retryBusySource: Bool = false) throws {
         errors = []
         sourceRevision = nil
         revisionRoot = nil
@@ -472,17 +487,55 @@ final class TreeCopier {
         let staging = try FileOps.stagingFolder(beside: to)
         defer { FileOps.removeOwn(staging) }
         let ready = staging.appendingPathComponent("item")
-        try whileReading(from) { source in
-            if verifyingSource {
-                revisionRoot = source
-                sourceRevision = try FileOps.treeRevision(of: source, cancelled: cancelled)
-            }
-            var info = stat()
-            let isDirectory = lstat(source.path, &info) == 0 && info.st_mode & S_IFMT == S_IFDIR
-            let before = isDirectory ? nil : FileOps.revision(of: source)
-            try copyNow(source, to: ready)
-            if !isDirectory && (before == nil || FileOps.revision(of: source) != before) {
-                throw OpError("The source changed while copying. Try again after it finishes being saved.")
+        // A remote provider may still be finalizing the source after granting
+        // its first read. Only ordinary Copy opts in: Move and Sync retain
+        // their original snapshot, and never silently adopt a changed source.
+        let attempts = retryBusySource && !verifyingSource ? 3 : 1
+        for attempt in 0..<attempts {
+            errors = []
+            sourceRevision = nil
+            revisionRoot = nil
+            finished = 0
+            fileCopied = 0
+            copyError = nil
+            changedSource = nil
+            copyingFile = nil
+            do {
+                if cancelled.isSet { throw CancellationError() }
+                try whileReading(from) { source in
+                    if verifyingSource {
+                        revisionRoot = source
+                        sourceRevision = try FileOps.treeRevision(of: source, cancelled: cancelled)
+                    }
+                    var info = stat()
+                    let isDirectory = lstat(source.path, &info) == 0 && info.st_mode & S_IFMT == S_IFDIR
+                    let before = isDirectory ? nil : FileOps.revision(of: source)
+                    try copyNow(source, to: ready)
+                    if !isDirectory && (before == nil || FileOps.revision(of: source) != before) {
+                        throw SourceChangedError(url: source)
+                    }
+                }
+                break
+            } catch {
+                // Only this private attempt is discarded. Publishing to the
+                // requested destination happens once, after a stable copy.
+                FileOps.removeOwn(ready)
+                sourceRevision = nil
+                revisionRoot = nil
+                if cancelled.isSet { throw CancellationError() }
+                let posix = error as NSError
+                let busy = posix.domain == NSPOSIXErrorDomain && posix.code == Int(EBUSY)
+                guard attempts > 1, error is SourceChangedError || busy else { throw error }
+                guard attempt + 1 < attempts else {
+                    if busy {
+                        throw OpError("The app providing “\(from.lastPathComponent)” is still busy. Wait for it to finish sending the file, then try again.")
+                    }
+                    throw error
+                }
+                // A failed cleanup must not make another attempt reuse files
+                // from the interrupted copy.
+                guard !FileOps.exists(ready) else { throw error }
+                try waitBeforeRetry()
             }
         }
         guard FileOps.exists(ready) else {
@@ -493,6 +546,17 @@ final class TreeCopier {
         guard renamex_np(ready.path, to.path, UInt32(RENAME_EXCL)) == 0 else {
             throw NSError(domain: NSPOSIXErrorDomain, code: Int(errno))
         }
+    }
+
+    private func waitBeforeRetry() throws {
+        waiting?(true)
+        defer { waiting?(false) }
+        let until = Date().addingTimeInterval(0.25)
+        repeat {
+            if cancelled.isSet { throw CancellationError() }
+            Thread.sleep(forTimeInterval: 0.025)
+        } while Date() < until
+        if cancelled.isSet { throw CancellationError() }
     }
 
     /// Only a Move requests a source snapshot. Coordinate the final write
@@ -531,8 +595,9 @@ final class TreeCopier {
     }
 
     /// Runs `body` on this thread as a coordinated reader of `url`, the way
-    /// Finder copies: an app presenting the item (not what is inside a
-    /// folder) gets to save it first. Windows App puts a file copied in a
+    /// Finder copies. A batch preparation also asks presenters of a folder's
+    /// descendants to save: a plain coordinated folder read does not.
+    /// Windows App puts a file copied in a
     /// remote session on the clipboard as an empty placeholder of the right
     /// size and fetches its contents only for such a reader; read plainly,
     /// every byte is zero.
@@ -545,16 +610,27 @@ final class TreeCopier {
             said = true
             waiting?(true)
         }
-        defer {
+        func finishWaiting() {
             lock.lock()
-            if said { waiting?(false) }
-            lock.unlock()
+            defer { lock.unlock() }
+            guard said else { return }
+            said = false
+            waiting?(false)
         }
+        defer { finishWaiting() }
         let started = Date()
+        // Once a fresh placeholder is detected, aging past 60 seconds while
+        // waiting must not turn it into an ordinary sparse file full of zeros.
+        var awaitingPlaceholder = Self.isPlaceholder(url.path, bornWithin: 60)
         // A fresh placeholder nobody filled in (its app busy, or gone with the
         // session) is asked for again for a while, and is never copied as zeros.
         while try !coordinated(url, lock: lock, waiting: say, { url -> Bool in
-            guard Self.isPlaceholder(url.path, bornWithin: 60) else {
+            awaitingPlaceholder = awaitingPlaceholder || Self.isPlaceholder(url.path, bornWithin: 60)
+            guard awaitingPlaceholder && Self.isPlaceholder(url.path) else {
+                // The provider has handed the file over. Copy progress must
+                // become visible now, not only when the whole copy finishes.
+                // End this scope's wait before a child read can start its own.
+                finishWaiting()
                 try body(url)
                 return true
             }
@@ -568,6 +644,30 @@ final class TreeCopier {
             lock.unlock()
             Thread.sleep(forTimeInterval: 0.25)
             if cancelled.isSet { throw CancellationError() }
+        }
+    }
+
+    /// Renaming a directory skips copyfile's per-file callbacks. Finish any
+    /// late placeholders before moving their paths away from their provider.
+    func whileReadingTree(_ url: URL, _ body: (URL) throws -> Void) throws {
+        try whileReading(url) { source in
+            var info = stat()
+            if lstat(source.path, &info) == 0, info.st_mode & S_IFMT == S_IFDIR {
+                var failure: Error?
+                guard let walker = FileManager.default.enumerator(at: source, includingPropertiesForKeys: nil,
+                    options: [], errorHandler: { _, error in failure = error; return false }) else {
+                    throw CocoaError(.fileReadUnknown)
+                }
+                while let child = walker.nextObject() as? URL {
+                    if cancelled.isSet { throw CancellationError() }
+                    if Self.isPlaceholder(child.path, bornWithin: 60) {
+                        try whileReading(child) { _ in }
+                    }
+                }
+                if let failure { throw failure }
+            }
+            if cancelled.isSet { throw CancellationError() }
+            try body(source)
         }
     }
 
@@ -603,9 +703,29 @@ final class TreeCopier {
                 result = Result { try body(url) }
             }
         } else {
-            coordinator.coordinate(readingItemAt: url, options: [], error: &refused) { url in
-                stopWatching()
-                result = Result { try body(url) }
+            var info = stat()
+            let directory = lstat(url.path, &info) == 0 && info.st_mode & S_IFMT == S_IFDIR
+            func read(options: NSFileCoordinator.ReadingOptions) {
+                coordinator.coordinate(readingItemAt: url, options: options, error: &refused) { url in
+                    stopWatching()
+                    result = Result {
+                        if self.cancelled.isSet { throw CancellationError() }
+                        return try body(url)
+                    }
+                }
+            }
+            if directory {
+                var preparationError: NSError?
+                coordinator.prepare(forReadingItemsAt: [url], options: [], writingItemsAt: [], options: [],
+                                    error: &preparationError) { complete in
+                    defer { complete() }
+                    // prepare has already requested the saves, including for
+                    // descendants that aren't recognizable as sparse files.
+                    read(options: .withoutChanges)
+                }
+                if refused == nil { refused = preparationError }
+            } else {
+                read(options: [])
             }
         }
         stopWatching()
@@ -626,6 +746,7 @@ final class TreeCopier {
         finished = 0
         fileCopied = 0
         copyError = nil
+        changedSource = nil
         copyingFile = nil
         let state = copyfile_state_alloc()
         defer { copyfile_state_free(state) }
@@ -639,6 +760,10 @@ final class TreeCopier {
             FileOps.removeOwn(to)
             throw CancellationError()
         }
+        if let changedSource {
+            FileOps.removeOwn(to)
+            throw SourceChangedError(url: changedSource)
+        }
         if result != 0 || copyError != nil {
             FileOps.removeOwn(to)
             throw NSError(domain: NSPOSIXErrorDomain, code: Int(code))
@@ -649,7 +774,7 @@ final class TreeCopier {
         if cancelled.isSet { return COPYFILE_QUIT }
         // A recursive copy may report a data failure again at its outer level.
         // Keep the original error and abort the whole staged item there too.
-        if copyError != nil { return COPYFILE_QUIT }
+        if copyError != nil || changedSource != nil { return COPYFILE_QUIT }
         if stage == COPYFILE_START, what == COPYFILE_RECURSE_FILE || what == COPYFILE_RECURSE_DIR,
            let skips, let source, skips((String(cString: source) as NSString).lastPathComponent) {
             return COPYFILE_SKIP
@@ -657,9 +782,8 @@ final class TreeCopier {
         switch (what, stage) {
         case (COPYFILE_RECURSE_FILE, COPYFILE_START):
             fileCopied = 0
-            // Reading a folder doesn't ask the apps presenting what is inside
-            // it, so a file that looks like a placeholder is asked for itself.
-            // Asking for every file would cost a round trip each.
+            // A provider can register a child after the folder's batch
+            // preparation. Retry a remaining placeholder individually.
             if let source, case let path = String(cString: source), Self.isPlaceholder(path) {
                 do {
                     try whileReading(URL(fileURLWithPath: path)) { _ in }
@@ -682,8 +806,8 @@ final class TreeCopier {
             }
         case (COPYFILE_RECURSE_FILE, COPYFILE_FINISH):
             if let copyingFile, FileOps.revision(of: copyingFile.url) != copyingFile.revision {
-                copyError = EBUSY
-                errors.append("“\(copyingFile.url.lastPathComponent)” changed while copying.")
+                changedSource = copyingFile.url
+                errors.append(SourceChangedError(url: copyingFile.url).localizedDescription)
                 return COPYFILE_QUIT
             }
             copyingFile = nil
@@ -826,6 +950,9 @@ final class ProgressWindow: NSWindowController {
 
     func finish() {
         finished = true
+        // The cancel action can retain a job whose progress callback retains
+        // this window. Finishing must release that cycle.
+        onCancel = nil
         close()
         Self.open.removeAll { $0 === self }
     }

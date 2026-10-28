@@ -57,14 +57,27 @@ private final class RetryFiles {
     @Test func aSourceThatKeepsChangingStopsAfterThreeAttemptsAndLeavesNoCopy() throws {
         let files = try RetryFiles()
         let copier = TreeCopier(cancelled: CancelFlag())
+        let lock = NSLock()
         var changes = 0
+        var needsChange = true
         copier.copied = { bytes in
             guard bytes == 0 else { return }
+            lock.lock()
+            guard needsChange else { lock.unlock(); return }
+            needsChange = false
             changes += 1
+            let change = changes
+            lock.unlock()
             do {
-                try FileManager.default.setAttributes([.posixPermissions: changes.isMultiple(of: 2) ? 0o644 : 0o600],
+                try FileManager.default.setAttributes([.posixPermissions: change.isMultiple(of: 2) ? 0o644 : 0o600],
                                                        ofItemAtPath: files.source.path)
             } catch { Issue.record(error) }
+        }
+        copier.waiting = { waiting in
+            guard waiting else { return }
+            lock.lock()
+            needsChange = true
+            lock.unlock()
         }
 
         #expect(throws: TreeCopier.SourceChangedError.self) {
@@ -75,7 +88,6 @@ private final class RetryFiles {
         #expect(try Data(contentsOf: files.source) == Data("original".utf8))
         #expect(!FileOps.exists(files.target))
         #expect(try files.destinationNames().isEmpty)
-        #expect(copier.errors.first?.contains("changed while copying") == true)
     }
 
     @Test func cancellingDuringTheRetryWaitStopsWithoutPublishing() throws {

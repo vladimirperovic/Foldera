@@ -194,7 +194,8 @@ private final class Answers {
         }
         try copier.whileReading(source) { ready in
             #expect(states == [true, false])
-            #expect(try Data(contentsOf: ready) == bytes)
+            let received = try Data(contentsOf: ready)
+            #expect(received == bytes)
         }
         #expect(states == [true, false])
     }
@@ -222,7 +223,8 @@ private final class Answers {
             next = inner
             try copier.whileReading(inner) { ready in
                 #expect(states == [true, false, true, false])
-                #expect(try Data(contentsOf: ready) == bytes)
+                let received = try Data(contentsOf: ready)
+                #expect(received == bytes)
             }
         }
         #expect(states == [true, false, true, false])

@@ -178,6 +178,56 @@ private final class Answers {
         #expect(try Data(contentsOf: s.url.appendingPathComponent("big.iso")) == lazy.contents)
     }
 
+    @Test func handoffWaitingEndsBeforeReadingBytes() throws {
+        let s = try Sandbox()
+        let source = try s.folder("remote").appendingPathComponent("scan.pdf")
+        let bytes = LazyFile.bytes(5000)
+        _ = try LazyFile(source, contents: bytes, readyAfter: nil)
+        let copier = TreeCopier(cancelled: CancelFlag())
+        var states: [Bool] = []
+        copier.waiting = { waiting in
+            states.append(waiting)
+            if waiting {
+                do { try bytes.write(to: source) }
+                catch { Issue.record(error) }
+            }
+        }
+        try copier.whileReading(source) { ready in
+            #expect(states == [true, false])
+            #expect(try Data(contentsOf: ready) == bytes)
+        }
+        #expect(states == [true, false])
+    }
+
+    @Test func nestedHandoffsEndOnlyTheirOwnWaitingIndication() throws {
+        let s = try Sandbox()
+        let folder = try s.folder("remote")
+        let outer = folder.appendingPathComponent("outer.pdf")
+        let inner = folder.appendingPathComponent("inner.pdf")
+        let bytes = LazyFile.bytes(5000)
+        _ = try LazyFile(outer, contents: bytes, readyAfter: nil)
+        _ = try LazyFile(inner, contents: bytes, readyAfter: nil)
+        let copier = TreeCopier(cancelled: CancelFlag())
+        var states: [Bool] = []
+        var next = outer
+        copier.waiting = { waiting in
+            states.append(waiting)
+            if waiting {
+                do { try bytes.write(to: next) }
+                catch { Issue.record(error) }
+            }
+        }
+        try copier.whileReading(outer) { _ in
+            #expect(states == [true, false])
+            next = inner
+            try copier.whileReading(inner) { ready in
+                #expect(states == [true, false, true, false])
+                #expect(try Data(contentsOf: ready) == bytes)
+            }
+        }
+        #expect(states == [true, false, true, false])
+    }
+
     @Test func cancelStopsWaitingForAHandOver() throws {
         let s = try Sandbox()
         let lazy = try LazyFile(try s.folder("remote").appendingPathComponent("big.iso"), contents: LazyFile.bytes(1000), delay: 5)

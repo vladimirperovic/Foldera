@@ -213,7 +213,8 @@ For animated or multi-frame images it reads the first frame.
   arrive. Foldera receives them before asking about name conflicts. Cancel
   stops the paste; files still arriving are cleaned up after their sender
   finishes. Remote folder copies and moves request their children's data
-  before transferring them.
+  before transferring them. If a sender is still finishing a file, Copy
+  retries briefly; a file that keeps changing is not installed at the destination.
 - **Cut after a partial move** keeps the items that did not move ready to
   retry. Finishing an earlier move does not clear a newer Cut selection.
 - **Dragging**: onto the same drive moves; onto another drive copies; ⌥

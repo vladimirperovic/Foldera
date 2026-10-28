@@ -265,6 +265,7 @@ extension ExplorerTab: NSMenuItemValidation {
         let clipboard = FileClipboard.shared
         let change = clipboard.changeCount
         let urls = clipboard.urls
+        guard clipboard.changeCount == change else { return }
         if !urls.isEmpty {
             let move = requested || urls.contains { clipboard.isCut($0.key) }
             transfer(urls, into: folder, move: move) { outcome in
@@ -282,7 +283,7 @@ extension ExplorerTab: NSMenuItemValidation {
         }
 
         let receivers = clipboard.promises
-        guard !receivers.isEmpty else { return }
+        guard clipboard.changeCount == change, !receivers.isEmpty else { return }
         let job = PromisedFiles(receivers: receivers)
         let progress = ProgressWindow(title: "Receiving files from another app")
         progress.update(text: "Waiting for the other app to send the files…")

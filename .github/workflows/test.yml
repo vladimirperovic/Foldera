@@ -92,6 +92,13 @@ jobs:
           codesign --verify --deep --strict build/Foldera.app
           # Exercise the shipped, stripped executable in the UI checks below.
           echo "SNAPSHOT_BINARY=$GITHUB_WORKSPACE/build/Foldera.app/Contents/MacOS/Foldera" >> "$GITHUB_ENV"
+          ditto -c -k --sequesterRsrc --keepParent build/Foldera.app build/Foldera.app.zip
+      - uses: actions/upload-artifact@v4
+        if: ${{ matrix.configuration == 'release' && success() }}
+        with:
+          name: Foldera-macOS
+          path: build/Foldera.app.zip
+          retention-days: 7
       - name: Preview window snapshots
         id: previews
         if: ${{ !cancelled() && success() && steps.build.outcome == 'success' }}

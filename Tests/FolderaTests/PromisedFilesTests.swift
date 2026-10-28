@@ -32,6 +32,10 @@ private final class TestPromise {
         guard let queue, let reader else { Issue.record("Promise was not requested"); return }
         queue.addOperation { reader(url, error) }
     }
+
+    /// Fake readers never wait for the main thread. This lets a test hold
+    /// main delivery until a provider callback has definitely completed.
+    func finishCallbacks() { queue?.waitUntilAllOperationsAreFinished() }
 }
 
 private final class PasteboardPromise: NSObject, NSFilePromiseProviderDelegate {
@@ -104,6 +108,41 @@ private final class PasteboardPromise: NSObject, NSFilePromiseProviderDelegate {
         #expect(completions == 1)
     }
 
+    @Test func cancelBeforeMainDeliveryDiscardsTheCompletedPromise() async throws {
+        let source = TestPromise(["ready.txt"])
+        let job = PromisedFiles(sources: [source.source])
+        var outcome: PromisedFiles.Outcome?
+        job.start { outcome = $0 }
+        let folder = try #require(source.folder)
+        try source.send("ready.txt")
+        source.finishCallbacks()
+        // The worker has queued success, but this actor has not yielded to
+        // its main-queue completion. Cancel must still stop the next transfer.
+        job.cancel()
+        try await promiseEventually { outcome != nil }
+        #expect(outcome?.cancelled == true)
+        #expect(outcome?.urls.isEmpty == true)
+        outcome?.cleanup()
+        try await promiseEventually { !FileOps.exists(folder) }
+    }
+
+    @Test func cancelAfterHandoffCannotRemoveFilesStillBeingTransferred() async throws {
+        let source = TestPromise(["ready.txt"])
+        let job = PromisedFiles(sources: [source.source])
+        var outcome: PromisedFiles.Outcome?
+        job.start { outcome = $0 }
+        let folder = try #require(source.folder)
+        let file = try source.send("ready.txt")
+        try await promiseEventually { outcome != nil }
+        #expect(outcome?.cancelled == false)
+        job.cancel()
+        source.finishCallbacks()
+        #expect(FileOps.exists(file))
+        #expect(outcome?.urls == [file])
+        outcome?.cleanup()
+        try await promiseEventually { !FileOps.exists(folder) }
+    }
+
     @Test func failedPromiseDoesNotPublishItsPartialFile() async throws {
         let source = TestPromise(["partial.txt", "whole.txt"])
         let job = PromisedFiles(sources: [source.source])
@@ -165,6 +204,9 @@ private final class PasteboardPromise: NSObject, NSFilePromiseProviderDelegate {
         let folder = receiving.appendingPathComponent("Project")
         try fm.createDirectory(at: folder, withIntermediateDirectories: false)
         try Data("nested".utf8).write(to: folder.appendingPathComponent("child.txt"))
+        let internalLink = receiving.appendingPathComponent("Internal")
+        try fm.createSymbolicLink(at: internalLink, withDestinationURL: folder)
+        #expect(!PromisedFiles.isReceivedFile(internalLink, in: receiving))
         #expect(PromisedFiles.isReceivedFile(folder, in: receiving))
         #expect(!PromisedFiles.isReceivedFile(folder.appendingPathComponent("child.txt"), in: receiving))
     }

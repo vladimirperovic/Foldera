@@ -72,6 +72,7 @@ final class PromisedFiles {
     private var seen = Set<String>()
     private var failures: [String] = []
     private var completion: ((Outcome) -> Void)?
+    private let cancelled = CancelFlag()
     private var started = false
     private var delivered = false
     private var cleanupRequested = false
@@ -119,10 +120,11 @@ final class PromisedFiles {
     }
 
     func cancel() {
+        cancelled.set()
         queue.addOperation { [self] in
             deliver(cancelled: true)
-            cleanupRequested = true
-            cleanIfReady()
+            // Once a successful outcome has been handed off, its consumer
+            // owns the files. Only that outcome may release the staging area.
         }
     }
 
@@ -154,15 +156,20 @@ final class PromisedFiles {
     private func deliver(cancelled: Bool) {
         guard !delivered else { return }
         delivered = true
-        let outcome = Outcome(urls: cancelled ? [] : urls, failures: failures, cancelled: cancelled) { [self] in
-            queue.addOperation { [self] in
-                cleanupRequested = true
-                cleanIfReady()
-            }
-        }
+        let urls = self.urls
+        let failures = self.failures
         let done = completion
         completion = nil
-        DispatchQueue.main.async { done?(outcome) }
+        DispatchQueue.main.async { [self] in
+            let stopped = cancelled || self.cancelled.isSet
+            let outcome = Outcome(urls: stopped ? [] : urls, failures: failures, cancelled: stopped) { [self] in
+                queue.addOperation { [self] in
+                    cleanupRequested = true
+                    cleanIfReady()
+                }
+            }
+            done?(outcome)
+        }
     }
 
     private func cleanIfReady() {
@@ -174,7 +181,9 @@ final class PromisedFiles {
     /// A promised folder is accepted as one item, with all its descendants.
     /// Reject paths escaping the receiving directory, including symlink roots.
     static func isReceivedFile(_ url: URL, in folder: URL) -> Bool {
-        guard url.isFileURL, FileOps.exists(url) else { return false }
+        guard url.isFileURL else { return false }
+        var info = stat()
+        guard lstat(url.path, &info) == 0, info.st_mode & S_IFMT != S_IFLNK else { return false }
         let root = folder.resolvingSymlinksInPath().standardizedFileURL.path
         let parent = url.deletingLastPathComponent().resolvingSymlinksInPath().standardizedFileURL.path
         let resolved = url.resolvingSymlinksInPath().standardizedFileURL.path

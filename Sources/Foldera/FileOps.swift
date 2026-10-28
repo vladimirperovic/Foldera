@@ -348,8 +348,11 @@ final class FileClipboard {
         if pb.changeCount != checkedChangeCount {
             checkedChangeCount = pb.changeCount
             checkedHasFiles = pb.canReadObject(forClasses: [NSURL.self], options: [.urlReadingFileURLsOnly: true])
-            if checkedHasFiles && movedChangeCount == pb.changeCount { checkedHasFiles = !urls.isEmpty }
-            if !checkedHasFiles { checkedHasFiles = PromisedFiles.hasFiles(in: pb) }
+            if checkedHasFiles {
+                if movedChangeCount == pb.changeCount { checkedHasFiles = !urls.isEmpty }
+            } else {
+                checkedHasFiles = PromisedFiles.hasFiles(in: pb)
+            }
         }
         return checkedHasFiles
     }

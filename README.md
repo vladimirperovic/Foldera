@@ -209,6 +209,13 @@ For animated or multi-frame images it reads the first frame.
   leaves no half-copied file behind, and a move deletes the original only
   once every byte has arrived. On APFS a copy can use a clone that initially
   shares the source's file data.
+- **Paste from another app** also accepts promised files that still need to
+  arrive. Foldera receives them before asking about name conflicts. Cancel
+  stops the paste; files still arriving are cleaned up after their sender
+  finishes. Remote folder copies and moves request their children's data
+  before transferring them.
+- **Cut after a partial move** keeps the items that did not move ready to
+  retry. Finishing an earlier move does not clear a newer Cut selection.
 - **Dragging**: onto the same drive moves; onto another drive copies; ⌥
   always copies. Cut items show faded.
 - **⌘Z undoes** copies, moves, renames, new items, zips and trips to the

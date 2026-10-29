@@ -42,7 +42,11 @@ private struct UIAuditFailure: Error, CustomStringConvertible {
         }
         Task { @MainActor in
             do {
+                NSApp.activate(ignoringOtherApps: true)
+                tab.window?.makeMain()
+                tab.window?.makeKeyAndOrderFront(nil)
                 try await wait("Initial folder listing") { !self.tab.items.isEmpty && !self.tab.waitingForFolder }
+                await pause(1)
                 try captureAll("before")
                 try await exercise()
                 await pause(0.5)
@@ -80,6 +84,7 @@ private struct UIAuditFailure: Error, CustomStringConvertible {
     }
     func click(_ button: NSButton) throws {
         try require(button.isEnabled, "Disabled button: " + button.title)
+        try require(!button.isHiddenOrHasHiddenAncestor && button.window != nil, "Native button is hidden or detached: " + button.title)
         note(button.title.isEmpty ? (button.identifier?.rawValue ?? "native button") : button.title, "NSButton.performClick on actual UI control")
         button.performClick(nil)
     }
@@ -101,7 +106,7 @@ private struct UIAuditFailure: Error, CustomStringConvertible {
             if let event = NSEvent.keyEvent(with: kind, location: .zero, modifierFlags: modifiers, timestamp: ProcessInfo.processInfo.systemUptime, windowNumber: window.windowNumber, context: nil, characters: characters, charactersIgnoringModifiers: characters, isARepeat: false, keyCode: code) { window.sendEvent(event) }
         }
     }
-    func menu(_ title: String) throws {
+    func menu(_ title: String) async throws {
         func find(_ menu: NSMenu) -> NSMenuItem? {
             for item in menu.items {
                 if item.title == title, item.action != nil { return item }
@@ -110,7 +115,13 @@ private struct UIAuditFailure: Error, CustomStringConvertible {
             return nil
         }
         guard let main = NSApp.mainMenu, let item = find(main), let action = item.action else { throw UIAuditFailure("Menu item not found: " + title) }
+        NSApp.activate(ignoringOtherApps: true)
+        tab.window?.makeMain()
         tab.window?.makeKeyAndOrderFront(nil); tab.focusList()
+        await pause(0.2)
+        steps.append(["action": "Menu context", "method": "AppKit responder context", "app_active": NSApp.isActive,
+            "window_is_key": tab.window?.isKeyWindow ?? false, "window_is_main": tab.window?.isMainWindow ?? false,
+            "has_key_window": NSApp.keyWindow != nil])
         note(title, "Actual NSMenuItem dispatched through AppKit responder chain")
         try require(NSApp.sendAction(action, to: item.target, from: item), "Menu action had no responder: " + title)
     }
@@ -138,10 +149,15 @@ private struct UIAuditFailure: Error, CustomStringConvertible {
         return field
     }
     func text(_ value: String, in field: NSTextField) {
-        field.stringValue = value
-        NotificationCenter.default.post(name: NSControl.textDidChangeNotification, object: field)
+        field.window?.makeFirstResponder(field)
+        if let editor = field.currentEditor() as? NSTextView {
+            editor.insertText(value, replacementRange: NSRange(location: 0, length: editor.string.utf16.count))
+        } else {
+            field.stringValue = value
+            NotificationCenter.default.post(name: NSControl.textDidChangeNotification, object: field)
+        }
         if let action = field.action { _ = NSApp.sendAction(action, to: field.target, from: field) }
-        note("Type " + value, "Native editable field value + text-change/action notification")
+        note("Type " + value, "Native field editor insertText and control action")
     }
     func exercise() async throws {
         let fm = FileManager.default
@@ -218,10 +234,10 @@ private struct UIAuditFailure: Error, CustomStringConvertible {
             try click(plus); await pause()
             try require(host.tabs.count == before + 1, "Plus did not create tab")
             host.select(tab)
-            try menu("Close Tab"); await pause()
+            try await menu("Close Tab"); await pause()
             try require(host.tabs.count == before, "Close Tab did not remove one tab")
         case "new-folder", "new-document":
-            try menu(scenario == "new-folder" ? "New Folder" : "New Text Document")
+            try await menu(scenario == "new-folder" ? "New Folder" : "New Text Document")
             let name = scenario == "new-folder" ? "New folder" : "New Text Document.txt"
             try await wait("New item appears on disk and list") { fm.fileExists(atPath: self.fixture.appendingPathComponent(name).path) && self.tab.items.contains { $0.name == name } }
             try key(53, "\u{1b}")
@@ -255,10 +271,10 @@ private struct UIAuditFailure: Error, CustomStringConvertible {
             try await select(["plain.txt"]); try click(tab.deleteButton)
             let file = fixture.appendingPathComponent("plain.txt")
             try await wait("Trash removed selected file") { !fm.fileExists(atPath: file.path) }
-            try menu("Undo")
+            try await menu("Undo")
             try await wait("Undo restores trashed file") { (try? String(contentsOf: file, encoding: .utf8)) == "Synthetic UI fixture\n" }
         case "properties":
-            try await select(["plain.txt"]); try menu("Properties")
+            try await select(["plain.txt"]); try await menu("Properties")
             try await wait("Properties window") { NSApp.windows.contains { $0.isVisible && $0.windowController is PropertiesWindow } }
             try captureAll("properties")
             NSApp.windows.first { $0.windowController is PropertiesWindow }?.performClose(nil)
@@ -271,7 +287,7 @@ private struct UIAuditFailure: Error, CustomStringConvertible {
             try click(button("Rename", in: dialog))
             try await wait("Batch rename committed") { fm.fileExists(atPath: self.fixture.appendingPathComponent("qa-1.txt").path) && fm.fileExists(atPath: self.fixture.appendingPathComponent("qa-2.txt").path) }
         case "quick-open", "find-command":
-            try menu(scenario == "quick-open" ? "Quick Open…" : "Find Command…")
+            try await menu(scenario == "quick-open" ? "Quick Open…" : "Find Command…")
             let dialog = try await sheet()
             try require(dialog.title == "Quick Open", "Wrong Quick Open sheet")
             let fields = views(dialog).compactMap { $0 as? NSSearchField }
@@ -280,14 +296,14 @@ private struct UIAuditFailure: Error, CustomStringConvertible {
             try key(53, "\u{1b}", window: dialog)
             try await wait("Quick Open Escape closes sheet") { self.tab.window?.attachedSheet == nil }
         case "selection":
-            try menu("Select All"); await pause()
+            try await menu("Select All"); await pause()
             try require(tab.selectedItems.count == tab.items.count, "Select All missed items")
-            try menu("Invert Selection"); await pause()
+            try await menu("Invert Selection"); await pause()
             try require(tab.selectedItems.isEmpty, "Invert all did not clear selection")
-            try await select(["plain.txt"]); try menu("Select None")
+            try await select(["plain.txt"]); try await menu("Select None")
             try require(tab.selectedItems.isEmpty, "Select None failed")
         case "image-viewer":
-            try await select(["picture.png"]); try menu("Open")
+            try await select(["picture.png"]); try await menu("Open")
             try await wait("Image viewer visible") { NSApp.windows.contains { $0 is ViewerWindow && $0.isVisible } }
             try captureAll("viewer")
             let viewer = NSApp.windows.first { $0 is ViewerWindow && $0.isVisible }!
@@ -318,11 +334,11 @@ private struct UIAuditFailure: Error, CustomStringConvertible {
             note("Sharing service picker opened; no recipient/service selected", "Native Share control; open/cancel only")
             try key(53, "\u{1b}")
         case "compare-files":
-            try await select(["plain.txt", "second.txt"]); try menu("Compare Files")
+            try await select(["plain.txt", "second.txt"]); try await menu("Compare Files")
             await pause(1)
             try require(NSApp.windows.filter { $0.isVisible }.count > 1, "Compare Files did not open another window/sheet")
         case "markdown-editor":
-            try await select(["Reading.md"]); try menu("Edit Markdown"); await pause(1)
+            try await select(["Reading.md"]); try await menu("Edit Markdown"); await pause(1)
             try require(NSApp.windows.filter { $0.isVisible }.count > 1, "Edit Markdown did not open editor window")
         case "permanent-delete-cancel":
             try await select(["plain.txt"])
@@ -333,10 +349,10 @@ private struct UIAuditFailure: Error, CustomStringConvertible {
                 if let window = NSApp.modalWindow, let cancel = try? button("Cancel", in: window) { try? click(cancel) }
             }
             RunLoop.main.add(timer, forMode: .common)
-            try menu("Delete Permanently…")
+            try await menu("Delete Permanently…")
             try require(fm.fileExists(atPath: fixture.appendingPathComponent("plain.txt").path), "Cancel permanently deleted selected file")
         case "archive-browse":
-            try await select(["sample.zip"]); try menu("Open")
+            try await select(["sample.zip"]); try await menu("Open")
             try await wait("Archive opened read-only") { self.tab.isInArchive && self.tab.items.contains { $0.name == "inside.txt" } }
             try require(!tab.deleteButton.isEnabled && !tab.cutButton.isEnabled, "Archive exposes enabled destructive buttons")
         default: throw UIAuditFailure("Unknown scenario: " + scenario)

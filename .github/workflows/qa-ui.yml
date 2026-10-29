@@ -36,15 +36,18 @@ jobs:
         shell: bash
         run: |
           set -o pipefail
-          swift build --package-path "$RUNNER_TEMP/foldera-ui-source" 2>&1 | tee "$RUNNER_TEMP/foldera-ui-report/build.log"
+          cd "$RUNNER_TEMP/foldera-ui-source"
+          bash build.sh debug 2>&1 | tee "$RUNNER_TEMP/foldera-ui-report/build.log"
       - name: Exercise native controls, windows and capture screenshots
         shell: bash
         env:
           AUDIT_SUITE: ${{ inputs.suite }}
         run: |
-          flags=()
-          if [ "$AUDIT_SUITE" = smoke ]; then flags+=(--smoke); fi
-          caffeinate -i python3 qa/foldera-ui/campaign.py run "$RUNNER_TEMP/foldera-ui-source/.build/debug/Foldera" "$RUNNER_TEMP/foldera-ui-report" "${flags[@]}"
+          app="$RUNNER_TEMP/foldera-ui-source/build/Foldera.app/Contents/MacOS/Foldera"
+          caffeinate -i python3 qa/foldera-ui/campaign.py run "$app" "$RUNNER_TEMP/foldera-ui-report/smoke" --smoke
+          if [ "$AUDIT_SUITE" = full ]; then
+            caffeinate -i python3 qa/foldera-ui/campaign.py run "$app" "$RUNNER_TEMP/foldera-ui-report/full"
+          fi
       - name: Preserve all screenshots, steps, control inventories and logs
         if: always()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7

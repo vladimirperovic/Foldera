@@ -6,9 +6,16 @@ enum Checksum {
     static func hex(_ digest: Data) -> String { digest.map { String(format: "%02x", $0) }.joined() }
 
     static func line(_ digest: Data, name: String) -> String {
-        let escaped = name.replacingOccurrences(of: "\\", with: "\\\\")
-            .replacingOccurrences(of: "\n", with: "\\n").replacingOccurrences(of: "\r", with: "\\r")
-        return (escaped == name ? "" : "\\") + "\(hex(digest))  \(escaped)"
+        var escaped = "", needsEscaping = false
+        for scalar in name.unicodeScalars {
+            switch scalar.value {
+            case 92: escaped += "\\\\"; needsEscaping = true
+            case 10: escaped += "\\n"; needsEscaping = true
+            case 13: escaped += "\\r"; needsEscaping = true
+            default: escaped.unicodeScalars.append(scalar)
+            }
+        }
+        return (needsEscaping ? "\\" : "") + "\(hex(digest))  \(escaped)"
     }
 
     static func isChecksumFile(_ url: URL) -> Bool {

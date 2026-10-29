@@ -217,12 +217,17 @@ private final class DeepSafetyFiles {
         } else {
             #expect(outcome.cancelled && outcome.changes.isEmpty)
         }
-        undo.beginUndoGrouping()
-        FileUndo.record(prepared, name: "Copy", in: undo)
-        undo.endUndoGrouping()
         if cancelBeforeStart {
+            // Closing an explicit empty NSUndoManager group can itself add
+            // an undoable entry. Exercise the production no-op registration
+            // directly, without manufacturing a group for an empty outcome.
+            #expect(!undo.canUndo)
+            FileUndo.record(prepared, name: "Copy", in: undo)
             #expect(!undo.canUndo)
         } else {
+            undo.beginUndoGrouping()
+            FileUndo.record(prepared, name: "Copy", in: undo)
+            undo.endUndoGrouping()
             undo.undo()
             try await finish(undo)
             #expect(files.text("copy.txt") == "newer file")

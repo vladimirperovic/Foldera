@@ -1,0 +1,48 @@
+name: Foldera 2000 isolated operation cases
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: foldera-2000-manual
+  cancel-in-progress: false
+
+jobs:
+  campaign:
+    runs-on: macos-26
+    timeout-minutes: 35
+    steps:
+      - name: Checkout public source and campaign
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Validate harness and prepare exactly 2000 cases
+        shell: bash
+        run: |
+          python3 qa/foldera/test_harness.py
+          python3 qa/foldera/build_campaign.py --output "$RUNNER_TEMP/Foldera-campaign"
+      - name: Run real Foldera operations and fresh-fixture retries
+        shell: bash
+        run: bash "$RUNNER_TEMP/Foldera-campaign/run-on-mac.sh" "$GITHUB_WORKSPACE" "$RUNNER_TEMP/Foldera-results"
+      - name: Save reports, per-case evidence and build logs
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: foldera-2000-macos-results
+          path: |
+            ${{ runner.temp }}/Foldera-results/**/report.html
+            ${{ runner.temp }}/Foldera-results/**/status.json
+            ${{ runner.temp }}/Foldera-results/**/results.json
+            ${{ runner.temp }}/Foldera-results/**/cases.jsonl
+            ${{ runner.temp }}/Foldera-results/**/cases.json
+            ${{ runner.temp }}/Foldera-results/**/campaign.json
+            ${{ runner.temp }}/Foldera-results/**/attempt-*.log
+            ${{ runner.temp }}/Foldera-results/**/attempt-*.exit
+            ${{ runner.temp }}/Foldera-results/**/environment.txt
+            ${{ runner.temp }}/Foldera-results/**/source-revision.txt
+          if-no-files-found: warn
+          retention-days: 14

@@ -1,0 +1,58 @@
+name: Foldera native UI audit
+
+on:
+  workflow_dispatch:
+    inputs:
+      suite:
+        description: Scope of UI campaign
+        type: choice
+        options: [full, smoke]
+        default: full
+
+permissions:
+  contents: read
+
+concurrency:
+  group: foldera-native-ui-manual
+  cancel-in-progress: false
+
+jobs:
+  native-ui:
+    runs-on: macos-26
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Prepare disposable source overlay
+        shell: bash
+        run: |
+          mkdir -p "$RUNNER_TEMP/foldera-ui-report"
+          python3 qa/foldera-ui/campaign.py prepare "$GITHUB_WORKSPACE" "$RUNNER_TEMP/foldera-ui-source"
+          sw_vers > "$RUNNER_TEMP/foldera-ui-report/environment.txt"
+          swift --version >> "$RUNNER_TEMP/foldera-ui-report/environment.txt"
+      - name: Build actual AppKit application with CI-only UI driver
+        shell: bash
+        run: |
+          set -o pipefail
+          swift build --package-path "$RUNNER_TEMP/foldera-ui-source" 2>&1 | tee "$RUNNER_TEMP/foldera-ui-report/build.log"
+      - name: Exercise native controls, windows and capture screenshots
+        shell: bash
+        env:
+          AUDIT_SUITE: ${{ inputs.suite }}
+        run: |
+          flags=()
+          if [ "$AUDIT_SUITE" = smoke ]; then flags+=(--smoke); fi
+          caffeinate -i python3 qa/foldera-ui/campaign.py run "$RUNNER_TEMP/foldera-ui-source/.build/debug/Foldera" "$RUNNER_TEMP/foldera-ui-report" "${flags[@]}"
+      - name: Preserve all screenshots, steps, control inventories and logs
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: foldera-native-ui-${{ inputs.suite }}
+          path: |
+            ${{ runner.temp }}/foldera-ui-report/**
+            !${{ runner.temp }}/foldera-ui-report/**/workspace/**
+            !${{ runner.temp }}/foldera-ui-report/**/sync-library/**
+          if-no-files-found: warn
+          retention-days: 14

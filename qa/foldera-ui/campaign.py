@@ -53,7 +53,9 @@ def prepare(repo, checkout, harness):
     hook = '''        // Disposable CI-only overlay, not a product modification.
         if args.contains("--qa-ui-case") {
             guard let controller else { exit(2) }
-            FolderaUIAudit(tab: controller, output: URL(fileURLWithPath: args[1]), fixture: path).run()
+            Task { @MainActor in
+                FolderaUIAudit(tab: controller, output: URL(fileURLWithPath: args[1]), fixture: path).run()
+            }
             return
         }
 '''

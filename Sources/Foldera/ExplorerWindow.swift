@@ -142,6 +142,7 @@ final class ExplorerTab: NSViewController, NSSplitViewDelegate {
     let onePaneButton = ToolButton(symbol: "rectangle", tip: "One pane, with tabs (⌥⌘1)", iconSize: 16)
     let twoPanesButton = ToolButton(symbol: "rectangle.split.2x1", tip: "Two panes side by side, as in Total Commander (⌥⌘2)", iconSize: 16)
     private var fileCommandDividers: [NSBox] = []
+    private var commandBar: WrappingCommandBar?
     /// The second of two panes has its own navigation tree.
     let isSecondPane: Bool
     /// With two panes, a line in the accent colour along the top of the one at work.
@@ -251,30 +252,14 @@ final class ExplorerTab: NSViewController, NSSplitViewDelegate {
             newButton, fileCommandDividers[0], cutButton, copyButton, pasteButton, renameButton, shareButton, deleteButton,
             fileCommandDividers[1], sortButton, viewButton, detailsButton, divider(), syncButton, moreButton,
         ]
-        let command = NSStackView(views: commandViews)
-        command.orientation = .horizontal
-        command.alignment = .centerY
-        command.spacing = 2
-        command.edgeInsets = NSEdgeInsets(top: 0, left: 10, bottom: 0, right: 10)
-        for view in commandViews where view is NSBox {
-            command.setCustomSpacing(6, after: view)
-            if let index = commandViews.firstIndex(of: view), index > 0 { command.setCustomSpacing(6, after: commandViews[index - 1]) }
-        }
-        // At the far right, as Windows 11 has it; before it, the one or two panes switch.
-        command.addView(extractButton, in: .trailing)
-        command.addView(onePaneButton, in: .trailing)
-        command.addView(twoPanesButton, in: .trailing)
-        let switchEnd = divider()
-        command.addView(switchEnd, in: .trailing)
-        command.addView(paneButton, in: .trailing)
-        command.setCustomSpacing(8, after: extractButton)
-        command.setCustomSpacing(6, after: twoPanesButton)
-        command.setCustomSpacing(6, after: switchEnd)
         extractButton.isHidden = true
-        // The details pane follows the first pane; the second has none.
+        // The detached details pane belongs to the first pane only.
         paneButton.isHidden = isSecondPane
+        let switchEnd = divider()
         switchEnd.isHidden = isSecondPane
-        command.setClippingResistancePriority(.defaultLow, for: .horizontal)
+        let command = WrappingCommandBar(leading: commandViews,
+            trailing: [extractButton, onePaneButton, twoPanesButton, switchEnd, paneButton])
+        commandBar = command
 
         let sideBackground = NSVisualEffectView()
         sideBackground.material = .sidebar
@@ -354,7 +339,6 @@ final class ExplorerTab: NSViewController, NSSplitViewDelegate {
             nav.topAnchor.constraint(equalTo: root.topAnchor, constant: 2),
             nav.heightAnchor.constraint(equalToConstant: 42),
             command.topAnchor.constraint(equalTo: nav.bottomAnchor),
-            command.heightAnchor.constraint(equalToConstant: 40),
             filterBar.topAnchor.constraint(equalTo: command.bottomAnchor),
             filterBarHeight,
             topLine.topAnchor.constraint(equalTo: filterBar.bottomAnchor),
@@ -391,13 +375,9 @@ final class ExplorerTab: NSViewController, NSSplitViewDelegate {
         let two = host?.partner != nil
         onePaneButton.isOn = !two
         twoPanesButton.isOn = two
-        // Keep navigation, layout, overflow and the pane switch reachable in
-        // each half of the window. File commands stay in menus and shortcuts.
-        for button in [cutButton, copyButton, pasteButton, renameButton, shareButton, deleteButton] {
-            button.isHidden = two
-        }
-        fileCommandDividers.forEach { $0.isHidden = two }
+        // Wrapping keeps file commands available even in a narrow half-pane.
         paneButton.label = two ? nil : "Details"
+        commandBar?.needsLayout = true
     }
 
     private var sidebarWidthKey: String { isSecondPane ? "secondSidebarWidth" : "sidebarWidth" }
@@ -719,6 +699,7 @@ final class ExplorerTab: NSViewController, NSSplitViewDelegate {
         loadError = nil
         host?.tabDidChange(self)
         extractButton.isHidden = !isInArchive
+        commandBar?.needsLayout = true
         addressBar.location = target
         searchField.placeholderString = "Search \(target.url == nil ? "Home" : target.title)"
         sidebar.sync(to: target)

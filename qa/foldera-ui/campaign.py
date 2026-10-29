@@ -13,7 +13,7 @@ import zlib
 import zipfile
 from pathlib import Path
 
-REVISION = "56c75d12238c3099ecafbc4a4b7047e284db695e"
+REVISION = os.environ.get("FOLDERA_UI_REVISION", "unrecorded")
 FLOWS = ["navigation", "search", "filters", "preview-toggle", "preview-detach", "preview-edit",
          "two-panes", "tabs", "new-folder", "new-document", "rename-inline", "rename-sheet",
          "copy-paste", "cut-paste", "copy-same", "trash-undo", "properties", "batch-rename",
@@ -25,7 +25,7 @@ EXTENDED = ["hidden-toggle", "sort-options", "icon-size", "address-bar", "new-wi
             "checksum", "progress-cancel"]
 
 
-def cases(smoke=False, extended=False, verify=False):
+def cases(smoke=False, extended=False, verify=False, toolbar=False):
     result = []
     for theme in ("light", "dark"):
         for width in (640, 800, 1100, 1440):
@@ -47,6 +47,11 @@ def cases(smoke=False, extended=False, verify=False):
             "navigation", "layout-details", "rename-inline", "quick-open", "find-command",
             "image-viewer", "new-folder", "new-document", "sync-run", "rename-sheet",
             "permanent-delete-cancel", "compare-files", "connect-dialog", "image-toolbar")]
+    if toolbar:
+        result = [{"scenario": scenario, "theme": theme, "width": width}
+                  for theme in ("light", "dark")
+                  for width in (640, 760, 800, 1100, 1440)
+                  for scenario in ("toolbar-one", "toolbar-two", "toolbar-archive", "toolbar-resize")]
     for i, row in enumerate(result, 1):
         row["id"] = f"ui-{i:03d}"
     return result
@@ -54,7 +59,9 @@ def cases(smoke=False, extended=False, verify=False):
 
 def prepare(repo, checkout, harness):
     subprocess.run(["git", "clone", "--no-hardlinks", "--no-checkout", str(repo), str(checkout)], check=True)
-    subprocess.run(["git", "-C", str(checkout), "checkout", "--detach", REVISION], check=True)
+    revision = subprocess.check_output(["git", "-C", str(repo), "rev-parse", "HEAD"], text=True).strip()
+    subprocess.run(["git", "-C", str(checkout), "checkout", "--detach", revision], check=True)
+    (checkout / ".qa-source-revision").write_text(revision + "\n", encoding="utf-8")
     source = checkout / "Sources/Foldera/AppDelegate.swift"
     text = source.read_text(encoding="utf-8")
     anchor = '        if args.contains("--verify-preview") {'
@@ -110,7 +117,7 @@ def execute(binary, root, spec, attempt):
         with (left / "pending.bin").open("wb") as pending:
             pending.truncate(1024 * 1024)
     env = {**os.environ, "FOLDERA_UI_SCENARIO": spec["scenario"], "FOLDERA_UI_WIDTH": str(spec["width"])}
-    if root.name == "verify":
+    if root.name in ("verify", "toolbar"):
         env["FOLDERA_UI_COMPOSITOR"] = "1"
     command = [str(binary), "--snapshot", str(left), str(destination / "capture.png"),
                "--size", f"{spec['width']}x740", "--" + spec["theme"], "--pane", "--select", "Reading.md",
@@ -196,11 +203,11 @@ def report(root, planned, records, state):
     return summary
 
 
-def run(binary, root, smoke=False, extended=False, verify=False):
+def run(binary, root, smoke=False, extended=False, verify=False, toolbar=False):
     if platform.system() != "Darwin" or os.environ.get("GITHUB_ACTIONS") != "true":
         raise RuntimeError("This UI campaign only runs on disposable GitHub macOS runners")
     root.mkdir(parents=True, exist_ok=True)
-    planned, records = cases(smoke, extended, verify), []
+    planned, records = cases(smoke, extended, verify, toolbar), []
     deadline = time.monotonic() + 22 * 60
     (root / "plan.json").write_text(json.dumps(planned, indent=2), encoding="utf-8")
     for spec in planned:
@@ -227,8 +234,9 @@ if __name__ == "__main__":
     run_cmd.add_argument("--smoke", action="store_true")
     run_cmd.add_argument("--extended", action="store_true")
     run_cmd.add_argument("--verify", action="store_true")
+    run_cmd.add_argument("--toolbar", action="store_true")
     args = parser.parse_args()
     if args.command == "prepare":
         prepare(args.repo, args.checkout, Path(__file__).resolve().parent)
     else:
-        raise SystemExit(run(args.binary.resolve(), args.output.resolve(), args.smoke, args.extended, args.verify))
+        raise SystemExit(run(args.binary.resolve(), args.output.resolve(), args.smoke, args.extended, args.verify, args.toolbar))

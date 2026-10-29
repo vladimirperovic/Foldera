@@ -11,7 +11,11 @@ if [ "${FOLDERA_CAMPAIGN_AWAKE:-0}" != 1 ]; then
 fi
 bundle="$(cd "$(dirname "$0")" && pwd)"
 repo="${1:?Usage: bash run-on-mac.sh /path/to/Foldera [/path/to/reports]}"
-revision='56c75d12238c3099ecafbc4a4b7047e284db695e'
+revision="$(python3 - "$bundle/campaign.json" <<'PY'
+import json, sys
+print(json.load(open(sys.argv[1]))['reviewed_revision'])
+PY
+)"
 command -v python3 >/dev/null
 xcrun --find swift >/dev/null
 git -C "$repo" cat-file -e "$revision^{commit}"

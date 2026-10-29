@@ -34,7 +34,7 @@ def matrix():
     return cases
 
 
-def build(output):
+def build(output, revision=SOURCE_REVISION):
     output.mkdir(parents=True, exist_ok=True)
     here = Path(__file__).resolve().parent
     cases = matrix()
@@ -51,7 +51,7 @@ def build(output):
         (output / filename).write_text((here / filename).read_text(encoding="utf-8"), encoding="utf-8", newline="\n")
     metadata = {
         "status": "prepared_not_run", "expected_cases": 2000,
-        "reviewed_revision": SOURCE_REVISION, "operations": {op: 100 for op in OPERATIONS},
+        "reviewed_revision": revision, "operations": {op: 100 for op in OPERATIONS},
         "dimensions": {"names": 10, "fixtures": 10, "operation_families": 20},
         "test_layer": "macOS Swift Testing, real FileOps/Transfer APIs; not GUI clicks",
         "runtime": "macOS 14+, Swift 6 Command Line Tools; Windows cannot run AppKit",
@@ -68,4 +68,8 @@ def build(output):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--output", type=Path, default=Path(__file__).resolve().parent / "prepared")
-    build(parser.parse_args().output)
+    parser.add_argument("--revision", default=SOURCE_REVISION)
+    args = parser.parse_args()
+    if len(args.revision) != 40 or any(c not in "0123456789abcdef" for c in args.revision):
+        parser.error("--revision must be a full lowercase Git SHA")
+    build(args.output, args.revision)

@@ -51,6 +51,7 @@ private struct UIAuditFailure: Error, CustomStringConvertible {
                 try captureAll("before")
                 try await exercise()
                 await pause(0.5)
+                try assertToolbarFits()
                 try captureAll("after")
                 finish(error: nil)
             } catch {
@@ -160,9 +161,66 @@ private struct UIAuditFailure: Error, CustomStringConvertible {
         if let action = field.action { _ = NSApp.sendAction(action, to: field.target, from: field) }
         note("Type " + value, "Native field editor insertText and control action")
     }
+    func assertToolbarFits() throws {
+        let bars = NSApp.windows.filter { $0.isVisible }.flatMap { window in
+            self.views(window).filter { $0.identifier?.rawValue == "command-bar" }
+        }.filter { !$0.isHiddenOrHasHiddenAncestor }
+        try require(!bars.isEmpty, "No visible command bar found")
+        for bar in bars {
+            let controls = bar.subviews.compactMap { $0 as? ToolButton }.filter { !$0.isHiddenOrHasHiddenAncestor }
+            try require(!controls.isEmpty, "Command bar contains no visible controls")
+            for control in controls {
+                try require(bar.bounds.insetBy(dx: -0.5, dy: -0.5).contains(control.frame),
+                    "Offscreen toolbar control: \(control.toolTip ?? "?") \(control.frame), bar \(bar.bounds)")
+                try require(control.frame.width >= 29.5 && control.frame.height >= 29.5,
+                    "Toolbar control lost normal hit area: \(control.toolTip ?? "?")")
+            }
+            for (index, control) in controls.enumerated() {
+                for other in controls.dropFirst(index + 1) {
+                    try require(!control.frame.intersects(other.frame), "Toolbar buttons overlap")
+                }
+            }
+        }
+        note("All visible command buttons fit, retain hit areas and do not overlap", "Actual AppKit view geometry in every visible pane")
+    }
+
     func exercise() async throws {
         let fm = FileManager.default
         let right = fixture.deletingLastPathComponent().appendingPathComponent("Right")
+        if scenario.hasPrefix("toolbar-") {
+            if scenario == "toolbar-two" {
+                try click(tab.twoPanesButton); await pause(0.4)
+                guard let partner = tab.host?.partner else { throw UIAuditFailure("Second pane absent") }
+                partner.navigate(to: .folder(right))
+                await pause(0.4)
+                for pane in [tab, partner] {
+                    for control in [pane.cutButton, pane.copyButton, pane.pasteButton, pane.renameButton, pane.shareButton, pane.deleteButton] {
+                        try require(!control.isHiddenOrHasHiddenAncestor, "File command hidden in narrow pane")
+                    }
+                }
+            } else if scenario == "toolbar-archive" {
+                try await select(["sample.zip"]); try await menu("Open")
+                try await wait("Archive toolbar") { self.tab.isInArchive }
+                try require(!tab.extractButton.isHidden, "Extract button hidden in archive")
+            } else if scenario == "toolbar-resize" {
+                for width in [640.0, 1440, 760, 1100, 640] {
+                    tab.window?.setContentSize(NSSize(width: width, height: 700))
+                    tab.window?.contentView?.layoutSubtreeIfNeeded()
+                    await pause(0.25)
+                    try assertToolbarFits()
+                    try captureAll("resize-\(Int(width))")
+                }
+            }
+            tab.window?.contentView?.layoutSubtreeIfNeeded()
+            await pause(0.4)
+            try assertToolbarFits()
+            if scenario == "toolbar-one" {
+                try click(tab.paneButton); await pause(0.2)
+                try click(tab.paneButton)
+            }
+            return
+        }
+
         if scenario.hasPrefix("layout-") {
             let mode = String(scenario.dropFirst(7))
             switch mode {

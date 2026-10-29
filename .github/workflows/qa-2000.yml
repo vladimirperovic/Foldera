@@ -24,7 +24,7 @@ jobs:
         shell: bash
         run: |
           python3 qa/foldera/test_harness.py
-          python3 qa/foldera/build_campaign.py --output "$RUNNER_TEMP/Foldera-campaign"
+          python3 qa/foldera/build_campaign.py --output "$RUNNER_TEMP/Foldera-campaign" --revision "$(git rev-parse HEAD)"
       - name: Run real Foldera operations and fresh-fixture retries
         shell: bash
         run: bash "$RUNNER_TEMP/Foldera-campaign/run-on-mac.sh" "$GITHUB_WORKSPACE" "$RUNNER_TEMP/Foldera-results"

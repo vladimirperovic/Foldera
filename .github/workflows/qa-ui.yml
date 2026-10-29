@@ -6,7 +6,7 @@ on:
       suite:
         description: Scope of UI campaign
         type: choice
-        options: [full, smoke, extended, verify]
+        options: [full, smoke, extended, verify, toolbar]
         default: full
 
 permissions:
@@ -43,9 +43,12 @@ jobs:
         env:
           AUDIT_SUITE: ${{ inputs.suite }}
         run: |
+          export FOLDERA_UI_REVISION="$(cat "$RUNNER_TEMP/foldera-ui-source/.qa-source-revision")"
           app="$RUNNER_TEMP/foldera-ui-source/build/Foldera.app/Contents/MacOS/Foldera"
           caffeinate -i python3 qa/foldera-ui/campaign.py run "$app" "$RUNNER_TEMP/foldera-ui-report/smoke" --smoke
-          if [ "$AUDIT_SUITE" = full ]; then
+          if [ "$AUDIT_SUITE" = toolbar ]; then
+            caffeinate -i python3 qa/foldera-ui/campaign.py run "$app" "$RUNNER_TEMP/foldera-ui-report/toolbar" --toolbar
+          elif [ "$AUDIT_SUITE" = full ]; then
             caffeinate -i python3 qa/foldera-ui/campaign.py run "$app" "$RUNNER_TEMP/foldera-ui-report/full"
           elif [ "$AUDIT_SUITE" = extended ]; then
             caffeinate -i python3 qa/foldera-ui/campaign.py run "$app" "$RUNNER_TEMP/foldera-ui-report/extended" --extended

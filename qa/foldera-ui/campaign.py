@@ -20,16 +20,19 @@ FLOWS = ["navigation", "search", "filters", "preview-toggle", "preview-detach", 
          "quick-open", "find-command", "selection", "image-viewer", "sync-window",
          "new-menu", "sort-menu", "view-menu", "more-menu", "share-menu", "compare-files",
          "markdown-editor", "permanent-delete-cancel", "archive-browse"]
+EXTENDED = ["hidden-toggle", "sort-options", "icon-size", "address-bar", "new-window",
+            "image-toolbar", "sync-run", "sync-history", "connect-dialog", "about-window",
+            "checksum", "progress-cancel"]
 
 
-def cases(smoke=False):
+def cases(smoke=False, extended=False):
     result = []
     for theme in ("light", "dark"):
         for width in (640, 800, 1100, 1440):
             for mode in ("details", "icons", "columns", "usage"):
                 result.append({"scenario": "layout-" + mode, "theme": theme, "width": width})
     for theme, width in (("light", 1440), ("dark", 760)):
-        for flow in FLOWS:
+        for flow in FLOWS + EXTENDED:
             result.append({"scenario": flow, "theme": theme, "width": width})
     for theme in ("light", "dark"):
         result.append({"scenario": "native-fullscreen", "theme": theme, "width": 1100})
@@ -37,6 +40,8 @@ def cases(smoke=False):
         result = [r for r in result if r["theme"] == "light" and (
             (r["scenario"] == "layout-details" and r["width"] == 1100) or
             r["scenario"] in ("new-menu", "rename-inline", "properties"))]
+    if extended:
+        result = [r for r in result if r["scenario"] in EXTENDED]
     for i, row in enumerate(result, 1):
         row["id"] = f"ui-{i:03d}"
     return result
@@ -94,7 +99,12 @@ def execute(binary, root, spec, attempt):
     destination = root / "cases" / spec["id"] / f"attempt-{attempt}"
     destination.mkdir(parents=True)
     left = fixture(destination / "workspace")
-    env = {**os.environ, "FOLDERA_UI_SCENARIO": spec["scenario"]}
+    if spec["scenario"] == "progress-cancel":
+        # A fresh sparse file mimics an unfilled provider placeholder, making
+        # the real waiting/progress/Cancel path observable without a network.
+        with (left / "pending.bin").open("wb") as pending:
+            pending.truncate(1024 * 1024)
+    env = {**os.environ, "FOLDERA_UI_SCENARIO": spec["scenario"], "FOLDERA_UI_WIDTH": str(spec["width"])}
     command = [str(binary), "--snapshot", str(left), str(destination / "capture.png"),
                "--size", f"{spec['width']}x740", "--" + spec["theme"], "--pane", "--select", "Reading.md",
                "--sync-library", str(destination / "sync-library")]
@@ -179,11 +189,11 @@ def report(root, planned, records, state):
     return summary
 
 
-def run(binary, root, smoke=False):
+def run(binary, root, smoke=False, extended=False):
     if platform.system() != "Darwin" or os.environ.get("GITHUB_ACTIONS") != "true":
         raise RuntimeError("This UI campaign only runs on disposable GitHub macOS runners")
     root.mkdir(parents=True, exist_ok=True)
-    planned, records = cases(smoke), []
+    planned, records = cases(smoke, extended), []
     deadline = time.monotonic() + 22 * 60
     (root / "plan.json").write_text(json.dumps(planned, indent=2), encoding="utf-8")
     for spec in planned:
@@ -208,8 +218,9 @@ if __name__ == "__main__":
     run_cmd = commands.add_parser("run")
     run_cmd.add_argument("binary", type=Path); run_cmd.add_argument("output", type=Path)
     run_cmd.add_argument("--smoke", action="store_true")
+    run_cmd.add_argument("--extended", action="store_true")
     args = parser.parse_args()
     if args.command == "prepare":
         prepare(args.repo, args.checkout, Path(__file__).resolve().parent)
     else:
-        raise SystemExit(run(args.binary.resolve(), args.output.resolve(), args.smoke))
+        raise SystemExit(run(args.binary.resolve(), args.output.resolve(), args.smoke, args.extended))

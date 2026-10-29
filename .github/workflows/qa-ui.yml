@@ -6,7 +6,7 @@ on:
       suite:
         description: Scope of UI campaign
         type: choice
-        options: [full, smoke]
+        options: [full, smoke, extended]
         default: full
 
 permissions:
@@ -47,6 +47,8 @@ jobs:
           caffeinate -i python3 qa/foldera-ui/campaign.py run "$app" "$RUNNER_TEMP/foldera-ui-report/smoke" --smoke
           if [ "$AUDIT_SUITE" = full ]; then
             caffeinate -i python3 qa/foldera-ui/campaign.py run "$app" "$RUNNER_TEMP/foldera-ui-report/full"
+          elif [ "$AUDIT_SUITE" = extended ]; then
+            caffeinate -i python3 qa/foldera-ui/campaign.py run "$app" "$RUNNER_TEMP/foldera-ui-report/extended" --extended
           fi
       - name: Preserve all screenshots, steps, control inventories and logs
         if: always()

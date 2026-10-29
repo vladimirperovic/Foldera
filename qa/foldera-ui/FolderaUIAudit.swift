@@ -1,4 +1,5 @@
 import AppKit
+import CryptoKit
 
 private struct UIAuditFailure: Error, CustomStringConvertible {
     let description: String
@@ -176,6 +177,99 @@ private struct UIAuditFailure: Error, CustomStringConvertible {
             return
         }
         switch scenario {
+        case "hidden-toggle":
+            let before = tab.items.contains { $0.name == ".hidden.txt" }
+            try await menu("Show Hidden Items")
+            try await wait("Hidden item toggle") { self.tab.items.contains { $0.name == ".hidden.txt" } != before }
+            try captureAll("hidden-toggled")
+            try await menu("Show Hidden Items")
+            try await wait("Hidden item toggle restores state") { self.tab.items.contains { $0.name == ".hidden.txt" } == before }
+        case "sort-options":
+            for (title, expected) in [("Name", SortKey.name), ("Date Modified", .modified), ("Type", .kind), ("Size", .size), ("Date Created", .created), ("Date Accessed", .accessed), ("File Extension", .fileExtension), ("Tags", .tags)] {
+                try await menu("Sort by " + title)
+                try require(tab.sort.key == expected, "Sort menu did not select " + title)
+            }
+            try await menu("Descending"); try require(!tab.sort.ascending, "Descending failed")
+            try await menu("Ascending"); try require(tab.sort.ascending, "Ascending failed")
+        case "icon-size":
+            tab.iconSlider.doubleValue = 160
+            guard let action = tab.iconSlider.action else { throw UIAuditFailure("Icon slider has no action") }
+            note("Icon size 160", "NSSlider value change and real control action")
+            try require(NSApp.sendAction(action, to: tab.iconSlider.target, from: tab.iconSlider), "Slider action failed")
+            try require(tab.viewMode == .icons && Prefs.iconSize == 160, "Slider did not change icon layout/size")
+            try captureAll("large-icons")
+            tab.iconSlider.doubleValue = Double(ExplorerTab.listNotch)
+            _ = NSApp.sendAction(action, to: tab.iconSlider.target, from: tab.iconSlider)
+            try require(tab.viewMode == .details, "Slider left notch did not restore Details")
+        case "address-bar":
+            try await menu("Address Bar")
+            guard let editor = tab.window?.firstResponder as? NSTextView else { throw UIAuditFailure("Address Bar did not focus text editor") }
+            editor.insertText(right.path, replacementRange: NSRange(location: 0, length: editor.string.utf16.count))
+            try key(36, "\r")
+            try await wait("Typed address navigates") { self.tab.location.url?.key == right.key }
+        case "new-window":
+            let old = Set(NSApp.windows.map(ObjectIdentifier.init))
+            try await menu("New Window")
+            try await wait("New Window visible") { NSApp.windows.contains { $0.isVisible && $0.windowController is ExplorerWindow && !old.contains(ObjectIdentifier($0)) } }
+            try captureAll("new-window")
+            NSApp.windows.first { $0.windowController is ExplorerWindow && !old.contains(ObjectIdentifier($0)) }?.performClose(nil)
+        case "image-toolbar":
+            try await select(["picture.png"]); try await menu("Open")
+            try await wait("Viewer toolbar") { NSApp.windows.contains { $0 is ViewerWindow && $0.isVisible } }
+            let viewer = NSApp.windows.first { $0 is ViewerWindow && $0.isVisible }!
+            let requestedWidth = Double(ProcessInfo.processInfo.environment["FOLDERA_UI_WIDTH"] ?? "1100") ?? 1100
+            viewer.setContentSize(NSSize(width: max(viewer.minSize.width, requestedWidth), height: 740))
+            let original = try Data(contentsOf: fixture.appendingPathComponent("picture.png"))
+            for label in ["Next (→)", "Previous (←)", "Zoom in (+)", "Zoom out (−)", "Actual size (1)", "Fit to window (0)", "Rotate left (L)", "Rotate right (R)", "Information (I)", "Thumbnails (T)", "Slideshow (S)", "Slideshow (S)"] {
+                guard let control = views(viewer).compactMap({ $0 as? ToolButton }).first(where: { $0.toolTip == label }) else { throw UIAuditFailure("Viewer toolbar missing " + label) }
+                try click(control); await pause(0.15)
+                try require(viewer.isVisible, "Viewer closed after " + label)
+            }
+            let after = try Data(contentsOf: fixture.appendingPathComponent("picture.png"))
+            try require(after == original, "Viewer rotate/zoom modified original image")
+            try captureAll("viewer-toolbar")
+        case "sync-run":
+            try click(tab.twoPanesButton); await pause()
+            tab.host?.partner?.navigate(to: .folder(right)); await pause()
+            try click(tab.syncButton)
+            try await wait("Sync window") { NSApp.windows.contains { $0.isVisible && $0.windowController is SyncWindow } }
+            let window = NSApp.windows.first { $0.isVisible && $0.windowController is SyncWindow }!
+            try click(button("Compare", in: window))
+            try await wait("Sync plan ready", seconds: 12) { (window.windowController as? SyncWindow)?.canSynchronize == true }
+            try click(button("Synchronize", in: window))
+            try await wait("Sync writes correct fixture bytes", seconds: 12) { (try? String(contentsOf: right.appendingPathComponent("plain.txt"), encoding: .utf8)) == "Synthetic UI fixture\n" }
+            try require((try? String(contentsOf: fixture.appendingPathComponent("plain.txt"), encoding: .utf8)) == "Synthetic UI fixture\n", "Sync damaged original")
+            try captureAll("sync-finished")
+        case "sync-history":
+            try await menu("Sync History…")
+            try await wait("Sync History window") { NSApp.windows.contains { $0.isVisible && $0.windowController is SyncHistoryWindow } }
+            try captureAll("history")
+        case "connect-dialog":
+            var cancelled = false
+            let timer = Timer(timeInterval: 0.5, repeats: false) { [self] _ in
+                try? captureAll("connect-dialog")
+                if let dialog = NSApp.modalWindow, let cancel = try? button("Cancel", in: dialog) { cancelled = true; try? click(cancel) }
+            }
+            RunLoop.main.add(timer, forMode: .common)
+            try await menu("Connect to Server…")
+            try require(cancelled, "Connect dialog was not cancelled; no server should be contacted")
+        case "about-window":
+            try await menu("About Foldera"); await pause()
+            try require(NSApp.windows.filter { $0.isVisible }.count > 1, "About panel not visible")
+            try captureAll("about")
+        case "checksum":
+            try await select(["plain.txt"]); try await menu("Copy SHA-256")
+            let expected = SHA256.hash(data: Data("Synthetic UI fixture\n".utf8)).map { String(format: "%02x", $0) }.joined()
+            try await wait("Correct SHA-256 copied") { NSPasteboard.general.string(forType: .string) == expected }
+        case "progress-cancel":
+            try await select(["pending.bin"]); try click(tab.copyButton)
+            try await navigate(right); try click(tab.pasteButton)
+            try await wait("Waiting-copy progress window", seconds: 8) { NSApp.windows.contains { $0.isVisible && $0.windowController is ProgressWindow } }
+            let progress = NSApp.windows.first { $0.isVisible && $0.windowController is ProgressWindow }!
+            try captureAll("copy-waiting")
+            try click(button("Cancel", in: progress))
+            try await wait("Cancelled copy becomes idle", seconds: 10) { self.tab.busyText == nil && !progress.isVisible }
+            try require(fm.fileExists(atPath: fixture.appendingPathComponent("pending.bin").path) && !fm.fileExists(atPath: right.appendingPathComponent("pending.bin").path), "Cancelled copy damaged source or left target")
         case "navigation":
             try await select(["Folder A"])
             try key(36, "\r")

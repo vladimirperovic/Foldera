@@ -102,9 +102,9 @@ private struct UIAuditFailure: Error, CustomStringConvertible {
     }
     func key(_ code: UInt16, _ characters: String, modifiers: NSEvent.ModifierFlags = [], window: NSWindow? = nil) throws {
         guard let window = window ?? tab.window else { throw UIAuditFailure("No key target window") }
-        note("Key \(code) \(characters)", "NSEvent dispatched through NSWindow")
+        note("Key \(code) \(characters)", "NSEvent posted through normal NSApplication event queue and local monitors")
         for kind in [NSEvent.EventType.keyDown, .keyUp] {
-            if let event = NSEvent.keyEvent(with: kind, location: .zero, modifierFlags: modifiers, timestamp: ProcessInfo.processInfo.systemUptime, windowNumber: window.windowNumber, context: nil, characters: characters, charactersIgnoringModifiers: characters, isARepeat: false, keyCode: code) { window.sendEvent(event) }
+            if let event = NSEvent.keyEvent(with: kind, location: .zero, modifierFlags: modifiers, timestamp: ProcessInfo.processInfo.systemUptime, windowNumber: window.windowNumber, context: nil, characters: characters, charactersIgnoringModifiers: characters, isARepeat: false, keyCode: code) { NSApp.postEvent(event, atStart: false) }
         }
     }
     func menu(_ title: String) async throws {
@@ -282,6 +282,11 @@ private struct UIAuditFailure: Error, CustomStringConvertible {
             try await wait("Up") { self.tab.location.url?.key == self.fixture.key }
             try click(tab.refreshButton)
             try await wait("Refresh preserves listing") { self.tab.items.contains { $0.name == "Reading.md" } }
+            try await select(["Folder A"])
+            try await menu("Open")
+            try await wait("Menu Open independently opens same folder") { self.tab.location.url?.lastPathComponent == "Folder A" }
+            try click(tab.upButton)
+            try await wait("Return from independently opened folder") { self.tab.location.url?.key == self.fixture.key }
         case "search":
             text("Reading", in: tab.searchField)
             try await wait("Search filters list") { !self.tab.searchRunning && self.tab.isSearching && self.tab.items.contains { $0.name == "Reading.md" } && !self.tab.items.contains { $0.name == "plain.txt" } }

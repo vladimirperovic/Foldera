@@ -25,7 +25,7 @@ EXTENDED = ["hidden-toggle", "sort-options", "icon-size", "address-bar", "new-wi
             "checksum", "progress-cancel"]
 
 
-def cases(smoke=False, extended=False):
+def cases(smoke=False, extended=False, verify=False):
     result = []
     for theme in ("light", "dark"):
         for width in (640, 800, 1100, 1440):
@@ -42,6 +42,10 @@ def cases(smoke=False, extended=False):
             r["scenario"] in ("new-menu", "rename-inline", "properties"))]
     if extended:
         result = [r for r in result if r["scenario"] in EXTENDED]
+    if verify:
+        result = [r for r in result if r["scenario"] in (
+            "navigation", "layout-details", "rename-inline", "quick-open", "find-command",
+            "image-viewer", "new-folder", "new-document")]
     for i, row in enumerate(result, 1):
         row["id"] = f"ui-{i:03d}"
     return result
@@ -189,11 +193,11 @@ def report(root, planned, records, state):
     return summary
 
 
-def run(binary, root, smoke=False, extended=False):
+def run(binary, root, smoke=False, extended=False, verify=False):
     if platform.system() != "Darwin" or os.environ.get("GITHUB_ACTIONS") != "true":
         raise RuntimeError("This UI campaign only runs on disposable GitHub macOS runners")
     root.mkdir(parents=True, exist_ok=True)
-    planned, records = cases(smoke, extended), []
+    planned, records = cases(smoke, extended, verify), []
     deadline = time.monotonic() + 22 * 60
     (root / "plan.json").write_text(json.dumps(planned, indent=2), encoding="utf-8")
     for spec in planned:
@@ -219,8 +223,9 @@ if __name__ == "__main__":
     run_cmd.add_argument("binary", type=Path); run_cmd.add_argument("output", type=Path)
     run_cmd.add_argument("--smoke", action="store_true")
     run_cmd.add_argument("--extended", action="store_true")
+    run_cmd.add_argument("--verify", action="store_true")
     args = parser.parse_args()
     if args.command == "prepare":
         prepare(args.repo, args.checkout, Path(__file__).resolve().parent)
     else:
-        raise SystemExit(run(args.binary.resolve(), args.output.resolve(), args.smoke, args.extended))
+        raise SystemExit(run(args.binary.resolve(), args.output.resolve(), args.smoke, args.extended, args.verify))

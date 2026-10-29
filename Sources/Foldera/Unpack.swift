@@ -211,12 +211,14 @@ enum ArchiveFolders {
         return (archive, folder)
     }
 
-    /// One cache folder per archive version: path, size and date name it.
+    /// Include identity and ctime: an editor can replace an archive or save
+    /// different bytes with the same length and restored modification date.
     static func folder(for archive: URL) -> URL {
-        var fresh = archive
-        fresh.removeAllCachedResourceValues()
-        let values = try? fresh.resourceValues(forKeys: [.fileSizeKey, .contentModificationDateKey])
-        let id = "\(archive.key)|\(values?.fileSize ?? 0)|\(values?.contentModificationDate?.timeIntervalSince1970 ?? 0)"
+        let revision = FileOps.revision(of: archive.resolvingSymlinksInPath())
+        let stamp = revision.map {
+            "\($0.device)|\($0.inode)|\($0.size)|\($0.modified)|\($0.modifiedNanos)|\($0.changed)|\($0.changedNanos)"
+        } ?? "unavailable"
+        let id = "\(archive.key)|\(stamp)"
         var hash: UInt64 = 0xcbf2_9ce4_8422_2325
         for byte in id.utf8 {
             hash ^= UInt64(byte)

@@ -866,11 +866,11 @@ extension ExplorerTab: NSMenuItemValidation {
     func resort(using sortItems: @escaping ([FileItem], SortSpec) -> [FileItem] = { $0.sorted(by: $1) }) {
         pendingSelection = Set(selectedItems.map(\.key))
         sortGeneration += 1
-        if searchRunning { searchSorted = true }
+        sortPending = false
+        if isSearching { searchSorted = true }
         // A big folder takes a moment to sort by name, and sorting by tags
         // reads every file's; do it off the main thread, as loading does.
-        // Search results keep arriving, so they sort here.
-        guard items.count > 2000 || sort.key == .tags, !isSearching else {
+        guard items.count > 2000 || sort.key == .tags else {
             items = sortItems(items, sort)
             return showItems()
         }
@@ -882,11 +882,24 @@ extension ExplorerTab: NSMenuItemValidation {
         let order = sort
         let generation = (load: loadGeneration, sort: sortGeneration)
         let revision = itemsRevision
+        sortPending = true
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             let sorted = sortItems(unsorted, order)
             DispatchQueue.main.async {
-                guard let self, generation == (self.loadGeneration, self.sortGeneration),
-                      revision == self.itemsRevision, order == self.sort else { return }
+                guard let self, generation == (self.loadGeneration, self.sortGeneration), order == self.sort else { return }
+                self.sortPending = false
+                // Retain background tag reads on the UI instances too. A
+                // later search batch otherwise rereads every prior result.
+                for item in sorted where originals[item.key]?.knownTags == nil {
+                    if let tags = item.knownTags { originals[item.key]?.tags = tags }
+                }
+                guard revision == self.itemsRevision else {
+                    // Incoming batches were appended without assuming the
+                    // old snapshot was sorted. One next pass includes them.
+                    if self.isSearching && self.searchSorted { self.resort(using: sortItems) }
+                    return
+                }
+                self.pendingSelection = Set(self.selectedItems.map(\.key))
                 self.items = sorted.compactMap { originals[$0.key] }
                 self.showItems()
             }

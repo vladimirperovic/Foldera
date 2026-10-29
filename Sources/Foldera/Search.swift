@@ -100,8 +100,10 @@ struct SearchFilters: Equatable {
             guard let date = item.modified else { return false }
             switch modified {
             case .any: break
-            case .today: if !calendar.isDateInToday(date) { return false }
-            case .yesterday: if !calendar.isDateInYesterday(date) { return false }
+            case .today: if !calendar.isDate(date, inSameDayAs: now) { return false }
+            case .yesterday:
+                guard let yesterday = calendar.date(byAdding: .day, value: -1, to: now),
+                      calendar.isDate(date, inSameDayAs: yesterday) else { return false }
             case .thisWeek: if !calendar.isDate(date, equalTo: now, toGranularity: .weekOfYear) { return false }
             case .thisMonth: if !calendar.isDate(date, equalTo: now, toGranularity: .month) { return false }
             case .thisYear: if !calendar.isDate(date, equalTo: now, toGranularity: .year) { return false }
@@ -137,9 +139,11 @@ final class FolderSearch {
     static let limit = 20_000
     private static let reads = BackgroundTask.queue("Foldera.search", limit: 2)
     private let task: BackgroundTask
+    private let isForeign: (URL) -> Bool
 
-    init(queue: OperationQueue? = nil) {
+    init(queue: OperationQueue? = nil, isForeign: @escaping (URL) -> Bool = UsageScanner.isForeign) {
         task = BackgroundTask(queue: queue ?? Self.reads)
+        self.isForeign = isForeign
     }
 
     func cancel() {
@@ -156,10 +160,16 @@ final class FolderSearch {
         // doesn't match: its kind, type and iCloud state aren't asked for, only
         // those of the items found. With no words every item is listed, and
         // reading it all along with the folder is quicker.
-        let keys = query.trimmingCharacters(in: .whitespaces).isEmpty ? FileItem.keys : []
+        let allNames = query.trimmingCharacters(in: .whitespaces).isEmpty
+        let isForeign = self.isForeign
         task.runCancellable({ flag -> (rest: [FileItem], truncated: Bool, unreadable: Int) in
-            var options: FileManager.DirectoryEnumerationOptions = [.skipsPackageDescendants]
-            if !showHidden { options.insert(.skipsHiddenFiles) }
+            let foreign = isForeign(root)
+            let keys = foreign ? FileItem.leanKeys : (allNames ? FileItem.keys : [])
+            // Foundation's hidden/package checks on foreign disks can inspect
+            // AppleDouble files for every entry. Use the same lean metadata,
+            // native hidden flags and package names as ordinary listings.
+            var options: FileManager.DirectoryEnumerationOptions = foreign ? [] : [.skipsPackageDescendants]
+            if !showHidden && !foreign { options.insert(.skipsHiddenFiles) }
             // Folders that can't be searched are counted, so no results there isn't taken for none there.
             var unreadable = 0
             let walker = FileManager.default.enumerator(
@@ -181,8 +191,16 @@ final class FolderSearch {
                         walker?.skipDescendants()
                         return true
                     }
+                    let foreignItem = foreign ? FileItem(url: url, foreign: true) : nil
+                    if let foreignItem {
+                        if foreignItem.isPackage || foreignItem.isSymlink { walker?.skipDescendants() }
+                        if !showHidden && foreignItem.isHidden {
+                            walker?.skipDescendants()
+                            return true
+                        }
+                    }
                     if matches(url.lastPathComponent) {
-                        let item = FileItem(url: url)
+                        let item = foreignItem ?? FileItem(url: url)
                         guard filters.matches(item, now: now, calendar: calendar), !(filesOnly && item.isFolder) else { return true }
                         batch.append(item)
                         total += 1

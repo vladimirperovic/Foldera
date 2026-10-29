@@ -75,9 +75,12 @@ final class ExplorerTab: NSViewController, NSSplitViewDelegate {
     /// out when it is no longer on the disk (one put back is shown again).
     private var justRemoved: [String: Int] = [:]
     private var removalGeneration = 0
+    private var searchRemovalGeneration = 0
     private var navigationGeneration = 0
     private var pendingRecentVisit = false
     var sortGeneration = 0
+    /// Search batches may arrive while their current order is being computed.
+    var sortPending = false
     /// A column was clicked while this search runs: later results go in order too.
     var searchSorted = false
     var pendingSelection: Set<String>?
@@ -662,6 +665,7 @@ final class ExplorerTab: NSViewController, NSSplitViewDelegate {
         typeSelection.reset()
         pendingRecentVisit = true
         navigationGeneration += 1
+        sortPending = false
         folderLoading.cancel()
         if renamingKey != nil { focusList() }
         addressBar.endEditing()
@@ -790,11 +794,15 @@ final class ExplorerTab: NSViewController, NSSplitViewDelegate {
 
     /// Reads the folder (or the drive list) in the background and shows it.
     func load() {
+        // A slow watcher may finish arming after a search has already begun.
+        // Its initial ordinary listing must not replace the search results.
+        guard !isSearching else { return }
         if renamingKey != nil {
             reloadDeferred = true
             return
         }
         loadGeneration += 1
+        sortPending = false
         let generation = loadGeneration
         changeReload?.cancel()
         changeReload = nil
@@ -1462,9 +1470,11 @@ final class ExplorerTab: NSViewController, NSSplitViewDelegate {
 
     func runSearch() {
         folderLoading.cancel()
+        searchRemovalGeneration = removalGeneration
         let root = location.url ?? FileManager.default.homeDirectoryForCurrentUser
         // A folder listing still on its way must not land among the results.
         loadGeneration += 1
+        sortPending = false
         waitingForFolder = false
         items = []
         loadError = nil
@@ -1490,11 +1500,21 @@ final class ExplorerTab: NSViewController, NSSplitViewDelegate {
     /// Results are added in the order they are found; a column click sorts
     /// them, and then later ones are merged in where they belong. Either way
     /// only the new rows are inserted, not the whole list loaded again.
-    private func appendResults(_ batch: [FileItem]) {
+    func appendResults(_ batch: [FileItem]) {
+        // A result can be queued before a deletion elsewhere reaches this
+        // tab. Newer tombstones win, just as they do for a folder listing.
+        // A fresh search may show files restored by Undo in the meantime.
+        let removed = Set(justRemoved.compactMap { $0.value > searchRemovalGeneration ? $0.key : nil })
+        let batch = batch.filter { !Self.isAmong($0, removed) }
+        guard !batch.isEmpty else { return }
         let before = items.count
         let inserted: [Int]
         let keys = Set(selectedItems.map(\.key))
-        if searchSorted {
+        // Reading tags or repeatedly sorting a large result set on the main
+        // thread can stop typing and scrolling on a slow disk. Append while
+        // that order is computed; the in-flight sort catches up afterwards.
+        let backgroundSort = searchSorted && (sort.key == .tags || before + batch.count > 2000)
+        if searchSorted && !sortPending && !backgroundSort {
             let result = items.merged(with: batch, by: sort)
             items = result.merged
             inserted = result.inserted
@@ -1522,6 +1542,7 @@ final class ExplorerTab: NSViewController, NSSplitViewDelegate {
         if !keys.isEmpty && (searchSorted || shownMode == .icons) { selectQuietly(keys) }
         updateEmptyState()
         updateStatus()
+        if backgroundSort && !sortPending { resort() }
     }
 
     /// The search box was emptied. With a search option still set, the

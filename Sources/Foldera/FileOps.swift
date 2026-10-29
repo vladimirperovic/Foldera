@@ -176,16 +176,29 @@ enum FileOps {
     static func makeFolder(in folder: URL) throws -> URL {
         try refuseInArchive([folder])
         let url = freeURL(in: folder, base: "New folder", ext: "")
-        try FileManager.default.createDirectory(at: url, withIntermediateDirectories: false)
+        guard mkdir(url.path, 0o777) == 0 else {
+            throw NSError(domain: NSPOSIXErrorDomain, code: Int(errno))
+        }
         return url
+    }
+
+    /// Write a complete new file before publishing its name. A competing
+    /// writer's file or symlink is never replaced, even after a free-name check.
+    static func createFile(_ data: Data, at target: URL) throws {
+        try refuseInArchive([target])
+        let staging = try stagingFolder(beside: target)
+        defer { removeOwn(staging) }
+        let ready = staging.appendingPathComponent("item")
+        try data.write(to: ready)
+        guard renamex_np(ready.path, target.path, UInt32(RENAME_EXCL)) == 0 else {
+            throw NSError(domain: NSPOSIXErrorDomain, code: Int(errno))
+        }
     }
 
     static func makeTextFile(in folder: URL) throws -> URL {
         try refuseInArchive([folder])
         let url = freeURL(in: folder, base: "New Text Document", ext: "txt")
-        guard FileManager.default.createFile(atPath: url.path, contents: Data()) else {
-            throw OpError("Foldera couldn't create a file in “\(folder.lastPathComponent)”.")
-        }
+        try createFile(Data(), at: url)
         return url
     }
 

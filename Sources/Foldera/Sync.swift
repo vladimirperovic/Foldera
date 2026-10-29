@@ -462,14 +462,16 @@ enum Sync {
 
     /// The SHA-256 itself, read a megabyte at a time; `read` hears how far it got.
     static func digest(_ url: URL, cancelled: CancelFlag, read: (Int64) -> Void = { _ in }) -> Data? {
-        guard let file = FileHandle(forReadingAtPath: url.path) else { return nil }
-        defer { try? file.close() }
+        guard !cancelled.isSet, let file = StableFileReader(url) else { return nil }
         var sha = SHA256()
         var done: Int64 = 0
         do {
             while !cancelled.isSet {
-                let chunk = try file.read(upToCount: 1 << 20) ?? Data()
-                if chunk.isEmpty { return Data(sha.finalize()) }
+                let chunk = try file.handle.read(upToCount: 1 << 20) ?? Data()
+                if chunk.isEmpty {
+                    guard !cancelled.isSet, done == file.size, file.isCurrent else { return nil }
+                    return Data(sha.finalize())
+                }
                 sha.update(data: chunk)
                 done += Int64(chunk.count)
                 read(done)

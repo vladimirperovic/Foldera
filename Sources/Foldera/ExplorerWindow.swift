@@ -81,6 +81,8 @@ final class ExplorerTab: NSViewController, NSSplitViewDelegate {
     var sortGeneration = 0
     /// Search batches may arrive while their current order is being computed.
     var sortPending = false
+    /// Keep an inline rename's row stable until its field editor has finished.
+    var sortDeferred = false
     /// A column was clicked while this search runs: later results go in order too.
     var searchSorted = false
     var pendingSelection: Set<String>?
@@ -666,6 +668,7 @@ final class ExplorerTab: NSViewController, NSSplitViewDelegate {
         pendingRecentVisit = true
         navigationGeneration += 1
         sortPending = false
+        sortDeferred = false
         folderLoading.cancel()
         if renamingKey != nil { focusList() }
         addressBar.endEditing()
@@ -1514,7 +1517,7 @@ final class ExplorerTab: NSViewController, NSSplitViewDelegate {
         // thread can stop typing and scrolling on a slow disk. Append while
         // that order is computed; the in-flight sort catches up afterwards.
         let backgroundSort = searchSorted && (sort.key == .tags || before + batch.count > 2000)
-        if searchSorted && !sortPending && !backgroundSort {
+        if searchSorted && !sortPending && !backgroundSort && renamingKey == nil {
             let result = items.merged(with: batch, by: sort)
             items = result.merged
             inserted = result.inserted
@@ -1542,7 +1545,8 @@ final class ExplorerTab: NSViewController, NSSplitViewDelegate {
         if !keys.isEmpty && (searchSorted || shownMode == .icons) { selectQuietly(keys) }
         updateEmptyState()
         updateStatus()
-        if backgroundSort && !sortPending { resort() }
+        if searchSorted && renamingKey != nil { sortDeferred = true }
+        else if backgroundSort && !sortPending { resort() }
     }
 
     /// The search box was emptied. With a search option still set, the

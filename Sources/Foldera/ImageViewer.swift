@@ -47,6 +47,15 @@ enum ImageFiles {
         return nil
     }
 
+    /// A sharper decode can replace the pixels without changing the current
+    /// zoom only if it belongs to the version whose geometry is on screen.
+    static func readRefinement(_ url: URL, matching revision: FileOps.Revision, cancelled: CancelFlag = CancelFlag(),
+                               decode: (URL) -> Loaded? = { ImageFiles.decodeBitmap($0) }) -> Cached? {
+        guard let full = readValidated(url, maxPixels: Int.max, cancelled: cancelled, decode: { url, _ in decode(url) }),
+              full.revision == revision else { return nil }
+        return full
+    }
+
     /// The most pixels any screen here can show across: enough for fitting a picture to any window.
     static var screenPixels: Int {
         Int(NSScreen.screens.map { max($0.frame.width, $0.frame.height) * $0.backingScaleFactor }.max() ?? 3840)
@@ -881,16 +890,23 @@ final class ImageViewer: NSWindowController, NSWindowDelegate, NSMenuItemValidat
     /// one and swap it in, without moving the view. It is not kept once you move on.
     private func sharpenIfNeeded() {
         guard let original, !original.isFull, !sharpening, let url = current, let decoded = shown?.pixels,
-              let window else { return }
+              let revision = cache[url.key]?.revision, let window else { return }
         let needed = canvas.frame.width * scroll.magnification * window.backingScaleFactor
         guard needed > decoded.width * 1.05 else { return }
         sharpening = true
-        sharpen.run({ ImageFiles.decodeBitmap(url) }) { [weak self] full in
+        sharpen.runCancellable({ cancelled in
+            ImageFiles.readRefinement(url, matching: revision, cancelled: cancelled)
+        }) { [weak self] full in
             guard let self, self.sharpening, url.key == self.current?.key else { return }
             self.sharpening = false
-            guard let full else { return }
-            self.original = full
-            let turned = ImageFiles.rotated(full, quarterTurns: self.turns)
+            guard let full, full.revision == self.cache[url.key]?.revision else {
+                // A different image needs fresh dimensions, labels and fit,
+                // rather than being drawn into the previous image's canvas.
+                self.load(url)
+                return
+            }
+            self.original = full.loaded
+            let turned = ImageFiles.rotated(full.loaded, quarterTurns: self.turns)
             self.shown = turned
             self.canvas.image = turned.image
         }

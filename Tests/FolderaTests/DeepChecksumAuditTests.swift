@@ -16,7 +16,8 @@ private final class ChecksumFiles {
 }
 
 @Suite struct DeepChecksumAudit {
-    @Test(arguments: [" leading and trailing ", "a\\b.txt", "line\nbreak", "line\rbreak", "😀\u{2028}name", "*name"])
+    @Test(arguments: [" leading and trailing ", "a\\b.txt", "line\nbreak", "line\rbreak", "😀\u{2028}name", "*name",
+                      "\u{0301}name", "\n\u{0301}name", "\\\u{0301}name"])
     func checksumNamesRoundTripExactly(_ name: String) throws {
         let digest = Data(repeating: 0xab, count: 32)
         let line = Checksum.line(digest, name: name)
@@ -34,6 +35,8 @@ private final class ChecksumFiles {
         #expect(Checksum.entries(in: invalid.joined(separator: "\n")).isEmpty)
         let entries = Checksum.entries(in: "\\SHA256 ( leading\\ntrailing ) = \(hash)\n")
         #expect(entries.first?.name == " leading\ntrailing ")
+        let combining = Checksum.entries(in: "SHA256 (\u{0301}name) = \(hash)\n")
+        #expect(combining.first?.name == "\u{0301}name")
     }
 
     @Test(arguments: [false, true])
@@ -83,11 +86,15 @@ private final class ChecksumFiles {
         #expect(StableFileReader(fifo) == nil)
         #expect(Sync.digest(fifo, cancelled: CancelFlag()) == nil)
         #expect(FileCompare.compare(regular, fifo, cancelled: CancelFlag()) == nil)
+        #expect(Sync.sameBytes(regular, fifo, cancelled: CancelFlag()) == nil)
         #expect(Sync.digest(files.root, cancelled: CancelFlag()) == nil)
         let link = files.url("link")
         try FileManager.default.createSymbolicLink(at: link, withDestinationURL: regular)
         #expect(Sync.digest(link, cancelled: CancelFlag()) == Sync.digest(regular, cancelled: CancelFlag()))
         #expect(FileCompare.compare(link, regular, cancelled: CancelFlag()) == .same)
+        let comparison = try #require(Sync.sameBytes(link, regular, cancelled: CancelFlag()))
+        #expect(comparison.0)
+        #expect(comparison.1 == Sync.hash(regular, cancelled: CancelFlag()))
     }
 
     @Test func cancellingDuringAReadNeverPublishesADigestOrComparison() throws {
@@ -113,5 +120,28 @@ private final class ChecksumFiles {
         let cancelled = CancelFlag(); cancelled.set()
         let skipped = Checksum.verification([list], cancelled: cancelled)
         #expect(skipped.present.isEmpty && skipped.problems.isEmpty)
+    }
+
+    @Test(arguments: ["edit", "replace", "cancel"])
+    func syncComparisonRejectsChangedOrCancelledContent(_ action: String) throws {
+        let files = try ChecksumFiles()
+        let bytes = Data(repeating: 0x61, count: (1 << 20) + 31)
+        let a = try files.file("a", bytes), b = try files.file("b", bytes)
+        let cancelled = CancelFlag()
+        var changed = false
+        let comparison = Sync.sameBytes(a, b, cancelled: cancelled) { _ in
+            guard !changed else { return }
+            changed = true
+            do {
+                if action == "cancel" { cancelled.set() }
+                else if action == "replace" { try bytes.write(to: a, options: .atomic) }
+                else {
+                    let writer = try FileHandle(forWritingTo: a)
+                    defer { try? writer.close() }
+                    try writer.write(contentsOf: Data("z".utf8))
+                }
+            } catch { Issue.record(error) }
+        }
+        #expect(changed && comparison == nil)
     }
 }

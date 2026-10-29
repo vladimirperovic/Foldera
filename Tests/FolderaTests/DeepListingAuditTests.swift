@@ -142,4 +142,79 @@ private final class DeepListingFiles {
             #expect(!filters.matches(item, now: now, calendar: calendar))
         }
     }
+
+    @Test(arguments: [false, true])
+    func sortingWaitsForInlineRenameAndKeepsSearchBatchesOrdered(reloadDuringRename: Bool) async throws {
+        let files = try DeepListingFiles()
+        let alpha = FileItem(url: try files.file("alpha.txt"))
+        let zulu = FileItem(url: try files.file("zulu.txt"))
+        let beta = FileItem(url: try files.file("beta.txt"))
+        alpha.tags = ["a"]; beta.tags = ["b"]; zulu.tags = ["z"]
+        let tab = ExplorerTab(location: .folder(files.root))
+        let gate = DispatchSemaphore(value: 0), started = CancelFlag()
+        defer { gate.signal(); tab.tearDown() }
+        try await deepListingEventually { tab.items.count == 3 }
+        tab.watcher.stop()
+        tab.searchQuery = ".txt"
+        tab.searchRunning = true
+        tab.items = [zulu, alpha]
+        tab.sort = SortSpec(key: .name, ascending: true)
+        // A tag sort forces the background path even in this small fixture.
+        tab.sort.key = .tags
+        tab.showItems()
+        tab.resort { items, order in
+            started.set()
+            _ = gate.wait(timeout: .now() + 5)
+            return items.sorted(by: order)
+        }
+        try await deepListingEventually { started.isSet }
+        tab.renamingKey = zulu.key
+        tab.reloadDeferred = reloadDuringRename
+        tab.appendResults([beta])
+        gate.signal()
+        try await deepListingEventually { tab.sortDeferred && !tab.sortPending }
+        #expect(tab.items.map(\.name) == ["zulu.txt", "alpha.txt", "beta.txt"])
+        #expect(tab.renamingKey == zulu.key)
+        // Cancelling the editor must still apply a deferred sort. A refresh
+        // requested during editing may restart the search before that sort.
+        tab.sort = SortSpec(key: .name, ascending: true)
+        tab.cancelRename = true
+        let field = NSTextField(string: "unfinished rename")
+        tab.controlTextDidEndEditing(Notification(name: NSControl.textDidEndEditingNotification, object: field))
+        try await deepListingEventually {
+            !tab.sortPending && !tab.sortDeferred && tab.items.map(\.name) == ["alpha.txt", "beta.txt", "zulu.txt"]
+        }
+        #expect(tab.searchSorted && tab.renamingKey == nil)
+        #expect(FileOps.exists(zulu.url))
+    }
+
+    @Test(arguments: [false, true])
+    func copyingAPictureRespectsANewerClipboard(changeClipboard: Bool) async throws {
+        let tab = ExplorerTab(location: .thisMac)
+        let board = NSPasteboard.withUniqueName()
+        let gate = DispatchSemaphore(value: 0), started = CancelFlag()
+        defer { gate.signal(); tab.tearDown(); board.releaseGlobally() }
+        board.setString("before image", forType: .string)
+        let bytes = Data([0x49, 0x49, 0x2a, 0x00])
+        var finished = false
+        tab.copyImage(URL(fileURLWithPath: "/test.png"), pasteboard: board, read: { _ in
+            #expect(!Thread.isMainThread)
+            started.set()
+            _ = gate.wait(timeout: .now() + 5)
+            return bytes
+        }, finished: { finished = true })
+        try await deepListingEventually { started.isSet }
+        if changeClipboard {
+            board.clearContents()
+            board.setString("newer copy", forType: .string)
+        }
+        gate.signal()
+        try await deepListingEventually { finished }
+        if changeClipboard {
+            #expect(board.string(forType: .string) == "newer copy")
+            #expect(board.data(forType: .tiff) == nil)
+        } else {
+            #expect(board.data(forType: .tiff) == bytes)
+        }
+    }
 }

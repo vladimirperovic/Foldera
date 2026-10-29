@@ -59,10 +59,32 @@ enum FileUndo {
         let expected: ItemIdentity?
     }
 
+    /// An immutable filesystem snapshot, prepared by the worker before its
+    /// result reaches the main thread. Registration only touches Undo/UI state.
+    struct Prepared {
+        private let changes: [GuardedChange]
+        fileprivate init(_ source: [Change]) { changes = FileUndo.bind(source) }
+        fileprivate func register(name: String, in manager: Manager) {
+            FileUndo.record(changes, name: name, in: manager)
+        }
+    }
+
+    static func prepare(_ changes: [Change]) -> Prepared { Prepared(changes) }
+
+    static func record(_ prepared: Prepared, name: String, in manager: Manager = manager) {
+        prepared.register(name: name, in: manager)
+    }
+
+    private struct LocatedItem {
+        let identity: ItemIdentity
+        /// The present-day location backing a path in the simulated history.
+        let url: URL
+    }
+
     private enum LocationState {
         case absent
-        case item(ItemIdentity)
-        var identity: ItemIdentity? {
+        case item(LocatedItem)
+        var item: LocatedItem? {
             if case let .item(value) = self { return value }
             return nil
         }
@@ -73,21 +95,52 @@ enum FileUndo {
     /// each earlier name, including name swaps and replacement groups.
     private static func bind(_ changes: [Change]) -> [GuardedChange] {
         var locations: [String: LocationState] = [:]
-        func identity(_ url: URL) -> ItemIdentity? {
-            if let state = locations[url.key] { return state.identity }
-            return ItemIdentity.read(url)
+        func item(_ url: URL) -> LocatedItem? {
+            if let state = locations[url.key] { return state.item }
+            // Moving a directory changes every descendant's address. An
+            // earlier child rename must be looked up beneath its parent's
+            // final location, not at a path that no longer exists on disk.
+            var ancestor = url.deletingLastPathComponent()
+            while true {
+                if let state = locations[ancestor.key] {
+                    guard let parent = state.item else { return nil }
+                    let suffix = url.key.dropFirst(ancestor.key == "/" ? 1 : ancestor.key.count + 1)
+                    let actual = parent.url.appendingPathComponent(String(suffix))
+                    return ItemIdentity.read(actual).map { LocatedItem(identity: $0, url: actual) }
+                }
+                guard ancestor.key != "/" else { break }
+                ancestor = ancestor.deletingLastPathComponent()
+            }
+            return ItemIdentity.read(url).map { LocatedItem(identity: $0, url: url) }
+        }
+        func descendants(of url: URL) -> [String: LocationState] {
+            locations.filter { $0.key.hasPrefix(url.key == "/" ? "/" : url.key + "/") && $0.key != url.key }
         }
         let bound = changes.reversed().map { change -> GuardedChange in
             switch change {
             case let .moved(from, to):
-                let expected = identity(to)
+                let expected = item(to)
+                // Ordinary file batches stay linear: only a directory can
+                // have historical descendant overrides to move with it.
+                let directory = expected?.identity.kind == S_IFDIR
+                let children = directory ? descendants(of: to) : [:]
+                if directory {
+                    for key in children.keys { locations[key] = nil }
+                    for key in descendants(of: from).keys { locations[key] = nil }
+                }
                 locations[to.key] = .absent
                 locations[from.key] = expected.map(LocationState.item) ?? .absent
-                return GuardedChange(change: change, expected: expected)
+                for (key, state) in children {
+                    locations[from.key + key.dropFirst(to.key.count)] = state
+                }
+                return GuardedChange(change: change, expected: expected?.identity)
             case let .created(url):
-                let expected = identity(url)
+                let expected = item(url)
+                if expected?.identity.kind == S_IFDIR {
+                    for key in descendants(of: url).keys { locations[key] = nil }
+                }
                 locations[url.key] = .absent
-                return GuardedChange(change: change, expected: expected)
+                return GuardedChange(change: change, expected: expected?.identity)
             case .removedFolder:
                 return GuardedChange(change: change, expected: nil)
             }
@@ -104,11 +157,11 @@ enum FileUndo {
     }
 
     static func record(_ changes: [Change], name: String, in manager: Manager = manager) {
-        guard !changes.isEmpty else { return }
-        record(bind(changes), name: name, in: manager)
+        record(prepare(changes), name: name, in: manager)
     }
 
     private static func record(_ changes: [GuardedChange], name: String, in manager: Manager) {
+        guard !changes.isEmpty else { return }
         invalidateSizes(changes.map(\.change))
         if manager.isBusy {
             manager.pendingRecords.append { record(changes, name: name, in: manager) }

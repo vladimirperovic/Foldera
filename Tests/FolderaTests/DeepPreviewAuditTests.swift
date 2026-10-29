@@ -94,6 +94,37 @@ private func previewAuditPicture(_ url: URL, width: Int, height: Int, type: Stri
         #expect(loaded == nil)
     }
 
+    @Test func sharpeningKeepsTheDisplayedRevisionAndRejectsChangedGeometry() throws {
+        let files = try PreviewAuditFiles(), url = files.url("photo.png")
+        try previewAuditPicture(url, width: 100, height: 50)
+        let screen = try #require(ImageFiles.readValidated(url, maxPixels: 20))
+        #expect(screen.loaded.pixels == NSSize(width: 20, height: 10))
+        let full = try #require(ImageFiles.readRefinement(url, matching: screen.revision))
+        #expect(full.loaded.pixels == NSSize(width: 100, height: 50))
+        #expect(full.loaded.isFull)
+
+        var reads = 0
+        let changed = ImageFiles.readRefinement(url, matching: screen.revision) { url in
+            let loaded = ImageFiles.decodeBitmap(url)
+            reads += 1
+            if reads == 1 {
+                do { try previewAuditPicture(url, width: 40, height: 90) }
+                catch { Issue.record(error) }
+            }
+            return loaded
+        }
+        #expect(reads == 2)
+        #expect(changed == nil, "The new portrait must be loaded with new geometry, not inserted into the old wide canvas")
+        let refreshed = try #require(ImageFiles.readValidated(url, maxPixels: 20, cached: screen))
+        #expect(refreshed.loaded.full == NSSize(width: 40, height: 90))
+        let cancelled = CancelFlag(); cancelled.set()
+        let cancelledRead = ImageFiles.readRefinement(url, matching: refreshed.revision, cancelled: cancelled) { _ in
+            Issue.record("A cancelled refinement must not decode")
+            return nil
+        }
+        #expect(cancelledRead == nil)
+    }
+
     @MainActor @Test(arguments: [false, true])
     func aLateOCRResultRespectsANewerClipboard(changeClipboard: Bool) async throws {
         _ = NSApplication.shared

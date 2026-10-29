@@ -841,7 +841,7 @@ final class SyncWindow: NSWindowController, NSWindowDelegate, NSTableViewDataSou
             withExtendedLifetime(lock) {}
             UsageCache.changed(scan.left)
             UsageCache.changed(scan.right)
-            if !permanently { FileUndo.record(outcome.changes, name: "Sync") }
+            if !permanently, let undo = outcome.preparedUndo { FileUndo.record(undo, name: "Sync") }
             FileOps.report(outcome.failures)
             guard let self else { return }
             self.syncing = false

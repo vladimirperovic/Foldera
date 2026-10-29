@@ -22,23 +22,28 @@ enum Checksum {
         // Spaces at either end of the filename are significant. Only remove
         // the CR in a Windows line ending, never trim the whole record.
         for raw in text.components(separatedBy: "\n") {
-            var line = raw.hasSuffix("\r") ? String(raw.dropLast()) : raw
-            if line.isEmpty || line.trimmingCharacters(in: .whitespaces).hasPrefix("#") { continue }
-            let escaped = line.hasPrefix("\\")
-            if escaped { line.removeFirst() }
-            if line.hasPrefix("SHA256 ("), let close = line.range(of: ") = ", options: .backwards) {
-                let name = String(line[line.index(line.startIndex, offsetBy: 8)..<close.lowerBound])
-                let hash = String(line[close.upperBound...]).lowercased()
+            var bytes = Array(raw.utf8)
+            if bytes.last == 13 { bytes.removeLast() }
+            if bytes.isEmpty { continue }
+            let escaped = bytes.first == 92
+            if escaped { bytes.removeFirst() }
+            // The separators are ASCII bytes, not graphemes: a filename may
+            // begin with a combining mark which joins the preceding space.
+            if bytes.starts(with: Array("SHA256 (".utf8)), bytes.count >= 12,
+               let close = stride(from: bytes.count - 4, through: 8, by: -1).first(where: {
+                   bytes[$0..<($0 + 4)].elementsEqual([41, 32, 61, 32])
+               }) {
+                let name = String(decoding: bytes[8..<close], as: UTF8.self)
+                let hash = String(decoding: bytes[(close + 4)...], as: UTF8.self).lowercased()
                 if validHash(hash), let decoded = decode(name, escaped: escaped) { found.append((hash, decoded)) }
                 continue
             }
-            let hash = String(line.prefix(64))
-            guard line.count > 66, validHash(hash) else { continue }
-            var rest = line.dropFirst(64)
-            guard rest.first == " " else { continue }
-            rest = rest.dropFirst()
-            guard rest.first == " " || rest.first == "*" else { continue }
-            if let name = decode(String(rest.dropFirst()), escaped: escaped) { found.append((hash.lowercased(), name)) }
+            guard bytes.count > 66, bytes[64] == 32, bytes[65] == 32 || bytes[65] == 42 else { continue }
+            let hash = String(decoding: bytes.prefix(64), as: UTF8.self)
+            guard validHash(hash) else { continue }
+            if let name = decode(String(decoding: bytes.dropFirst(66), as: UTF8.self), escaped: escaped) {
+                found.append((hash.lowercased(), name))
+            }
         }
         return found
     }
@@ -50,10 +55,10 @@ enum Checksum {
     private static func decode(_ name: String, escaped: Bool) -> String? {
         guard !name.isEmpty, !name.contains("\0") else { return nil }
         guard escaped else { return name }
-        var result = "", characters = name.makeIterator()
-        while let character = characters.next() {
-            guard character == "\\" else { result.append(character); continue }
-            switch characters.next() {
+        var result = "", scalars = name.unicodeScalars.makeIterator()
+        while let scalar = scalars.next() {
+            guard scalar == "\\" else { result.unicodeScalars.append(scalar); continue }
+            switch scalars.next() {
             case "\\": result.append("\\")
             case "n": result.append("\n")
             case "r": result.append("\r")

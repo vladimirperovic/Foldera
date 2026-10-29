@@ -41,6 +41,8 @@ final class Transfer {
     struct Outcome {
         var made: [URL] = []
         var changes: [Change] = []
+        /// Filled by run(), while the worker still owns filesystem work.
+        var preparedUndo: FileUndo.Prepared?
         var failures: [String] = []
         var cancelled = false
     }
@@ -250,10 +252,13 @@ final class Transfer {
         }
     }
 
-    func run(progress report: @escaping (Progress) -> Void, done: @escaping (Outcome) -> Void) {
+    func run(progress report: @escaping (Progress) -> Void,
+             prepareUndo: @escaping ([Change]) -> FileUndo.Prepared = FileUndo.prepare,
+             done: @escaping (Outcome) -> Void) {
         self.report = report
         DispatchQueue.global(qos: .userInitiated).async {
-            let outcome = self.perform()
+            var outcome = self.perform()
+            outcome.preparedUndo = prepareUndo(outcome.changes)
             DispatchQueue.main.async { done(outcome) }
         }
     }

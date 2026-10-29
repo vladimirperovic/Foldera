@@ -137,6 +137,99 @@ private final class DeepSafetyFiles {
         #expect(files.text("saved.txt") == "copy")
     }
 
+    @Test func renamingAChildBeforeItsParentStillUndoesAndRedoesBothNames() async throws {
+        let files = try DeepSafetyFiles()
+        let child = try files.file("parent/child.txt", "contents")
+        let parent = files.url("parent")
+        let result = BatchRename.perform([
+            .init(item: FileItem(url: child), newName: "renamed.txt"),
+            .init(item: FileItem(url: parent), newName: "renamed-parent"),
+        ])
+        #expect(result.failures.isEmpty && result.changes.count == 2)
+        #expect(files.text("renamed-parent/renamed.txt") == "contents")
+        let undo = manager(result.changes)
+
+        undo.undo()
+        try await finish(undo)
+        #expect(files.text("parent/child.txt") == "contents")
+        #expect(!FileOps.exists(files.url("parent/renamed.txt")))
+        #expect(!FileOps.exists(files.url("renamed-parent")))
+        undo.redo()
+        try await finish(undo)
+        #expect(files.text("renamed-parent/renamed.txt") == "contents")
+        #expect(!FileOps.exists(parent))
+    }
+
+    @Test func renamedDescendantsKeepTheirIdentityWhenParentNamesAreSwapped() async throws {
+        let files = try DeepSafetyFiles()
+        let child = try files.file("a/child.txt", "A")
+        let other = try files.file("b/other.txt", "B")
+        let renamedChild = try FileOps.rename(child, to: "renamed.txt")
+        let swap = BatchRename.perform([
+            .init(item: FileItem(url: files.url("a")), newName: "b"),
+            .init(item: FileItem(url: files.url("b")), newName: "a"),
+        ])
+        #expect(swap.failures.isEmpty)
+        let undo = manager([.moved(from: child, to: renamedChild)] + swap.changes)
+
+        undo.undo()
+        try await finish(undo)
+        #expect(files.text("a/child.txt") == "A")
+        #expect(files.text("b/other.txt") == "B")
+        #expect(FileOps.exists(other))
+        undo.redo()
+        try await finish(undo)
+        #expect(files.text("b/renamed.txt") == "A")
+        #expect(files.text("a/other.txt") == "B")
+    }
+
+    @Test(arguments: [false, true])
+    func transferPreparesUndoOffMainForPartialAndCancelledRuns(cancelBeforeStart: Bool) async throws {
+        let files = try DeepSafetyFiles()
+        let source = try files.file("source.txt", "copied content")
+        let target = files.url("copy.txt")
+        let job = Transfer(plan: .init(steps: [
+            .init(from: files.url("missing.txt"), to: files.url("failed.txt"), replace: false),
+            .init(from: source, to: target, replace: false),
+        ]), move: false)
+        if cancelBeforeStart { job.cancel() }
+        let preparedOnWorker = CancelFlag()
+        let outcome: Transfer.Outcome = await withCheckedContinuation { continuation in
+            job.run(progress: { _ in }, prepareUndo: { changes in
+                #expect(!Thread.isMainThread)
+                preparedOnWorker.set()
+                return FileUndo.prepare(changes)
+            }, done: {
+                #expect(Thread.isMainThread)
+                continuation.resume(returning: $0)
+            })
+        }
+        #expect(preparedOnWorker.isSet)
+        let prepared = try #require(outcome.preparedUndo)
+        let undo = FileUndo.Manager()
+        undo.groupsByEvent = false
+        if !cancelBeforeStart {
+            #expect(outcome.changes.count == 1 && outcome.failures.count == 1)
+            // Registration must retain the worker's identity rather than
+            // bind again to this replacement on the main thread.
+            try FileManager.default.moveItem(at: target, to: files.url("saved.txt"))
+            try files.file("copy.txt", "newer file")
+        } else {
+            #expect(outcome.cancelled && outcome.changes.isEmpty)
+        }
+        undo.beginUndoGrouping()
+        FileUndo.record(prepared, name: "Copy", in: undo)
+        undo.endUndoGrouping()
+        if cancelBeforeStart {
+            #expect(!undo.canUndo)
+        } else {
+            undo.undo()
+            try await finish(undo)
+            #expect(files.text("copy.txt") == "newer file")
+            #expect(files.text("saved.txt") == "copied content")
+        }
+    }
+
     @Test(arguments: [false, true])
     func exclusiveFilePublicationPreservesAnExistingFileOrLink(link: Bool) throws {
         let files = try DeepSafetyFiles()
@@ -191,4 +284,36 @@ private final class DeepSafetyFiles {
         #expect(newRevision.modified == oldRevision.modified && newRevision.modifiedNanos == oldRevision.modifiedNanos)
         #expect(ArchiveFolders.folder(for: requested) != oldCache)
     }
+}
+
+extension SyncTestIsolation {
+@Suite(.serialized) @MainActor struct PreparedSyncUndo {
+    @Test(arguments: [false, true])
+    func syncPreparesOnlyReversibleUndoOnItsWorker(permanently: Bool) async throws {
+        let files = try DeepSafetyFiles()
+        let previousMemory = Sync.Memory.folder
+        Sync.Memory.folder = files.url("memory")
+        defer { Sync.Memory.folder = previousMemory }
+        try files.file("left/file.txt", "contents")
+        try FileManager.default.createDirectory(at: files.url("right"), withIntermediateDirectories: true)
+        let scan = try Sync.compare(files.url("left"), files.url("right"), by: .dateAndSize, cancelled: CancelFlag())
+        let plan = Sync.plan(scan, mode: .update)
+        let job = Sync.Job(scan, rows: plan.rows, permanently: permanently)
+        let preparedOnWorker = CancelFlag()
+        let outcome: Sync.Job.Outcome = await withCheckedContinuation { continuation in
+            job.run(progress: { _ in }, prepareUndo: { changes in
+                #expect(!Thread.isMainThread)
+                preparedOnWorker.set()
+                return FileUndo.prepare(changes)
+            }, done: {
+                #expect(Thread.isMainThread)
+                continuation.resume(returning: $0)
+            })
+        }
+        #expect(outcome.failures.isEmpty && outcome.copied == 1)
+        #expect(preparedOnWorker.isSet == !permanently)
+        #expect((outcome.preparedUndo != nil) == !permanently)
+        #expect(files.text("right/file.txt") == "contents")
+    }
+}
 }

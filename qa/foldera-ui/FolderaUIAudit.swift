@@ -236,7 +236,8 @@ private struct UIAuditFailure: Error, CustomStringConvertible {
             let window = NSApp.windows.first { $0.isVisible && $0.windowController is SyncWindow }!
             try click(button("Compare", in: window))
             try await wait("Sync plan ready", seconds: 12) { (window.windowController as? SyncWindow)?.canSynchronize == true }
-            try click(button("Synchronize", in: window))
+            guard let synchronize = views(window).compactMap({ $0 as? NSButton }).first(where: { $0.action.map(NSStringFromSelector) == "synchronize:" }) else { throw UIAuditFailure("Sync action button absent") }
+            try click(synchronize)
             try await wait("Sync writes correct fixture bytes", seconds: 12) { (try? String(contentsOf: right.appendingPathComponent("plain.txt"), encoding: .utf8)) == "Synthetic UI fixture\n" }
             try require((try? String(contentsOf: fixture.appendingPathComponent("plain.txt"), encoding: .utf8)) == "Synthetic UI fixture\n", "Sync damaged original")
             try captureAll("sync-finished")
@@ -276,6 +277,7 @@ private struct UIAuditFailure: Error, CustomStringConvertible {
             try await wait("Enter opens selected folder") { self.tab.location.url?.lastPathComponent == "Folder A" }
             try click(tab.backButton)
             try await wait("Back") { self.tab.location.url?.key == self.fixture.key }
+            try await wait("Forward control ready after asynchronous listing") { self.tab.forwardButton.isEnabled }
             try click(tab.forwardButton)
             try await wait("Forward") { self.tab.location.url?.lastPathComponent == "Folder A" }
             try click(tab.upButton)
@@ -406,6 +408,8 @@ private struct UIAuditFailure: Error, CustomStringConvertible {
             try await wait("Image viewer visible") { NSApp.windows.contains { $0 is ViewerWindow && $0.isVisible } }
             try captureAll("viewer")
             let viewer = NSApp.windows.first { $0 is ViewerWindow && $0.isVisible }!
+            try await wait("Viewer image decoded") { self.views(viewer).compactMap { $0 as? ViewerCanvas }.contains { $0.image != nil && $0.frame.width > 0 } }
+            await pause(0.4)
             try key(124, "", window: viewer); await pause()
             try require(viewer.isVisible, "Viewer closed on Next")
             try key(53, "\u{1b}", window: viewer)
@@ -481,6 +485,20 @@ private struct UIAuditFailure: Error, CustomStringConvertible {
             let name = "\(stage)-\(index).png"
             try bytes.write(to: output.deletingLastPathComponent().appendingPathComponent(name))
             shots.append(name)
+            if ProcessInfo.processInfo.environment["FOLDERA_UI_COMPOSITOR"] == "1" && stage != "before" {
+                let realName = "\(stage)-\(index)-compositor.png"
+                let process = Process()
+                process.executableURL = URL(fileURLWithPath: "/usr/sbin/screencapture")
+                process.arguments = ["-x", "-o", "-l", String(window.windowNumber), output.deletingLastPathComponent().appendingPathComponent(realName).path]
+                process.standardOutput = FileHandle.nullDevice
+                process.standardError = FileHandle.nullDevice
+                do {
+                    try process.run(); process.waitUntilExit()
+                    let exists = FileManager.default.fileExists(atPath: output.deletingLastPathComponent().appendingPathComponent(realName).path)
+                    note("Independent WindowServer capture \(realName): exit \(process.terminationStatus), file \(exists)", "Apple screencapture on this app's own window only")
+                    if process.terminationStatus == 0 && exists { shots.append(realName) }
+                } catch { note("Independent capture unavailable", "screencapture launch error") }
+            }
         }
         let detail: [[String: Any]] = windows.map { ["title": $0.title, "class": String(describing: type(of: $0)), "controller": $0.windowController.map { String(describing: type(of: $0)) } ?? "", "controls": inventory($0)] }
         try JSONSerialization.data(withJSONObject: detail, options: [.prettyPrinted, .sortedKeys]).write(to: output.deletingLastPathComponent().appendingPathComponent("\(stage)-controls.json"))

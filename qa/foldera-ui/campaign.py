@@ -45,7 +45,8 @@ def cases(smoke=False, extended=False, verify=False):
     if verify:
         result = [r for r in result if r["scenario"] in (
             "navigation", "layout-details", "rename-inline", "quick-open", "find-command",
-            "image-viewer", "new-folder", "new-document")]
+            "image-viewer", "new-folder", "new-document", "sync-run", "rename-sheet",
+            "permanent-delete-cancel", "compare-files", "connect-dialog", "image-toolbar")]
     for i, row in enumerate(result, 1):
         row["id"] = f"ui-{i:03d}"
     return result
@@ -109,6 +110,8 @@ def execute(binary, root, spec, attempt):
         with (left / "pending.bin").open("wb") as pending:
             pending.truncate(1024 * 1024)
     env = {**os.environ, "FOLDERA_UI_SCENARIO": spec["scenario"], "FOLDERA_UI_WIDTH": str(spec["width"])}
+    if root.name == "verify":
+        env["FOLDERA_UI_COMPOSITOR"] = "1"
     command = [str(binary), "--snapshot", str(left), str(destination / "capture.png"),
                "--size", f"{spec['width']}x740", "--" + spec["theme"], "--pane", "--select", "Reading.md",
                "--sync-library", str(destination / "sync-library")]

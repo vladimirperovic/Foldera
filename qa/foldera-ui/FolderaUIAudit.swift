@@ -275,6 +275,7 @@ private struct UIAuditFailure: Error, CustomStringConvertible {
             try await select(["Folder A"])
             try key(36, "\r")
             try await wait("Enter opens selected folder") { self.tab.location.url?.lastPathComponent == "Folder A" }
+            try await wait("Back control ready after asynchronous listing") { self.tab.backButton.isEnabled }
             try click(tab.backButton)
             try await wait("Back") { self.tab.location.url?.key == self.fixture.key }
             try await wait("Forward control ready after asynchronous listing") { self.tab.forwardButton.isEnabled }

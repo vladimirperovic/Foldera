@@ -26,12 +26,12 @@ final class ThumbnailSource {
     let image: CGImageSource
     private let file: File
 
-    init?(_ url: URL, openFile: (String) -> Int32 = { open($0, O_RDONLY) }) {
+    init?(_ url: URL, openFile: (String) -> Int32 = { open($0, O_RDONLY | O_NONBLOCK | O_CLOEXEC) }) {
         let descriptor = openFile(url.path)
         guard descriptor >= 0 else { return nil }
         let file = File(descriptor)
         var info = stat()
-        guard fstat(descriptor, &info) == 0, info.st_size > 0 else { return nil }
+        guard fstat(descriptor, &info) == 0, info.st_mode & S_IFMT == S_IFREG, info.st_size > 0 else { return nil }
         let retained = Unmanaged.passRetained(file)
         var callbacks = CGDataProviderDirectCallbacks(version: 0, getBytePointer: nil, releaseBytePointer: nil,
             getBytesAtPosition: { context, buffer, position, count in

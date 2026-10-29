@@ -351,7 +351,7 @@ extension ExplorerTab: NSMenuItemValidation {
                 // Folders measured before now hold more (or less).
                 UsageCache.changed(folder)
                 if move { urls.forEach { UsageCache.changed($0.deletingLastPathComponent()) } }
-                FileUndo.record(outcome.changes, name: move ? "Move" : "Copy")
+                if let undo = outcome.preparedUndo { FileUndo.record(undo, name: move ? "Move" : "Copy") }
                 FileOps.report(outcome.failures)
                 then?(outcome)
                 guard let self else { return }
@@ -492,11 +492,19 @@ extension ExplorerTab: NSMenuItemValidation {
     /// The picture itself rather than the file, for an editor or a document.
     @objc func copyImage(_ sender: Any?) {
         guard selectedItems.count == 1, let item = selectedItems.first, isPicture(item) else { return NSSound.beep() }
-        let url = item.url
+        copyImage(item.url)
+    }
+
+    func copyImage(_ url: URL, pasteboard: NSPasteboard = .general,
+                   read: @escaping (URL) -> Data? = { ImageFiles.clipboardData($0, quarterTurns: 0) },
+                   finished: @escaping () -> Void = {}) {
+        let generation = pasteboard.changeCount
         DispatchQueue.global(qos: .userInitiated).async {
-            let data = ImageFiles.clipboardData(url, quarterTurns: 0)
+            let data = read(url)
             DispatchQueue.main.async {
-                if !ImageFiles.writeClipboard(data, to: .general) { NSSound.beep() }
+                defer { finished() }
+                guard pasteboard.changeCount == generation else { return }
+                if !ImageFiles.writeClipboard(data, to: pasteboard) { NSSound.beep() }
             }
         }
     }
@@ -864,13 +872,15 @@ extension ExplorerTab: NSMenuItemValidation {
     }
 
     func resort(using sortItems: @escaping ([FileItem], SortSpec) -> [FileItem] = { $0.sorted(by: $1) }) {
-        pendingSelection = Set(selectedItems.map(\.key))
         sortGeneration += 1
-        if searchRunning { searchSorted = true }
+        sortPending = false
+        if isSearching { searchSorted = true }
+        guard renamingKey == nil else { sortDeferred = true; return }
+        sortDeferred = false
+        pendingSelection = Set(selectedItems.map(\.key))
         // A big folder takes a moment to sort by name, and sorting by tags
         // reads every file's; do it off the main thread, as loading does.
-        // Search results keep arriving, so they sort here.
-        guard items.count > 2000 || sort.key == .tags, !isSearching else {
+        guard items.count > 2000 || sort.key == .tags else {
             items = sortItems(items, sort)
             return showItems()
         }
@@ -882,11 +892,25 @@ extension ExplorerTab: NSMenuItemValidation {
         let order = sort
         let generation = (load: loadGeneration, sort: sortGeneration)
         let revision = itemsRevision
+        sortPending = true
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             let sorted = sortItems(unsorted, order)
             DispatchQueue.main.async {
-                guard let self, generation == (self.loadGeneration, self.sortGeneration),
-                      revision == self.itemsRevision, order == self.sort else { return }
+                guard let self, generation == (self.loadGeneration, self.sortGeneration), order == self.sort else { return }
+                self.sortPending = false
+                // Retain background tag reads on the UI instances too. A
+                // later search batch otherwise rereads every prior result.
+                for item in sorted where originals[item.key]?.knownTags == nil {
+                    if let tags = item.knownTags { originals[item.key]?.tags = tags }
+                }
+                guard self.renamingKey == nil else { self.sortDeferred = true; return }
+                guard revision == self.itemsRevision else {
+                    // Incoming batches were appended without assuming the
+                    // old snapshot was sorted. One next pass includes them.
+                    if self.isSearching && self.searchSorted { self.resort(using: sortItems) }
+                    return
+                }
+                self.pendingSelection = Set(self.selectedItems.map(\.key))
                 self.items = sorted.compactMap { originals[$0.key] }
                 self.showItems()
             }

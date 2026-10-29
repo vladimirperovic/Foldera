@@ -436,20 +436,25 @@ enum Sync {
 
     /// Byte by byte, with the SHA-256 of what both hold when they are the
     /// same; nil when either can't be read.
-    static func sameBytes(_ a: URL, _ b: URL, cancelled: CancelFlag) -> (Bool, String?)? {
-        guard let x = FileHandle(forReadingAtPath: a.path), let y = FileHandle(forReadingAtPath: b.path) else { return nil }
-        defer {
-            try? x.close()
-            try? y.close()
-        }
+    static func sameBytes(_ a: URL, _ b: URL, cancelled: CancelFlag, read: (Int64) -> Void = { _ in }) -> (Bool, String?)? {
+        guard !cancelled.isSet, let x = StableFileReader(a), let y = StableFileReader(b) else { return nil }
         var sha = SHA256()
+        var done: Int64 = 0
         do {
             while !cancelled.isSet {
-                let p = try x.read(upToCount: 1 << 20) ?? Data()
-                let q = try y.read(upToCount: 1 << 20) ?? Data()
-                if p != q { return (false, nil) }
-                if p.isEmpty { return (true, Data(sha.finalize()).base64EncodedString()) }
+                let p = try x.handle.read(upToCount: 1 << 20) ?? Data()
+                let q = try y.handle.read(upToCount: 1 << 20) ?? Data()
+                if p != q {
+                    guard !cancelled.isSet, x.isCurrent, y.isCurrent else { return nil }
+                    return (false, nil)
+                }
+                if p.isEmpty {
+                    guard !cancelled.isSet, done == x.size, done == y.size, x.isCurrent, y.isCurrent else { return nil }
+                    return (true, Data(sha.finalize()).base64EncodedString())
+                }
                 sha.update(data: p)
+                done += Int64(p.count)
+                read(done)
             }
         } catch {}
         return nil
@@ -462,14 +467,16 @@ enum Sync {
 
     /// The SHA-256 itself, read a megabyte at a time; `read` hears how far it got.
     static func digest(_ url: URL, cancelled: CancelFlag, read: (Int64) -> Void = { _ in }) -> Data? {
-        guard let file = FileHandle(forReadingAtPath: url.path) else { return nil }
-        defer { try? file.close() }
+        guard !cancelled.isSet, let file = StableFileReader(url) else { return nil }
         var sha = SHA256()
         var done: Int64 = 0
         do {
             while !cancelled.isSet {
-                let chunk = try file.read(upToCount: 1 << 20) ?? Data()
-                if chunk.isEmpty { return Data(sha.finalize()) }
+                let chunk = try file.handle.read(upToCount: 1 << 20) ?? Data()
+                if chunk.isEmpty {
+                    guard !cancelled.isSet, done == file.size, file.isCurrent else { return nil }
+                    return Data(sha.finalize())
+                }
                 sha.update(data: chunk)
                 done += Int64(chunk.count)
                 read(done)
@@ -980,6 +987,8 @@ enum Sync {
         }
         struct Outcome {
             var changes: [Change] = []
+            /// Prepared off the UI thread for an interactive, reversible run.
+            var preparedUndo: FileUndo.Prepared?
             var events: [SyncLibrary.Event] = []
             var failures: [String] = []
             var copied = 0
@@ -1025,10 +1034,13 @@ enum Sync {
 
         func cancel() { cancelled.set() }
 
-        func run(progress report: @escaping (Transfer.Progress) -> Void, done: @escaping (Outcome) -> Void) {
+        func run(progress report: @escaping (Transfer.Progress) -> Void,
+                 prepareUndo: @escaping ([Change]) -> FileUndo.Prepared = FileUndo.prepare,
+                 done: @escaping (Outcome) -> Void) {
             self.report = report
             DispatchQueue.global(qos: .userInitiated).async {
-                let outcome = self.perform()
+                var outcome = self.perform()
+                if !self.permanently { outcome.preparedUndo = prepareUndo(outcome.changes) }
                 DispatchQueue.main.async { done(outcome) }
             }
         }

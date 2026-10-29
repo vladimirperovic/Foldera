@@ -36,18 +36,26 @@ final class ImageTextCopy {
     private let cancelled = CancelFlag()
     private let alert = NSAlert()
     private let pasteboard: NSPasteboard
+    private let clipboardChange: Int
     private weak var parent: NSWindow?
     private var result: Result<String, Error>?
 
-    private init(pasteboard: NSPasteboard) { self.pasteboard = pasteboard }
-
-    static func start(_ url: URL, in window: NSWindow, pasteboard: NSPasteboard = .general) {
-        guard window.attachedSheet == nil else { return }
-        let job = ImageTextCopy(pasteboard: pasteboard)
-        job.run(url, in: window)
+    private init(pasteboard: NSPasteboard) {
+        self.pasteboard = pasteboard
+        clipboardChange = pasteboard.changeCount
     }
 
-    private func run(_ url: URL, in window: NSWindow) {
+    static func start(_ url: URL, in window: NSWindow, pasteboard: NSPasteboard = .general,
+                      recognize: @escaping (URL, VNRecognizeTextRequest, CancelFlag) throws -> String = {
+                          try ImageText.recognize($0, request: $1, cancelled: $2)
+                      }) {
+        guard window.attachedSheet == nil else { return }
+        let job = ImageTextCopy(pasteboard: pasteboard)
+        job.run(url, in: window, recognize: recognize)
+    }
+
+    private func run(_ url: URL, in window: NSWindow,
+                     recognize: @escaping (URL, VNRecognizeTextRequest, CancelFlag) throws -> String) {
         parent = window
         alert.messageText = "Reading text from image…"
         alert.informativeText = url.lastPathComponent
@@ -66,6 +74,9 @@ final class ImageTextCopy {
             }
             switch result {
             case .success(let text) where !text.isEmpty:
+                // Recognition can finish after a Copy in another window or
+                // app. The newer clipboard contents belong to that action.
+                guard pasteboard.changeCount == clipboardChange else { return }
                 pasteboard.clearContents()
                 pasteboard.setString(text, forType: .string)
             case .success:
@@ -78,7 +89,7 @@ final class ImageTextCopy {
             }
         }
         Self.recognitions.addOperation { [self] in
-            let recognized = autoreleasepool { Result { try ImageText.recognize(url, request: request, cancelled: cancelled) } }
+            let recognized = autoreleasepool { Result { try recognize(url, request, cancelled) } }
             DispatchQueue.main.async { [self] in
                 guard !cancelled.isSet, let parent, parent.attachedSheet === alert.window else { return }
                 result = recognized

@@ -25,6 +25,37 @@ enum ImageFiles {
         }
     }
 
+    struct Cached {
+        let loaded: Loaded
+        let revision: FileOps.Revision
+    }
+
+    /// Validate cached pictures off the main thread, including their symlink
+    /// targets. A same-size edit with a restored mtime still changes ctime.
+    /// Never associate a decode with a revision read after its bytes changed.
+    static func readValidated(_ url: URL, maxPixels: Int, cached: Cached? = nil, cancelled: CancelFlag = CancelFlag(),
+                              decode: (URL, Int) -> Loaded? = { ImageFiles.decodeBitmap($0, maxPixels: $1) ?? ImageFiles.decodeOther($0) }) -> Cached? {
+        func revision() -> FileOps.Revision? { FileOps.revision(of: url.resolvingSymlinksInPath()) }
+        for _ in 0..<2 {
+            if cancelled.isSet { return nil }
+            guard let before = revision() else { return nil }
+            if let cached, cached.revision == before { return cached }
+            guard let loaded = decode(url, maxPixels) else { return nil }
+            if cancelled.isSet { return nil }
+            if revision() == before { return Cached(loaded: loaded, revision: before) }
+        }
+        return nil
+    }
+
+    /// A sharper decode can replace the pixels without changing the current
+    /// zoom only if it belongs to the version whose geometry is on screen.
+    static func readRefinement(_ url: URL, matching revision: FileOps.Revision, cancelled: CancelFlag = CancelFlag(),
+                               decode: (URL) -> Loaded? = { ImageFiles.decodeBitmap($0) }) -> Cached? {
+        guard let full = readValidated(url, maxPixels: Int.max, cancelled: cancelled, decode: { url, _ in decode(url) }),
+              full.revision == revision else { return nil }
+        return full
+    }
+
     /// The most pixels any screen here can show across: enough for fitting a picture to any window.
     static var screenPixels: Int {
         Int(NSScreen.screens.map { max($0.frame.width, $0.frame.height) * $0.backingScaleFactor }.max() ?? 3840)
@@ -54,7 +85,7 @@ enum ImageFiles {
         // Animations (GIF, animated WebP) stay NSImages, which NSImageView
         // plays. A JPEG with more than one picture holds a camera's preview
         // (MPF) or a stereo pair: the photo is the first, decoded as any other.
-        if CGImageSourceGetCount(source) > 1, !isJPEG(source), let image = NSImage(contentsOf: url),
+        if CGImageSourceGetCount(source) > 1, !hasStillFrames(source), let image = NSImage(contentsOf: url),
            let rep = image.representations.first as? NSBitmapImageRep {
             return Loaded(image: image, pixels: NSSize(width: rep.pixelsWide, height: rep.pixelsHigh))
         }
@@ -71,10 +102,15 @@ enum ImageFiles {
         return Loaded(image: NSImage(cgImage: cg, size: size), pixels: size, full: upright ?? size)
     }
 
-    private static func isJPEG(_ source: CGImageSource) -> Bool {
+    private static func hasStillFrames(_ source: CGImageSource) -> Bool {
         guard let found = CGImageSourceGetType(source) else { return false }
         let id = found as String
-        return UTType(id)?.conforms(to: .jpeg) == true || id == "public.mpo-image"
+        let type = UTType(id)
+        // TIFF pages and RAW/JPEG previews are not animations.
+        // Loading them as NSImage bypasses the screen-sized decode and can
+        // retain every full-resolution page of a large scan.
+        return type?.conforms(to: .jpeg) == true || type?.conforms(to: .tiff) == true ||
+            type?.conforms(to: .rawImage) == true || id == "public.mpo-image"
     }
 
     /// The picture's pixel size standing up, as the camera's orientation turns it.
@@ -440,7 +476,7 @@ final class ImageViewer: NSWindowController, NSWindowDelegate, NSMenuItemValidat
     var magnification: CGFloat { scroll.magnification }
     /// Where the picture can go, above the thumbnails when they show.
     var pictureArea: NSSize { scroll.frame.size }
-    private var cache: [String: ImageFiles.Loaded] = [:]
+    private var cache: [String: ImageFiles.Cached] = [:]
     /// The picture on screen and the ones read ahead, side by side.
     private static let decodes = BackgroundTask.queue("Foldera.image-decoding", limit: 3)
     private var inFlight: [String: BackgroundTask] = [:]
@@ -710,16 +746,18 @@ final class ImageViewer: NSWindowController, NSWindowDelegate, NSMenuItemValidat
         window?.representedURL = url
         message.stringValue = ""
         if let loaded = cache[url.key] {
-            display(loaded)
+            display(loaded.loaded)
         } else {
             original = nil
             shown = nil
             canvas.image = nil
             spinner.startAnimation(nil)
-            load(url)
-            inFlight[url.key]?.hurry()
             showRough(url)
         }
+        // Cached neighbours remain instant, then validate their disk revision
+        // in the background in case another app edited or replaced the file.
+        load(url)
+        inFlight[url.key]?.hurry()
         prefetch()
         updateLabels()
         showChrome()
@@ -765,15 +803,25 @@ final class ImageViewer: NSWindowController, NSWindowDelegate, NSMenuItemValidat
         let task = BackgroundTask(queue: Self.decodes)
         inFlight[url.key] = task
         let screen = ImageFiles.screenPixels
-        task.run({ ImageFiles.decodeBitmap(url, maxPixels: screen) ?? ImageFiles.decodeOther(url) }) { [weak self] bitmap in
+        let cached = cache[url.key]
+        task.runCancellable({ cancelled in
+            ImageFiles.readValidated(url, maxPixels: screen, cached: cached, cancelled: cancelled)
+        }) { [weak self] bitmap in
             guard let self else { return }
             self.inFlight[url.key] = nil
             guard let loaded = bitmap else {
+                self.cache[url.key] = nil
                 if url.key == self.current?.key { self.failed(url) }
                 return
             }
             self.cache[url.key] = loaded
-            if url.key == self.current?.key { self.display(loaded) }
+            if url.key == self.current?.key, cached?.revision != loaded.revision {
+                self.sharpen.cancel()
+                self.sharpening = false
+                self.labelledSize = nil
+                self.sizeRead.cancel()
+                self.display(loaded.loaded)
+            }
         }
     }
 
@@ -808,6 +856,10 @@ final class ImageViewer: NSWindowController, NSWindowDelegate, NSMenuItemValidat
 
     private func failed(_ url: URL) {
         rough.cancel()
+        sharpen.cancel()
+        sharpening = false
+        original = nil
+        shown = nil
         spinner.stopAnimation(nil)
         canvas.image = nil
         message.stringValue = "Foldera can't display “\(url.lastPathComponent)”.\nPress E to open it in its own app."
@@ -838,16 +890,23 @@ final class ImageViewer: NSWindowController, NSWindowDelegate, NSMenuItemValidat
     /// one and swap it in, without moving the view. It is not kept once you move on.
     private func sharpenIfNeeded() {
         guard let original, !original.isFull, !sharpening, let url = current, let decoded = shown?.pixels,
-              let window else { return }
+              let revision = cache[url.key]?.revision, let window else { return }
         let needed = canvas.frame.width * scroll.magnification * window.backingScaleFactor
         guard needed > decoded.width * 1.05 else { return }
         sharpening = true
-        sharpen.run({ ImageFiles.decodeBitmap(url) }) { [weak self] full in
+        sharpen.runCancellable({ cancelled in
+            ImageFiles.readRefinement(url, matching: revision, cancelled: cancelled)
+        }) { [weak self] full in
             guard let self, self.sharpening, url.key == self.current?.key else { return }
             self.sharpening = false
-            guard let full else { return }
-            self.original = full
-            let turned = ImageFiles.rotated(full, quarterTurns: self.turns)
+            guard let full, full.revision == self.cache[url.key]?.revision else {
+                // A different image needs fresh dimensions, labels and fit,
+                // rather than being drawn into the previous image's canvas.
+                self.load(url)
+                return
+            }
+            self.original = full.loaded
+            let turned = ImageFiles.rotated(full.loaded, quarterTurns: self.turns)
             self.shown = turned
             self.canvas.image = turned.image
         }
@@ -1310,6 +1369,10 @@ final class ImageViewer: NSWindowController, NSWindowDelegate, NSMenuItemValidat
     }
 
     // MARK: Window
+
+    func windowDidBecomeKey(_ notification: Notification) {
+        if let url = current { load(url) }
+    }
 
     func windowDidResize(_ notification: Notification) {
         if fitMode { applyFit() }

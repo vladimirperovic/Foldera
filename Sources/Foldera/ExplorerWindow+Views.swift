@@ -216,6 +216,14 @@ extension ExplorerTab: NSSearchFieldDelegate {
         field.drawsBackground = false
         let deferred = reloadDeferred
         reloadDeferred = false
+        let deferredSort = sortDeferred
+        sortDeferred = false
+        let generation = loadGeneration
+        defer {
+            // A fresh ordinary listing already sorts itself. A search being
+            // restarted needs its ordering restored for subsequent batches.
+            if deferredSort && (isSearching || loadGeneration == generation) { resort() }
+        }
         guard let item = items.first(where: { $0.key == key }) else {
             load()
             return

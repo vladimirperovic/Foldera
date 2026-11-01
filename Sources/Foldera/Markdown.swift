@@ -776,7 +776,10 @@ enum TextFile {
     /// Coordinated writers are serialized; uncoordinated changes are checked
     /// again immediately before replacement (no filesystem compare-and-swap exists).
     static func write(_ text: String, to url: URL, expected: Snapshot? = nil,
-                      beforeCommit: () throws -> Void = {}) throws {
+                      beforeCommit: () throws -> Void = {},
+                      replace: (URL, URL) throws -> Void = { target, ready in
+                          _ = try FileManager.default.replaceItemAt(target, withItemAt: ready)
+                      }) throws {
         try FileOps.refuseInArchive([url])
         let approved = try expected ?? snapshot(url)
         try FileOps.refuseInArchive([approved.target])
@@ -802,7 +805,10 @@ enum TextFile {
                     }
                 }
                 let staging = try FileOps.stagingFolder(beside: target)
-                defer { FileOps.removeOwn(staging) }
+                var replacing = false
+                // Foundation can report a failed replacement with the original
+                // relocated to a temporary URL. Keep all recovery files then.
+                defer { if !replacing { FileOps.removeOwn(staging) } }
                 let ready = staging.appendingPathComponent(target.lastPathComponent)
                 if approved.revision != nil {
                     // Copy first to carry ACLs, extended attributes and resource forks.
@@ -818,7 +824,12 @@ enum TextFile {
                 try beforeCommit()
                 try validate()
                 if approved.revision != nil {
-                    _ = try FileManager.default.replaceItemAt(target, withItemAt: ready)
+                    replacing = true
+                    do { try replace(target, ready) }
+                    catch {
+                        throw OpError("\(error.localizedDescription)\nRecovery files were kept in \(staging.path).")
+                    }
+                    replacing = false
                 } else {
                     guard renamex_np(ready.path, target.path, UInt32(RENAME_EXCL)) == 0 else {
                         throw NSError(domain: NSPOSIXErrorDomain, code: Int(errno))

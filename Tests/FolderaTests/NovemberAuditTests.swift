@@ -136,6 +136,22 @@ private func novemberPicture(_ url: URL, width: Int, height: Int, type: String =
         #expect(TextFile.read(first) == "original" && TextFile.read(second) == "second")
     }
 
+    @Test func aFailedReplacementKeepsTheRelocatedOriginalAndDraftForRecovery() throws {
+        let files = try NovemberFiles(), target = try files.file("draft.md")
+        var original: URL?, draft: URL?
+        #expect(throws: OpError.self) {
+            try TextFile.write("edited", to: target, replace: { target, ready in
+                let backup = ready.deletingLastPathComponent().appendingPathComponent("original.md")
+                try FileManager.default.moveItem(at: target, to: backup)
+                original = backup
+                draft = ready
+                throw OpError("Simulated replacement failure after relocation")
+            })
+        }
+        #expect(TextFile.read(try #require(original)) == "original")
+        #expect(TextFile.read(try #require(draft)) == "edited")
+    }
+
     @Test func checksumListsRejectLargeInputAndLongRecordsAndHonorCancellation() throws {
         let files = try NovemberFiles(), list = try files.file("checks.sha256", String(repeating: "a", count: 64) + "  name\r\n")
         #expect(try Checksum.readEntries(list, cancelled: CancelFlag()).first?.name == "name")
@@ -155,7 +171,8 @@ private func novemberPicture(_ url: URL, width: Int, height: Int, type: String =
         if currentExists { try files.file("Archives/current.txt") }
         var disposed: [URL] = []
         try ArchiveFolders.prepareForLaunch(at: files.url("Archives")) { disposed.append($0) }
-        #expect(disposed.contains(oldFile.deletingLastPathComponent()))
+        #expect(disposed.map { $0.resolvingSymlinksInPath().path }
+            .contains(oldFile.deletingLastPathComponent().resolvingSymlinksInPath().path))
         #expect(disposed.count == (currentExists ? 2 : 1))
         let fresh = try files.file("Archives/new.txt")
         disposed.forEach { FileOps.removeOwn($0) }

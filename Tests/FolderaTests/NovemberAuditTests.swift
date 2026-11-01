@@ -166,6 +166,7 @@ private func novemberPicture(_ url: URL, width: Int, height: Int, type: String =
 @Suite(.serialized) @MainActor struct NovemberEditorLoading {
     @Test func editorOpensBeforeItsBackgroundReadAndClosedLoadsCannotReturn() async throws {
         _ = NSApplication.shared
+        Awake.hold()
         let files = try NovemberFiles(), file = try files.file("draft.md", "# Loaded")
         let editor = try #require(MarkdownEditor.show(file))
         defer { editor.close() }

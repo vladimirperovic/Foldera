@@ -22,13 +22,21 @@ enum ImageDecodeLimits {
                      totalLimit: Int = animationPixels, frameLimit: Int = frames) -> Bool {
         let count = CGImageSourceGetCount(source)
         guard count > 0, count <= frameLimit else { return false }
-        var remaining = totalLimit
+        var widest = 0, tallest = 0
         for index in 0..<count {
             guard let size = size(source, at: index), size.width <= dimension, size.height <= dimension,
-                  size.width <= min(pixelLimit, remaining) / size.height else { return false }
-            remaining -= size.width * size.height
+                  size.width <= pixelLimit / size.height else { return false }
+            widest = max(widest, size.width)
+            tallest = max(tallest, size.height)
         }
-        return true
+        // Delta frames can be tiny while AppKit retains a composited canvas
+        // for each. Budget every frame at the largest canvas dimensions.
+        if let properties = CGImageSourceCopyProperties(source, nil) as? [CFString: Any] {
+            widest = max(widest, properties[kCGImagePropertyPixelWidth] as? Int ?? 0)
+            tallest = max(tallest, properties[kCGImagePropertyPixelHeight] as? Int ?? 0)
+        }
+        return widest <= dimension && tallest <= dimension && widest <= pixelLimit / tallest &&
+            count <= totalLimit / widest / tallest
     }
 
     static func thumbnailDimension(width: Double, height: Double, requested: Int) -> Int {

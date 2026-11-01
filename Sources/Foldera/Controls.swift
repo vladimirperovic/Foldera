@@ -926,11 +926,14 @@ final class Thumbnails {
     /// The photo, `pixels` across at most. ImageIO decodes it straight to
     /// that size, without the whole photo in memory on the way. Safe off the main thread.
     static func decode(_ source: CGImageSource, pixels: Int) -> CGImage? {
-        CGImageSourceCreateThumbnailAtIndex(source, thumbnailIndex(source, pixels: pixels), [
+        let index = thumbnailIndex(source, pixels: pixels)
+        guard let size = ImageDecodeLimits.size(source, at: index) else { return nil }
+        let limit = ImageDecodeLimits.thumbnailDimension(width: Double(size.width), height: Double(size.height), requested: pixels)
+        return CGImageSourceCreateThumbnailAtIndex(source, index, [
             kCGImageSourceCreateThumbnailFromImageAlways: true,
             kCGImageSourceCreateThumbnailWithTransform: true,
             kCGImageSourceShouldCacheImmediately: true,
-            kCGImageSourceThumbnailMaxPixelSize: pixels,
+            kCGImageSourceThumbnailMaxPixelSize: limit,
         ] as CFDictionary)
     }
 

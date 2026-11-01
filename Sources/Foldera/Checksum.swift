@@ -80,22 +80,64 @@ enum Checksum {
         var problems: [String] = []
     }
 
+    static let maximumListBytes = 16 << 20
+    static let maximumLineBytes = 64 << 10
+    static let maximumEntries = 1_000_000
+
+    /// Keep both encoded input and parsed records bounded, checking cancellation
+    /// between chunks and records. Never verify a prefix of a rejected list.
+    static func readEntries(_ list: URL, cancelled: CancelFlag,
+                            byteLimit: Int = maximumListBytes) throws -> [(hash: String, name: String)] {
+        guard !cancelled.isSet else { throw CancellationError() }
+        guard let reader = StableFileReader(list) else { throw OpError("The checksum list couldn't be read.") }
+        guard reader.size <= Int64(byteLimit) else { throw OpError("The checksum list exceeds the 16 MiB limit.") }
+        var pending = Data(), count = 0
+        var found: [(hash: String, name: String)] = []
+        func record(_ bytes: Data) throws {
+            guard !cancelled.isSet else { throw CancellationError() }
+            guard bytes.count <= maximumLineBytes else { throw OpError("A checksum line exceeds the 64 KiB limit.") }
+            guard let text = String(data: bytes, encoding: .utf8) else { throw OpError("The checksum list is not UTF-8 text.") }
+            found.append(contentsOf: entries(in: text))
+            guard found.count <= maximumEntries else { throw OpError("The checksum list has too many entries.") }
+        }
+        while true {
+            guard !cancelled.isSet else { throw CancellationError() }
+            let chunk = try reader.handle.read(upToCount: min(64 << 10, max(1, byteLimit - count + 1))) ?? Data()
+            if chunk.isEmpty { break }
+            guard chunk.count <= byteLimit - count else { throw OpError("The checksum list exceeds the 16 MiB limit.") }
+            count += chunk.count
+            pending.append(chunk)
+            while let newline = pending.firstIndex(of: 10) {
+                try record(Data(pending[..<newline]))
+                pending = Data(pending[pending.index(after: newline)...])
+            }
+            guard pending.count <= maximumLineBytes else { throw OpError("A checksum line exceeds the 64 KiB limit.") }
+        }
+        if !pending.isEmpty { try record(pending) }
+        guard reader.isCurrent else { throw OpError("The checksum list changed while being read.") }
+        return found
+    }
+
     /// Run off the main thread: a checksum list can live on a disconnected
     /// share and can itself name thousands of files. Check each path once.
     static func verification(_ lists: [URL], cancelled: CancelFlag) -> Verification {
         var plan = Verification()
         for list in lists {
             if cancelled.isSet { return plan }
-            guard let reader = StableFileReader(list),
-                  let bytes = try? reader.handle.readToEnd(), reader.isCurrent,
-                  let text = String(data: bytes, encoding: .utf8) else {
-                plan.problems.append("“\(list.lastPathComponent)” couldn't be read.")
+            let entries: [(hash: String, name: String)]
+            do { entries = try readEntries(list, cancelled: cancelled) }
+            catch is CancellationError { return plan }
+            catch {
+                plan.problems.append("“\(list.lastPathComponent)”: \(error.localizedDescription)")
                 continue
             }
-            let entries = entries(in: text)
             if entries.isEmpty { plan.problems.append("“\(list.lastPathComponent)” holds no SHA-256 checksums.") }
             for entry in entries {
                 if cancelled.isSet { return plan }
+                guard plan.present.count + plan.problems.count < maximumEntries else {
+                    plan.problems.append("There are too many checksum entries. Verify fewer lists at a time.")
+                    return plan
+                }
                 let url = URL(fileURLWithPath: entry.name, relativeTo: list.deletingLastPathComponent()).standardizedFileURL
                 if FileOps.exists(url) { plan.present.append((url, entry.hash)) }
                 else { plan.problems.append("“\(url.lastPathComponent)” is missing.") }

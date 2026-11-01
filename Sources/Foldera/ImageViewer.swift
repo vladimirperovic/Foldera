@@ -12,6 +12,8 @@ enum ImageFiles {
         let pixels: NSSize?
         /// Pixel size of the picture itself, upright. Larger than `pixels` when decoded at screen size.
         var full: NSSize?
+        var limited = false
+        var note: String?
 
         init(image: NSImage, pixels: NSSize?, full: NSSize? = nil) {
             self.image = image
@@ -51,7 +53,7 @@ enum ImageFiles {
     /// zoom only if it belongs to the version whose geometry is on screen.
     static func readRefinement(_ url: URL, matching revision: FileOps.Revision, cancelled: CancelFlag = CancelFlag(),
                                decode: (URL) -> Loaded? = { ImageFiles.decodeBitmap($0) }) -> Cached? {
-        guard let full = readValidated(url, maxPixels: Int.max, cancelled: cancelled, decode: { url, _ in decode(url) }),
+        guard let full = readValidated(url, maxPixels: ImageDecodeLimits.dimension, cancelled: cancelled, decode: { url, _ in decode(url) }),
               full.revision == revision else { return nil }
         return full
     }
@@ -85,21 +87,30 @@ enum ImageFiles {
         // Animations (GIF, animated WebP) stay NSImages, which NSImageView
         // plays. A JPEG with more than one picture holds a camera's preview
         // (MPF) or a stereo pair: the photo is the first, decoded as any other.
-        if CGImageSourceGetCount(source) > 1, !hasStillFrames(source), let image = NSImage(contentsOf: url),
+        let animation = CGImageSourceGetCount(source) > 1 && !hasStillFrames(source)
+        if animation, ImageDecodeLimits.fits(source), let image = NSImage(contentsOf: url),
            let rep = image.representations.first as? NSBitmapImageRep {
             return Loaded(image: image, pixels: NSSize(width: rep.pixelsWide, height: rep.pixelsHigh))
         }
         let upright = uprightSize(of: source)
         let largest = Int(max(upright?.width ?? 1, upright?.height ?? 1))
+        let limit = ImageDecodeLimits.thumbnailDimension(width: Double(upright?.width ?? 1),
+            height: Double(upright?.height ?? 1), requested: maxPixels ?? largest)
         let options: [CFString: Any] = [
             kCGImageSourceCreateThumbnailFromImageAlways: true,
             kCGImageSourceCreateThumbnailWithTransform: true,
             kCGImageSourceShouldCacheImmediately: true,
-            kCGImageSourceThumbnailMaxPixelSize: min(maxPixels ?? largest, largest),
+            kCGImageSourceThumbnailMaxPixelSize: min(limit, largest),
         ]
         guard let cg = CGImageSourceCreateThumbnailAtIndex(source, 0, options as CFDictionary) else { return nil }
         let size = NSSize(width: cg.width, height: cg.height)
-        return Loaded(image: NSImage(cgImage: cg, size: size), pixels: size, full: upright ?? size)
+        var loaded = Loaded(image: NSImage(cgImage: cg, size: size), pixels: size, full: upright ?? size)
+        let ceiling = ImageDecodeLimits.thumbnailDimension(width: Double(upright?.width ?? 1),
+            height: Double(upright?.height ?? 1), requested: ImageDecodeLimits.dimension)
+        loaded.limited = !loaded.isFull && limit >= ceiling
+        if animation { loaded.note = "Animation too large — showing first frame" }
+        else if loaded.limited { loaded.note = "Preview resolution limited" }
+        return loaded
     }
 
     private static func hasStillFrames(_ source: CGImageSource) -> Bool {
@@ -226,6 +237,9 @@ enum ImageFiles {
 
     /// Vector formats and anything ImageIO passed on. Main thread.
     static func decodeOther(_ url: URL) -> Loaded? {
+        // A failed raster thumbnail must never retry through an unbounded
+        // NSImage decode. This fallback exists only for vector SVGs.
+        guard UTType(filenameExtension: url.pathExtension)?.conforms(to: .svg) == true else { return nil }
         guard let image = NSImage(contentsOf: url), image.size.width > 0, image.size.height > 0 else { return nil }
         if let rep = image.representations.first as? NSBitmapImageRep {
             return Loaded(image: image, pixels: NSSize(width: rep.pixelsWide, height: rep.pixelsHigh))
@@ -249,7 +263,10 @@ enum ImageFiles {
             return true
         }
         let swap = { (size: NSSize) in turns % 2 == 1 ? NSSize(width: size.height, height: size.width) : size }
-        return Loaded(image: image, pixels: loaded.pixels.map(swap), full: loaded.full.map(swap))
+        var turned = Loaded(image: image, pixels: loaded.pixels.map(swap), full: loaded.full.map(swap))
+        turned.limited = loaded.limited
+        turned.note = loaded.note
+        return turned
     }
 
     /// The picture itself at full size, turned as it is shown, as TIFF for
@@ -889,7 +906,7 @@ final class ImageViewer: NSWindowController, NSWindowDelegate, NSMenuItemValidat
     /// Zoomed in past what the screen-sized picture holds: decode the whole
     /// one and swap it in, without moving the view. It is not kept once you move on.
     private func sharpenIfNeeded() {
-        guard let original, !original.isFull, !sharpening, let url = current, let decoded = shown?.pixels,
+        guard let original, !original.isFull, !original.limited, !sharpening, let url = current, let decoded = shown?.pixels,
               let revision = cache[url.key]?.revision, let window else { return }
         let needed = canvas.frame.width * scroll.magnification * window.backingScaleFactor
         guard needed > decoded.width * 1.05 else { return }
@@ -909,6 +926,7 @@ final class ImageViewer: NSWindowController, NSWindowDelegate, NSMenuItemValidat
             let turned = ImageFiles.rotated(full.loaded, quarterTurns: self.turns)
             self.shown = turned
             self.canvas.image = turned.image
+            self.updateLabels()
         }
     }
 
@@ -1041,6 +1059,7 @@ final class ImageViewer: NSWindowController, NSWindowDelegate, NSMenuItemValidat
         }
         if let size = labelledSize?.text { parts.append(size) }
         if shown != nil { parts.append("\(Int((scroll.magnification * 100).rounded()))%") }
+        if let note = shown?.note { parts.append(note) }
         metaLabel.stringValue = parts.joined(separator: "   ")
     }
 

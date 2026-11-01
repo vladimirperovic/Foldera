@@ -336,7 +336,16 @@ enum Markdown {
         text = replace(text, #"\\([\\`*_{}\[\]()#+\-.!|~<>])"#, until: deadline) { keep(escape($0[1])) }
         text = escape(text)
         text = replace(text, #"!\[([^\]]*)\]\(([^)\s]+)(?: &quot;([^&]*)&quot;)?\)"#, until: deadline) {
-            keep("<img src=\"\(safe($0[2]))\" alt=\"\($0[1])\"\($0[3].isEmpty ? "" : " title=\"\($0[3])\"")>")
+            // Only relative pictures go through the bounded local handler.
+            // A remote picture is an explicit browser link, never a request
+            // made merely by opening the document or refreshing its draft.
+            let address = $0[2]
+            if (address.contains(":") && !address.hasPrefix("foldera-md://files/")) ||
+                address.hasPrefix("//") || address.contains("\\") {
+                let link = address.hasPrefix("//") ? "https:" + address : address
+                return keep("<a href=\"\(safe(link))\">Image not loaded: \($0[1].isEmpty ? "open image" : $0[1])</a>")
+            }
+            return keep("<img src=\"\(safe($0[2]))\" alt=\"\($0[1])\"\($0[3].isEmpty ? "" : " title=\"\($0[3])\"")>")
         }
         text = replace(text, #"\[([^\]]+)\]\(([^)\s]+)(?: &quot;([^&]*)&quot;)?\)"#, until: deadline) {
             keep("<a href=\"\(safe($0[2]))\"\($0[3].isEmpty ? "" : " title=\"\($0[3])\"")>\(emphasis($0[1], until: deadline))</a>")
@@ -365,7 +374,9 @@ enum Markdown {
     /// The same, from what `html` made of the text already.
     static func page(rendered body: String, base: URL, fontSize: Int = 14) -> String {
         """
-        <!DOCTYPE html><html><head><meta charset="utf-8"><base href="\(escape(base.absoluteString))">
+        <!DOCTYPE html><html><head><meta charset="utf-8">
+        <meta http-equiv="Content-Security-Policy" content="default-src 'none'; img-src foldera-md:; style-src 'unsafe-inline'; base-uri foldera-md:; form-action 'none'">
+        <base href="\(escape(base.absoluteString))">
         <style>
         :root { color-scheme: light dark; }
         body { font: \(fontSize)px/1.55 -apple-system, BlinkMacSystemFont, sans-serif; margin: 0; padding: 14px 18px 40px;
@@ -520,14 +531,18 @@ final class LocalPictures: NSObject, WKURLSchemeHandler {
     var page = ""
     var pageURL: URL { base.appendingPathComponent(Self.pageName) }
 
-    /// Serves `folder`, with up to two folders above it (never above the home folder or a drive).
-    func serve(_ folder: URL) {
+    /// Parent pictures are allowed only within this user's home. Documents
+    /// elsewhere (shared/system/removable folders) serve their own folder.
+    func serve(_ folder: URL, home: URL = FileManager.default.homeDirectoryForCurrentUser) {
         running.values.forEach { $0.cancel() }
         running.removeAll()
-        var top = folder.standardizedFileURL
-        let home = FileManager.default.homeDirectoryForCurrentUser.standardizedFileURL.path
-        for _ in 0..<2 where top.path != home && top.path != "/" && !isVolumeRoot(top) {
-            top.deleteLastPathComponent()
+        let folder = folder.resolvingSymlinksInPath().standardizedFileURL
+        var top = folder
+        let home = home.resolvingSymlinksInPath().standardizedFileURL.path
+        if top.path.hasPrefix(home + "/") {
+            for _ in 0..<2 where top.path != home && top.path != "/" && !isVolumeRoot(top) {
+                top.deleteLastPathComponent()
+            }
         }
         root = top
         let inside = String(folder.standardizedFileURL.path.dropFirst(top.path.count)).split(separator: "/")
@@ -536,6 +551,7 @@ final class LocalPictures: NSObject, WKURLSchemeHandler {
 
     /// The file an address in the page stands for, if it is inside what is served.
     func file(for url: URL) -> URL? {
+        guard url.scheme == Self.scheme, url.host == "files" else { return nil }
         // `..` past the top stays at the top, as a browser's address would;
         // older macOS keeps such a `..` in the URL's path.
         var parts: [Substring] = []
@@ -558,13 +574,12 @@ final class LocalPictures: NSObject, WKURLSchemeHandler {
     /// Chunked, bounded reads keep one large document from retaining all of
     /// its full-size photos at once. Cancellation is checked before each read.
     static func readImage(_ file: URL, limit: Int = maximumImageBytes, cancelled: () -> Bool) -> Data? {
-        guard limit >= 0, !cancelled(), let handle = try? FileHandle(forReadingFrom: file) else { return nil }
-        defer { try? handle.close() }
+        guard limit >= 0, !cancelled(), let reader = StableFileReader(file), reader.size <= Int64(limit) else { return nil }
         var result = Data()
         do {
             while !cancelled() {
-                guard let chunk = try handle.read(upToCount: min(1 << 20, max(limit - result.count + 1, 1))),
-                      !chunk.isEmpty else { return cancelled() ? nil : result }
+                guard let chunk = try reader.handle.read(upToCount: min(1 << 20, max(limit - result.count + 1, 1))),
+                      !chunk.isEmpty else { return cancelled() || !reader.isCurrent ? nil : result }
                 guard chunk.count <= limit - result.count else { return nil }
                 result.append(chunk)
             }
@@ -580,11 +595,12 @@ final class LocalPictures: NSObject, WKURLSchemeHandler {
     /// Oversized raster images still get a usable preview, without loading
     /// their entire original into Data or WebKit. Large SVGs stay bounded.
     static func pictureData(_ file: URL, kind: UTType, originalLimit: Int = maximumImageBytes,
+                            pixelLimit: Int = ImageDecodeLimits.pixels,
                             cancelled: () -> Bool) -> PictureData? {
         guard !cancelled() else { return nil }
         let attributes = try? FileManager.default.attributesOfItem(atPath: file.path)
         let size = (attributes?[.size] as? NSNumber)?.int64Value
-        if let size, size > Int64(originalLimit) {
+        func thumbnail() -> PictureData? {
             guard !kind.conforms(to: .svg), !cancelled(), let image = Thumbnails.decode(file, pixels: 2048),
                   !cancelled() else { return nil }
             let data = NSMutableData()
@@ -593,7 +609,15 @@ final class LocalPictures: NSObject, WKURLSchemeHandler {
             guard CGImageDestinationFinalize(output), !cancelled() else { return nil }
             return PictureData(body: data as Data, type: "image/png")
         }
+        if let size, size > Int64(originalLimit) { return thumbnail() }
         guard let data = readImage(file, limit: originalLimit, cancelled: cancelled) else { return nil }
+        if !kind.conforms(to: .svg) {
+            // Inspect exactly the bytes handed to WebKit, so a replacement
+            // between the metadata check and the read cannot bypass the limit.
+            guard let source = CGImageSourceCreateWithData(data as CFData,
+                [kCGImageSourceShouldCache: false] as CFDictionary) else { return nil }
+            if !ImageDecodeLimits.fits(source, pixelLimit: pixelLimit) { return thumbnail() }
+        }
         return PictureData(body: data, type: kind.preferredMIMEType ?? "application/octet-stream")
     }
 
@@ -672,21 +696,24 @@ final class MarkdownTextView: NSScrollView {
 /// Reading and saving a Markdown file without losing anyone's changes:
 /// what another app wrote since the file was read is not overwritten unasked.
 enum TextFile {
-    enum Conflict { case overwrite, reload, cancel }
+    enum Conflict { case overwrite(Snapshot), reload, cancel }
     static let maximumBytes = 32 << 20
 
     /// The renderer's preview limit is too late to bound reading the input.
     /// Reject an oversized document whole; never edit or save a partial read.
-    static func data(_ url: URL, limit: Int = maximumBytes) throws -> Data {
-        let file = try FileHandle(forReadingFrom: url)
-        defer { try? file.close() }
+    static func data(_ url: URL, limit: Int = maximumBytes, cancelled: CancelFlag = CancelFlag()) throws -> Data {
+        guard !cancelled.isSet else { throw CancellationError() }
+        guard let reader = StableFileReader(url) else { throw CocoaError(.fileReadUnknown) }
+        guard reader.size <= Int64(limit) else { throw OpError("This document exceeds the 32 MiB editor limit.") }
         var bytes = Data()
-        while let chunk = try file.read(upToCount: min(1 << 20, max(1, limit - bytes.count + 1))), !chunk.isEmpty {
+        while !cancelled.isSet, let chunk = try reader.handle.read(upToCount: min(1 << 20, max(1, limit - bytes.count + 1))), !chunk.isEmpty {
             guard bytes.count + chunk.count <= limit else {
                 throw OpError("This document is too large for the built-in text preview and editor (32 MiB maximum).")
             }
             bytes.append(chunk)
         }
+        guard !cancelled.isSet else { throw CancellationError() }
+        guard reader.isCurrent else { throw OpError("The document changed while being read.") }
         return bytes
     }
 
@@ -714,8 +741,10 @@ enum TextFile {
         return Document(text: text, encoding: encoding, prefix: prefix)
     }
 
-    static func read(_ url: URL) -> String? {
-        try? document(data(url)).text
+    static func read(_ url: URL) -> String? { read(url, cancelled: CancelFlag()) }
+
+    static func read(_ url: URL, cancelled: CancelFlag) -> String? {
+        try? document(data(url, cancelled: cancelled)).text
     }
 
     /// When the file last changed on disk (a fresh URL, since a URL keeps what it has read).
@@ -726,17 +755,86 @@ enum TextFile {
     /// Compare contents too: an external writer can preserve the modification date.
     static func hasChanged(_ url: URL, since saved: String?) -> Bool { read(url) != saved }
 
-    static func write(_ text: String, to url: URL) throws {
+    struct Snapshot {
+        let target: URL
+        let revision: FileOps.Revision?
+        let document: Document
+    }
+
+    static func snapshot(_ url: URL) throws -> Snapshot {
+        let target = url.resolvingSymlinksInPath()
+        let before = FileOps.revision(of: target)
+        let original = before != nil ? try document(data(target)) : Document(text: "", encoding: .utf8, prefix: Data())
+        guard FileOps.revision(of: target) == before, url.resolvingSymlinksInPath() == target else {
+            throw OpError("The document changed while being read. Try saving again.")
+        }
+        return Snapshot(target: target, revision: before, document: original)
+    }
+
+    /// Keep symlinks and metadata. Refuse hard-linked files instead of silently
+    /// splitting them or risking a partially written inode shared by other names.
+    /// Coordinated writers are serialized; uncoordinated changes are checked
+    /// again immediately before replacement (no filesystem compare-and-swap exists).
+    static func write(_ text: String, to url: URL, expected: Snapshot? = nil,
+                      beforeCommit: () throws -> Void = {}) throws {
         try FileOps.refuseInArchive([url])
-        let original = FileOps.exists(url) ? try document(data(url)) : Document(text: "", encoding: .utf8, prefix: Data())
-        guard let encoded = text.data(using: original.encoding, allowLossyConversion: false) else {
+        let approved = try expected ?? snapshot(url)
+        try FileOps.refuseInArchive([approved.target])
+        guard let encoded = text.data(using: approved.document.encoding, allowLossyConversion: false) else {
             throw OpError("The text cannot be saved in this file's original encoding.")
         }
-        try (original.prefix + encoded).write(to: url, options: .atomic)
+        let bytes = approved.document.prefix + encoded
+        var coordinationError: NSError?
+        var failure: Error?
+        NSFileCoordinator().coordinate(writingItemAt: approved.target, options: .forReplacing, error: &coordinationError) { target in
+            do {
+                func validate() throws {
+                    guard target == approved.target, url.resolvingSymlinksInPath() == approved.target,
+                          FileOps.revision(of: target) == approved.revision else {
+                        throw OpError("The document changed again before saving. Your draft is kept; try saving again.")
+                    }
+                }
+                try validate()
+                if approved.revision != nil {
+                    let attributes = try FileManager.default.attributesOfItem(atPath: target.path)
+                    guard (attributes[.referenceCount] as? NSNumber)?.intValue == 1 else {
+                        throw OpError("This document has hard links. Save a separate copy in another editor to avoid breaking those links.")
+                    }
+                }
+                let staging = try FileOps.stagingFolder(beside: target)
+                defer { FileOps.removeOwn(staging) }
+                let ready = staging.appendingPathComponent(target.lastPathComponent)
+                if approved.revision != nil {
+                    // Copy first to carry ACLs, extended attributes and resource forks.
+                    try FileManager.default.copyItem(at: target, to: ready)
+                    let handle = try FileHandle(forWritingTo: ready)
+                    defer { try? handle.close() }
+                    try handle.truncate(atOffset: 0)
+                    try handle.write(contentsOf: bytes)
+                    try handle.synchronize()
+                } else {
+                    try bytes.write(to: ready, options: .withoutOverwriting)
+                }
+                try beforeCommit()
+                try validate()
+                if approved.revision != nil {
+                    _ = try FileManager.default.replaceItemAt(target, withItemAt: ready)
+                } else {
+                    guard renamex_np(ready.path, target.path, UInt32(RENAME_EXCL)) == 0 else {
+                        throw NSError(domain: NSPOSIXErrorDomain, code: Int(errno))
+                    }
+                }
+            } catch { failure = error }
+        }
+        if let failure { throw failure }
+        if let coordinationError { throw coordinationError }
     }
 
     static func checkBeforeSaving(_ url: URL, saved: String?) -> Conflict {
-        guard hasChanged(url, since: saved) else { return .overwrite }
+        let current: Snapshot
+        do { current = try snapshot(url) }
+        catch { NSAlert(error: error).runModal(); return .cancel }
+        guard current.document.text != saved || current.revision == nil else { return .overwrite(current) }
         let alert = NSAlert()
         alert.alertStyle = .warning
         alert.messageText = "“\(url.lastPathComponent)” has changed or can no longer be read."
@@ -745,7 +843,7 @@ enum TextFile {
         alert.addButton(withTitle: "Discard My Changes")
         alert.addButton(withTitle: "Cancel")
         switch alert.runModal() {
-        case .alertFirstButtonReturn: return .overwrite
+        case .alertFirstButtonReturn: return .overwrite(current)
         case .alertSecondButtonReturn: return .reload
         default: return .cancel
         }
@@ -763,6 +861,9 @@ final class MarkdownEditor: NSWindowController, NSWindowDelegate, NSTextViewDele
     private(set) var saved: String?
     /// The file's date when it was read or last saved here.
     private var version: Date?
+    private static let reads = BackgroundTask.queue("Foldera.markdown-editor")
+    private let read = BackgroundTask(queue: MarkdownEditor.reads)
+    private(set) var loading = true
 
     /// `unsaved`: text typed elsewhere (the details pane) that couldn't be saved; it carries on here.
     @discardableResult static func show(_ file: URL, unsaved: String? = nil, previouslySaved: String? = nil) -> MarkdownEditor? {
@@ -777,13 +878,9 @@ final class MarkdownEditor: NSWindowController, NSWindowDelegate, NSTextViewDele
             existing.window?.makeKeyAndOrderFront(nil)
             return existing
         }
-        let text = TextFile.read(file)
-        guard text != nil || unsaved != nil else {
-            FileOps.report(["Foldera can't safely identify the text encoding of “\(file.lastPathComponent)”. Convert a copy to UTF-8 or Unicode with a byte-order mark before editing."])
-            return nil
-        }
-        let controller = MarkdownEditor(file: file, text: text)
+        let controller = MarkdownEditor(file: file, text: nil)
         if let unsaved { controller.takeOver(unsaved, saved: previouslySaved) }
+        else { controller.reload() }
         open.append(controller)
         controller.showWindow(nil)
         return controller
@@ -791,7 +888,9 @@ final class MarkdownEditor: NSWindowController, NSWindowDelegate, NSTextViewDele
 
     /// Conflicting drafts have separate windows, including when the file disappeared.
     private func takeOver(_ unsaved: String, saved baseline: String?) {
-        guard unsaved != editor.text.string else { return }
+        read.cancel()
+        loading = false
+        editor.text.isEditable = true
         // Moving the draft to another window must not accept external changes
         // that its author has not yet agreed to overwrite.
         saved = baseline
@@ -810,8 +909,8 @@ final class MarkdownEditor: NSWindowController, NSWindowDelegate, NSTextViewDele
         window.delegate = self
         window.representedURL = file
         saved = text
-        version = TextFile.version(of: file)
         editor.text.string = text ?? ""
+        editor.text.isEditable = false
         editor.text.delegate = self
         let split = NSSplitView()
         split.isVertical = true
@@ -827,7 +926,7 @@ final class MarkdownEditor: NSWindowController, NSWindowDelegate, NSTextViewDele
 
     required init?(coder: NSCoder) { fatalError("not used") }
 
-    private var dirty: Bool { editor.text.string != saved }
+    private var dirty: Bool { !loading && editor.text.string != saved }
     var draftText: String { editor.text.string }
 
     static func canCloseAll() -> Bool {
@@ -835,7 +934,7 @@ final class MarkdownEditor: NSWindowController, NSWindowDelegate, NSTextViewDele
     }
 
     private func updateTitle() {
-        window?.title = file.lastPathComponent + (dirty ? " — Edited" : "")
+        window?.title = file.lastPathComponent + (loading ? " — Loading…" : dirty ? " — Edited" : "")
         window?.isDocumentEdited = dirty
     }
 
@@ -853,13 +952,14 @@ final class MarkdownEditor: NSWindowController, NSWindowDelegate, NSTextViewDele
     /// ⌘S (File › Save, found through the responder chain).
     @objc func saveDocument(_ sender: Any?) {
         guard dirty else { return }
+        let approved: TextFile.Snapshot
         switch TextFile.checkBeforeSaving(file, saved: saved) {
         case .cancel: return
         case .reload: return reload()
-        case .overwrite: break
+        case .overwrite(let snapshot): approved = snapshot
         }
         do {
-            try TextFile.write(editor.text.string, to: file)
+            try TextFile.write(editor.text.string, to: file, expected: approved)
             saved = editor.text.string
             version = TextFile.version(of: file)
             updateTitle()
@@ -870,18 +970,37 @@ final class MarkdownEditor: NSWindowController, NSWindowDelegate, NSTextViewDele
 
     /// The file as it is on disk now.
     private func reload() {
-        guard let text = TextFile.read(file) else { return }
-        saved = text
-        version = TextFile.version(of: file)
-        editor.text.string = text
+        loading = true
+        editor.text.isEditable = false
         updateTitle()
-        preview.show(text, file: file)
+        preview.show("Loading…", file: file)
+        let file = self.file
+        read.runCancellable({ cancelled in
+            (TextFile.read(file, cancelled: cancelled), TextFile.version(of: file))
+        }) { [weak self] text, version in
+            guard let self else { return }
+            self.loading = false
+            guard let text else {
+                // An existing draft stays editable if a requested reload fails.
+                self.editor.text.isEditable = self.saved != nil
+                if self.saved == nil { self.saved = self.editor.text.string }
+                self.preview.show("Foldera couldn't read this file as UTF-8 or Unicode text (32 MiB maximum).", file: file)
+                self.updateTitle()
+                return
+            }
+            self.saved = text
+            self.version = version
+            self.editor.text.string = text
+            self.editor.text.isEditable = true
+            self.preview.show(text, file: file)
+            self.updateTitle()
+        }
     }
 
     /// Coming back to the window: a file changed by another app, and not
     /// edited here, is shown as it is now.
     func windowDidBecomeKey(_ notification: Notification) {
-        if !dirty, TextFile.version(of: file) != version { reload() }
+        if !dirty, !loading { reload() }
     }
 
     func windowShouldClose(_ sender: NSWindow) -> Bool {
@@ -903,6 +1022,7 @@ final class MarkdownEditor: NSWindowController, NSWindowDelegate, NSTextViewDele
     }
 
     func windowWillClose(_ notification: Notification) {
+        read.cancel()
         pending?.cancel()
         preview.cancel()
         Self.open.removeAll { $0 === self }

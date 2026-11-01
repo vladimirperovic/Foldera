@@ -149,7 +149,7 @@ import Testing
         try fm.createSymbolicLink(at: docs.appendingPathComponent("link.png"), withDestinationURL: other.appendingPathComponent("secret.png"))
 
         let pictures = LocalPictures()
-        pictures.serve(docs)
+        pictures.serve(docs, home: top)
         func served(_ reference: String) -> String? {
             pictures.file(for: URL(string: reference, relativeTo: pictures.base)!.absoluteURL)?.lastPathComponent
         }

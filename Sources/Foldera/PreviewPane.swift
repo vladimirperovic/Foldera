@@ -317,7 +317,9 @@ final class PreviewPane: NSView {
         scroll.isHidden = true
         markdownBox.isHidden = false
         if !editing {
-            markdownRead.run({ (TextFile.read(url), TextFile.version(of: url)) }) { [weak self] text, version in
+            markdownRead.runCancellable({ cancelled in
+                (TextFile.read(url, cancelled: cancelled), TextFile.version(of: url))
+            }) { [weak self] text, version in
                 guard let self, self.markdownFile?.key == url.key, !self.editing else { return }
                 self.markdownSaved = text ?? ""
                 self.markdownVersion = version
@@ -362,10 +364,10 @@ final class PreviewPane: NSView {
             finishEditing(movingOn: false)
         } else {
             guard let url = markdownFile, !ArchiveFolders.isInside(url) else { return }
-            guard loadMarkdown(url) else {
-                FileOps.report(["Foldera can't read “\(url.lastPathComponent)” as text."])
-                return
-            }
+            // Edit is enabled only after the background read completes. Use
+            // that complete snapshot; saving checks for external changes.
+            guard editButton.isEnabled else { return }
+            markdownRead.cancel()
             markdownEditor.text.string = markdownSaved
             setEditing(true)
             window?.makeFirstResponder(markdownEditor.text)
@@ -391,6 +393,7 @@ final class PreviewPane: NSView {
     /// True once what is in the editor is on disk, or was set aside on purpose.
     @discardableResult private func save() -> Bool {
         guard editing, let url = markdownFile, markdownEditor.text.string != markdownSaved else { return true }
+        let approved: TextFile.Snapshot
         switch TextFile.checkBeforeSaving(url, saved: markdownSaved) {
         case .cancel:
             return false
@@ -398,11 +401,11 @@ final class PreviewPane: NSView {
             guard loadMarkdown(url) else { return false }
             markdownEditor.text.string = markdownSaved
             return true
-        case .overwrite:
-            break
+        case .overwrite(let snapshot):
+            approved = snapshot
         }
         do {
-            try TextFile.write(markdownEditor.text.string, to: url)
+            try TextFile.write(markdownEditor.text.string, to: url, expected: approved)
             markdownSaved = markdownEditor.text.string
             markdownVersion = TextFile.version(of: url)
             return true

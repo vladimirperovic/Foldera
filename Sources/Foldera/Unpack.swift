@@ -263,10 +263,20 @@ enum ArchiveFolders {
     static func prepareForLaunch(at cache: URL = root, dispose: @escaping (URL) -> Void = { old in
         DispatchQueue.global(qos: .utility).async { FileOps.removeOwn(old) }
     }) throws {
-        guard FileOps.exists(cache) else { return }
-        let old = cache.deletingLastPathComponent().appendingPathComponent("Archives-old-\(UUID().uuidString)")
-        try FileManager.default.moveItem(at: cache, to: old)
-        dispose(old)
+        let parent = cache.deletingLastPathComponent()
+        // Snapshot stale siblings before rotating this launch's cache. Only
+        // names we generate qualify; an unrelated similarly named folder stays.
+        let stale = ((try? FileManager.default.contentsOfDirectory(at: parent,
+            includingPropertiesForKeys: nil)) ?? []).filter {
+            $0.lastPathComponent.hasPrefix("Archives-old-") &&
+                UUID(uuidString: String($0.lastPathComponent.dropFirst("Archives-old-".count))) != nil
+        }
+        defer { stale.forEach(dispose) }
+        if FileOps.exists(cache) {
+            let old = parent.appendingPathComponent("Archives-old-\(UUID().uuidString)")
+            try FileManager.default.moveItem(at: cache, to: old)
+            dispose(old)
+        }
     }
 }
 

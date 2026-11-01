@@ -93,14 +93,13 @@ enum ImageFiles {
             return Loaded(image: image, pixels: NSSize(width: rep.pixelsWide, height: rep.pixelsHigh))
         }
         let upright = uprightSize(of: source)
-        let largest = Int(max(upright?.width ?? 1, upright?.height ?? 1))
         let limit = ImageDecodeLimits.thumbnailDimension(width: Double(upright?.width ?? 1),
-            height: Double(upright?.height ?? 1), requested: maxPixels ?? largest)
+            height: Double(upright?.height ?? 1), requested: maxPixels ?? ImageDecodeLimits.dimension)
         let options: [CFString: Any] = [
             kCGImageSourceCreateThumbnailFromImageAlways: true,
             kCGImageSourceCreateThumbnailWithTransform: true,
             kCGImageSourceShouldCacheImmediately: true,
-            kCGImageSourceThumbnailMaxPixelSize: min(limit, largest),
+            kCGImageSourceThumbnailMaxPixelSize: limit,
         ]
         guard let cg = CGImageSourceCreateThumbnailAtIndex(source, 0, options as CFDictionary) else { return nil }
         let size = NSSize(width: cg.width, height: cg.height)
@@ -128,7 +127,7 @@ enum ImageFiles {
     static func uprightSize(of source: CGImageSource) -> NSSize? {
         guard let p = CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [CFString: Any],
               let width = p[kCGImagePropertyPixelWidth] as? Int, let height = p[kCGImagePropertyPixelHeight] as? Int,
-              width > 0, height > 0 else { return nil }
+              width > 0, height > 0, width <= Int(Int32.max), height <= Int(Int32.max) else { return nil }
         // Orientations 5–8 stand the picture on its side.
         let sideways = (p[kCGImagePropertyOrientation] as? Int).map { $0 >= 5 } ?? false
         return sideways ? NSSize(width: height, height: width) : NSSize(width: width, height: height)
@@ -263,10 +262,10 @@ enum ImageFiles {
             return true
         }
         let swap = { (size: NSSize) in turns % 2 == 1 ? NSSize(width: size.height, height: size.width) : size }
-        var turned = Loaded(image: image, pixels: loaded.pixels.map(swap), full: loaded.full.map(swap))
-        turned.limited = loaded.limited
-        turned.note = loaded.note
-        return turned
+        var result = Loaded(image: image, pixels: loaded.pixels.map(swap), full: loaded.full.map(swap))
+        result.limited = loaded.limited
+        result.note = loaded.note
+        return result
     }
 
     /// The picture itself at full size, turned as it is shown, as TIFF for

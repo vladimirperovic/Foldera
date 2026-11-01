@@ -107,10 +107,12 @@ enum Checksum {
             guard chunk.count <= byteLimit - count else { throw OpError("The checksum list exceeds the 16 MiB limit.") }
             count += chunk.count
             pending.append(chunk)
-            while let newline = pending.firstIndex(of: 10) {
-                try record(Data(pending[..<newline]))
-                pending = Data(pending[pending.index(after: newline)...])
+            var start = pending.startIndex
+            while let newline = pending[start...].firstIndex(of: 10) {
+                try record(Data(pending[start..<newline]))
+                start = pending.index(after: newline)
             }
+            pending = Data(pending[start...])
             guard pending.count <= maximumLineBytes else { throw OpError("A checksum line exceeds the 64 KiB limit.") }
         }
         if !pending.isEmpty { try record(pending) }

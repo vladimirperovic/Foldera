@@ -46,7 +46,7 @@ private func novemberPicture(_ url: URL, width: Int, height: Int, type: String =
         #expect(pictures.base.path == "/")
         let reference = try #require(URL(string: "../private.png", relativeTo: pictures.base)?.absoluteURL)
         let file = try #require(pictures.file(for: reference))
-        #expect(file.deletingLastPathComponent() == folder)
+        #expect(file.deletingLastPathComponent().path == folder.path)
         #expect(pictures.file(for: URL(string: "foldera-md://elsewhere/private.png")!) == nil)
     }
 

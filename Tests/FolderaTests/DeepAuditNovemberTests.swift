@@ -24,6 +24,26 @@ private func pixels(_ tiff: Data?) throws -> (width: Int, height: Int) {
     return (rep.pixelsWide, rep.pixelsHigh)
 }
 
+extension SyncTestIsolation {
+@Suite(.serialized) struct DeepAuditSyncHistory {
+    @Test func oneUnreadableRunDoesNotHideTheRestOfTheHistory() throws {
+        let files = try AuditFiles()
+        let previous = SyncLibrary.folder
+        SyncLibrary.folder = files.url("Library")
+        defer { SyncLibrary.folder = previous }
+        let setup = SyncWindow.Setup(left: files.url("Left").path, right: files.url("Right").path, mode: .update)
+        let older = SyncLibrary.Record(setup: setup, started: Date(timeIntervalSince1970: 1_700_000_000))
+        let newer = SyncLibrary.Record(setup: setup, started: Date(timeIntervalSince1970: 1_700_000_100))
+        try SyncLibrary.append(older)
+        try SyncLibrary.append(newer)
+        // A damaged run between the two, as a full disk or another version may leave one.
+        let history = SyncLibrary.folder.appendingPathComponent("History")
+        try Data("{ not json".utf8).write(to: history.appendingPathComponent("1700000050.000-\(UUID().uuidString).json"))
+        #expect(try SyncLibrary.summaries().map(\.id) == [newer.id, older.id])
+    }
+}
+}
+
 @Suite struct DeepAuditNovember {
     @Test func copyImageKeepsAPictureWithinItsBudgetAndAFittingOneWhole() throws {
         let files = try AuditFiles(), url = files.url("photo.png")

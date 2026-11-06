@@ -197,10 +197,13 @@ enum SyncLibrary {
     }
 
     /// Old histories without sidecars remain readable; callers run this off the main thread.
+    /// A run whose file can't be read (damaged, or left by another version)
+    /// is left out: one bad file used to empty the whole Sync History window.
     static func summaries(limit: Int = 200) throws -> [Record] {
-        try historyFiles().prefix(max(0, limit)).map { file in
+        try historyFiles().prefix(max(0, limit)).compactMap { file in
             let small = file.deletingLastPathComponent().appendingPathComponent("Summaries/" + file.lastPathComponent)
-            var record = try JSONDecoder().decode(Record.self, from: Data(contentsOf: FileOps.exists(small) ? small : file))
+            guard let data = try? Data(contentsOf: FileOps.exists(small) ? small : file),
+                  var record = try? JSONDecoder().decode(Record.self, from: data) else { return nil }
             record.events = []
             record.failureCount = record.failureCount ?? record.failures.count
             record.failures = Array(record.failures.prefix(3))

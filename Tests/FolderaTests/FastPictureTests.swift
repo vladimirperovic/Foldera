@@ -171,6 +171,14 @@ private func source(_ url: URL) throws -> CGImageSource {
         return Date().timeIntervalSince(start) * 1000
     }
 
+    /// The quickest of a few tries: other suites running alongside can slow
+    /// one try down, but rarely every one of them.
+    private func fastest(_ work: () -> Void) -> Double {
+        var best = Double.infinity
+        for _ in 0..<3 { best = min(best, milliseconds(work)) }
+        return best
+    }
+
     /// The kept thumbnail against decoding, and ImageIO against Quick Look, on 12 MP photos.
     @Test func readingTheKeptThumbnailIsFarQuickerThanDecoding() throws {
         let dir = try folder()
@@ -178,10 +186,10 @@ private func source(_ url: URL) throws -> CGImageSource {
         let urls = (1...3).map { dir.appendingPathComponent("photo \($0).jpg") }
         for url in urls { try photo(url, width: 4000, height: 3000) }
 
-        let kept = urls.map { url in milliseconds { _ = ImageFiles.storedThumbnail(url, maxPixels: 256) } }
-        let decoded = urls.map { url in milliseconds { _ = try? Thumbnails.decode(source(url), pixels: 256) } }
+        let kept = urls.map { url in fastest { _ = ImageFiles.storedThumbnail(url, maxPixels: 256) } }
+        let decoded = urls.map { url in fastest { _ = try? Thumbnails.decode(source(url), pixels: 256) } }
         let whole = milliseconds { _ = ImageFiles.decodeBitmap(urls[0]) }
-        // Far apart, so a busy machine doesn't make this flaky.
+        // Far apart, and each the quickest of three tries, so a busy machine doesn't make this flaky.
         #expect(kept.reduce(0, +) * 3 < decoded.reduce(0, +), "kept \(kept) ms, decoded \(decoded) ms")
 
         // Why a JPEG's EXIF is looked at first: asked for a thumbnail one doesn't keep, ImageIO makes it from the photo.

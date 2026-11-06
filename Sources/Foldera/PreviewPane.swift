@@ -526,10 +526,9 @@ final class PreviewPane: NSView {
             rows.append(("Pages", Format.count(Int64(document.numberOfPages))))
         }
         if let item = MDItemCreateWithURL(nil, url as CFURL) {
-            if let seconds = (MDItemCopyAttribute(item, kMDItemDurationSeconds) as? NSNumber)?.doubleValue, seconds > 0 {
-                let s = Int(seconds.rounded())
-                rows.append(("Length", s >= 3600 ? String(format: "%d:%02d:%02d", s / 3600, s / 60 % 60, s % 60)
-                                                  : String(format: "%d:%02d", s / 60, s % 60)))
+            if let seconds = (MDItemCopyAttribute(item, kMDItemDurationSeconds) as? NSNumber)?.doubleValue,
+               let length = runningTime(seconds) {
+                rows.append(("Length", length))
             }
             if let authors = MDItemCopyAttribute(item, kMDItemAuthors) as? [String], !authors.isEmpty {
                 rows.append(("Authors", authors.joined(separator: ", ")))
@@ -539,6 +538,16 @@ final class PreviewPane: NSView {
             }
         }
         return rows
+    }
+
+    /// "3:07" or "1:02:45". Spotlight reports what the file's header claims:
+    /// a damaged or hostile video can claim a duration beyond any integer,
+    /// which shows nothing rather than trapping the conversion.
+    static func runningTime(_ seconds: Double) -> String? {
+        guard seconds.isFinite, seconds > 0, seconds < 1e9 else { return nil }
+        let s = Int(seconds.rounded())
+        return s >= 3600 ? String(format: "%ld:%02ld:%02ld", s / 3600, s / 60 % 60, s % 60)
+                         : String(format: "%ld:%02ld", s / 60, s % 60)
     }
 
     /// A picture's pixel size standing up, alone, for the status bar; nil

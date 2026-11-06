@@ -271,25 +271,41 @@ enum ImageFiles {
     /// The picture itself at full size, turned as it is shown, as TIFF for
     /// the clipboard: what an editor, a document or a message pastes. Nil for
     /// what ImageIO doesn't read (SVG). Safe off the main thread.
-    static func clipboardPicture(_ url: URL, quarterTurns: Int) -> Data? {
-        // Without a largest size, the "thumbnail" is the whole picture, stood up by its orientation.
+    static func clipboardPicture(_ url: URL, quarterTurns: Int,
+                                 pixelLimit: Int = ImageDecodeLimits.clipboardPixels) -> Data? {
         guard let source = CGImageSourceCreateWithURL(url as CFURL, [kCGImageSourceShouldCache: false] as CFDictionary),
-              CGImageSourceGetCount(source) > 0,
-              let picture = CGImageSourceCreateThumbnailAtIndex(source, 0, [
-                  kCGImageSourceCreateThumbnailFromImageAlways: true,
-                  kCGImageSourceCreateThumbnailWithTransform: true,
-                  kCGImageSourceShouldCacheImmediately: true,
-              ] as CFDictionary),
+              CGImageSourceGetCount(source) > 0 else { return nil }
+        var options: [CFString: Any] = [
+            kCGImageSourceCreateThumbnailFromImageAlways: true,
+            kCGImageSourceCreateThumbnailWithTransform: true,
+            kCGImageSourceShouldCacheImmediately: true,
+        ]
+        // Without a largest size, the "thumbnail" is the whole picture, stood up
+        // by its orientation. Past the clipboard's budget (or with no size to
+        // check) it is decoded only as large as the budget allows.
+        if let size = ImageDecodeLimits.size(source, at: 0) {
+            if let side = ImageDecodeLimits.clipboardSide(width: size.width, height: size.height, pixelLimit: pixelLimit) {
+                options[kCGImageSourceThumbnailMaxPixelSize] = side
+            }
+        } else {
+            options[kCGImageSourceThumbnailMaxPixelSize] = max(1, Int(Double(max(pixelLimit, 1)).squareRoot()))
+        }
+        guard let picture = CGImageSourceCreateThumbnailAtIndex(source, 0, options as CFDictionary),
               let shown = turned(picture, quarterTurns: quarterTurns) else { return nil }
         return NSBitmapImageRep(cgImage: shown).tiffRepresentation
     }
 
     /// Prepare the fallback too before touching the clipboard. Both callers
     /// use this off-main, including formats ImageIO does not decode (SVG).
-    static func clipboardData(_ url: URL, quarterTurns: Int) -> Data? {
-        if let data = clipboardPicture(url, quarterTurns: quarterTurns) { return data }
-        guard let image = NSImage(contentsOf: url) else { return nil }
-        return rotated(Loaded(image: image, pixels: nil), quarterTurns: quarterTurns).image.tiffRepresentation
+    static func clipboardData(_ url: URL, quarterTurns: Int,
+                              pixelLimit: Int = ImageDecodeLimits.clipboardPixels) -> Data? {
+        if let data = clipboardPicture(url, quarterTurns: quarterTurns, pixelLimit: pixelLimit) { return data }
+        // As in decodeOther: a raster ImageIO reads but couldn't decode within
+        // its limits must never be retried through an unbounded NSImage decode.
+        guard !Thumbnails.readsHere(url), let image = NSImage(contentsOf: url),
+              let picture = ImageDecodeLimits.rasterized(image, pixelLimit: pixelLimit),
+              let shown = turned(picture, quarterTurns: quarterTurns) else { return nil }
+        return NSBitmapImageRep(cgImage: shown).tiffRepresentation
     }
 
     @discardableResult static func writeClipboard(_ data: Data?, to pasteboard: NSPasteboard) -> Bool {
@@ -315,6 +331,16 @@ enum ImageFiles {
         return context.makeImage()
     }
 
+    /// "1/250 s" or "2.5 s". The value comes from the file: one too small,
+    /// too large or not a number shows nothing, rather than trapping when
+    /// its reciprocal is turned into an integer.
+    static func exposureTime(_ seconds: Double) -> String? {
+        guard seconds.isFinite, seconds > 0 else { return nil }
+        guard seconds < 1 else { return seconds < 1e6 ? "\(seconds) s" : nil }
+        let inverse = (1 / seconds).rounded()
+        return inverse.isFinite && inverse < 1e9 ? "1/\(Int(inverse)) s" : nil
+    }
+
     /// Name, size, and what the camera wrote down.
     static func details(_ url: URL, pixels: NSSize?) -> [(String, String)] {
         var rows: [(String, String)] = [("Name", url.lastPathComponent), ("Folder", Format.path(url.deletingLastPathComponent()))]
@@ -333,8 +359,8 @@ enum ImageFiles {
         if !camera.isEmpty { rows.append(("Camera", camera)) }
         if let lens = exif[kCGImagePropertyExifLensModel] as? String { rows.append(("Lens", lens)) }
         var exposure: [String] = []
-        if let t = exif[kCGImagePropertyExifExposureTime] as? Double, t > 0 {
-            exposure.append(t < 1 ? "1/\(Int((1 / t).rounded())) s" : "\(t) s")
+        if let t = exif[kCGImagePropertyExifExposureTime] as? Double, let text = exposureTime(t) {
+            exposure.append(text)
         }
         if let f = exif[kCGImagePropertyExifFNumber] as? Double { exposure.append(String(format: "f/%.1f", f)) }
         if let iso = (exif[kCGImagePropertyExifISOSpeedRatings] as? [Int])?.first { exposure.append("ISO \(iso)") }

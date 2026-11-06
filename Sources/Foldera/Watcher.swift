@@ -27,7 +27,10 @@ final class DirectoryWatcher {
         openTarget(ready: ready)
     }
 
-    private func openTarget(ready: (() -> Void)?) {
+    /// `readyOnFailure`: whether `ready` also runs when the folder can't be
+    /// opened. A first attempt says so (the list shows why); a retry that
+    /// finds it still missing has nothing new to tell.
+    private func openTarget(ready: (() -> Void)?, readyOnFailure: Bool = true) {
         guard let url = target else { return }
         opening = true
         let generation = self.generation
@@ -43,7 +46,7 @@ final class DirectoryWatcher {
                 self.opening = false
                 self.openTask = nil
                 guard fd >= 0 else {
-                    ready?()
+                    if readyOnFailure { ready?() }
                     self.retryOpening()
                     return
                 }
@@ -58,12 +61,15 @@ final class DirectoryWatcher {
 
     /// A renamed/deleted inode never starts reporting events for its
     /// replacement. Retry a temporarily missing path with bounded backoff.
+    /// Only a folder that is back counts as a change: reporting every failed
+    /// retry had a deleted folder (and each tree branch under it) read again
+    /// every few seconds for as long as it stayed on screen.
     private func retryOpening() {
         let generation = self.generation
         let work = DispatchWorkItem { [weak self] in
             guard let self, generation == self.generation else { return }
             self.retry = nil
-            self.openTarget(ready: { [weak self] in self?.changed() })
+            self.openTarget(ready: { [weak self] in self?.changed() }, readyOnFailure: false)
         }
         retry = work
         DispatchQueue.main.asyncAfter(deadline: .now() + retryDelay, execute: work)

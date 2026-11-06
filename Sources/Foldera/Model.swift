@@ -399,19 +399,6 @@ enum Folders {
             }
             .sorted { $0.lastPathComponent.localizedStandardCompare($1.lastPathComponent) == .orderedAscending }
     }
-
-    /// Whether there is at least one folder inside, without listing everything.
-    static func hasSubfolder(_ url: URL) -> Bool {
-        guard let e = FileManager.default.enumerator(
-            at: url, includingPropertiesForKeys: [.isDirectoryKey, .isPackageKey],
-            options: [.skipsHiddenFiles, .skipsSubdirectoryDescendants, .skipsPackageDescendants]
-        ) else { return false }
-        while let child = e.nextObject() as? URL {
-            let v = try? child.resourceValues(forKeys: [.isDirectoryKey, .isPackageKey])
-            if v?.isDirectory == true && v?.isPackage != true { return true }
-        }
-        return false
-    }
 }
 
 enum SortKey: String {
